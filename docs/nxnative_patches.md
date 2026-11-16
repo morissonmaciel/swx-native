@@ -65,7 +65,12 @@ Make the change in a scratch copy of the core, then
 `diff -u` (or `git diff --no-index`) old vs new from inside `core/nxnative`
 so paths are relative to it. Keep patches minimal (one concern each),
 headered with why (not just what), and reproducible from a pristine snapshot:
-the script applies onto a fresh tree with `-p1`. Every patch must declare
+the script applies onto a fresh tree with `-p1`. Order in `series` is
+application order: a patch whose context depends on another patch's lines
+goes after it (new patches go last unless rebased). A patch that fails only
+because it runs before its context lands is a series-order bug — move it,
+don't rewrite it.
+Every patch must declare
 `# verify:` sentinel headers — one `grep -F` literal per hunk region (plus a
 bare path for any new file) — chosen so they are absent on the pristine tree
 and present only when the patch landed; the script trusts nothing else.

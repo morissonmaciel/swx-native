@@ -1,0 +1,98 @@
+# SWX upload per-texture cost split (diag only, no behavior change).
+# Times each texture's full path cost (direct GPU reads vs GPU-deswizzle
+# encode vs CPU fallback) including its own setup (newTexture, res_add,
+# dirty-protect, need calc, staging alloc, encode calls, blit records).
+# Decides whether the burst cost is per-texture bookkeeping (then the fix is
+# batching it) or the copies themselves. Cumulative counters, per-frame
+# deltas on the longframe line (parsed by log_report.py).
+# verify: dm/gfx/nvn/nvn_mtl.m:mtl_swx_up_path_ns
+# verify: dm/gfx/nvn/hle_nvn.c:up_pdi_ms
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -1598,6 +1598,8 @@
+ static uint64_t swx_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+ static _Atomic uint64_t g_swx_up_direct, g_swx_up_enc, g_swx_up_cpu;
+ void mtl_swx_up_paths(uint64_t *direct, uint64_t *enc, uint64_t *cpu) { *direct = atomic_load(&g_swx_up_direct); *enc = atomic_load(&g_swx_up_enc); *cpu = atomic_load(&g_swx_up_cpu); }
++static _Atomic uint64_t g_swx_up_direct_ns, g_swx_up_enc_ns, g_swx_up_cpu_ns;
++void mtl_swx_up_path_ns(uint64_t *direct_ns, uint64_t *enc_ns, uint64_t *cpu_ns) { *direct_ns = atomic_load(&g_swx_up_direct_ns); *enc_ns = atomic_load(&g_swx_up_enc_ns); *cpu_ns = atomic_load(&g_swx_up_cpu_ns); }
+ void mtl_swx_up_times(uint64_t *a_ns, uint64_t *a_n, uint64_t *rc_ns, uint64_t *cb_ns, uint64_t *sw_ns, uint64_t *sw_n, uint64_t *dr_ns, uint64_t *dr_n, uint64_t *oq_ns, uint64_t *oq_n) {
+     *a_ns = atomic_load(&g_swx_up_alloc_ns); *a_n = atomic_load(&g_swx_up_alloc_n); *rc_ns = atomic_load(&g_swx_up_rescommit_ns); *cb_ns = atomic_load(&g_swx_up_cbend_ns);
+     *sw_ns = atomic_load(&g_swx_up_slotwait_ns); *sw_n = atomic_load(&g_swx_up_slotwait_n); *dr_ns = atomic_load(&g_swx_up_drain_ns); *dr_n = atomic_load(&g_swx_up_drain_n);
+@@ -3737,6 +3739,7 @@
+     return need;
+ }
+ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep, id<MTLTexture> prev, const void *span, uint64_t since, unsigned *taken) {
++    uint64_t t_swx0 = swx_now_ns();
+     MTLTextureDescriptor *d = tex_desc(t, 1);
+     if (!d) return nil;
+     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
+@@ -3802,7 +3805,7 @@
+                     if(nvn_deswz_gpu_direct_m4(g_up_ce,g_up_ct,params,poff,(__bridge id<MTLBuffer>)mb,mo,&t->d,l,view)){ok=0;break;}
+                     g_direct_dispatches++;
+                 }
+-                if(ok){[g_up_texs addObject:mt];g_direct_uploads++;atomic_fetch_add(&g_swx_up_direct, 1);if(!g_cb)up_flush();return mt;}
++                if(ok){[g_up_texs addObject:mt];g_direct_uploads++;atomic_fetch_add(&g_swx_up_direct, 1);if(!g_cb)up_flush();atomic_fetch_add(&g_swx_up_direct_ns, swx_now_ns() - t_swx0);return mt;}
+                 // Any encoded writes must finish before fallback copies replace
+                 // them; both versions read the same source and write all texels.
+                 [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+@@ -3834,7 +3837,7 @@
+             [g_up_texs addObject:mt];
+             if (!g_cb) up_flush();
+             free(need);
+-            atomic_fetch_add(&g_swx_up_enc, 1);
++            atomic_fetch_add(&g_swx_up_enc, 1); atomic_fetch_add(&g_swx_up_enc_ns, swx_now_ns() - t_swx0);
+             return mt;
+         }
+         g_nup_blits = nb0;   // Roll back the copies already recorded for this texture: the already-encoded deswizzle only writes the staging area and is harmless; this texture takes the CPU path below instead
+@@ -3875,7 +3878,7 @@
+     }
+     free(part); free(need);
+     up_flush();
+-    atomic_fetch_add(&g_swx_up_cpu, 1);
++    atomic_fetch_add(&g_swx_up_cpu, 1); atomic_fetch_add(&g_swx_up_cpu_ns, swx_now_ns() - t_swx0);
+     return mt;
+ }
+ // ---------- Placement sparse textures ----------
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2011,10 +2011,10 @@
+ __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+ // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
+ #define LFN 16
+-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, up_batches, up_split, up_an, up_dn; unsigned up_direct, up_enc, up_cpu; double up_ams, up_rcms, up_cbms, up_swms, up_drms, up_oqms; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; up_batches/split: upload batches this frame, flushes triggered by SWX count split; up_*ms: per-frame submit-thread upload cost split (alloc/rescommit/commit/drain/slotwait/oldq)
++typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, up_batches, up_split, up_an, up_dn; unsigned up_direct, up_enc, up_cpu; double up_pdi_ms, up_pen_ms, up_pcp_ms, up_ams, up_rcms, up_cbms, up_swms, up_drms, up_oqms; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; up_batches/split: upload batches this frame, flushes triggered by SWX count split; up_*ms: per-frame submit-thread upload cost split (alloc/rescommit/commit/drain/slotwait/oldq)
+ static lf_rec g_lf[LFN];
+ __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
+-extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads); extern void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches); extern void mtl_swx_up_times(uint64_t *a_ns, uint64_t *a_n, uint64_t *rc_ns, uint64_t *cb_ns, uint64_t *sw_ns, uint64_t *sw_n, uint64_t *dr_ns, uint64_t *dr_n, uint64_t *oq_ns, uint64_t *oq_n); extern void mtl_swx_up_paths(uint64_t *direct, uint64_t *enc, uint64_t *cpu);
++extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads); extern void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches); extern void mtl_swx_up_times(uint64_t *a_ns, uint64_t *a_n, uint64_t *rc_ns, uint64_t *cb_ns, uint64_t *sw_ns, uint64_t *sw_n, uint64_t *dr_ns, uint64_t *dr_n, uint64_t *oq_ns, uint64_t *oq_n); extern void mtl_swx_up_paths(uint64_t *direct, uint64_t *enc, uint64_t *cpu); extern void mtl_swx_up_path_ns(uint64_t *direct_ns, uint64_t *enc_ns, uint64_t *cpu_ns);
+ static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
+ static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
+ // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
+@@ -2695,12 +2695,12 @@
+         static uint64_t plib, ppso; uint64_t lib_, pso_; mtl_create_stats(&lib_, &pso_);
+         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
+         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
+-            static uint64_t plns, ppns, pup, prup, pub, phy, pupb, pups, pa_ns, pa_n, prc_ns, pcb_ns, psw_ns, psw_n, pdr_ns, pdr_n, poq_ns, poq_n, pdi, pen, pcp; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, ub_, sp_, a_ns, a_n, rc_ns, cb_ns, sw_ns, sw_n, dr_ns, dr_n, oq_ns, oq_n, di_, en_, cp_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); mtl_swx_up_batches(&ub_, &sp_); mtl_swx_up_times(&a_ns, &a_n, &rc_ns, &cb_ns, &sw_ns, &sw_n, &dr_ns, &dr_n, &oq_ns, &oq_n); mtl_swx_up_paths(&di_, &en_, &cp_);
++            static uint64_t plns, ppns, pup, prup, pub, phy, pupb, pups, pa_ns, pa_n, prc_ns, pcb_ns, psw_ns, psw_n, pdr_ns, pdr_n, poq_ns, poq_n, pdi, pen, pcp, pdin, penn, pcpn; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, ub_, sp_, a_ns, a_n, rc_ns, cb_ns, sw_ns, sw_n, dr_ns, dr_n, oq_ns, oq_n, di_, en_, cp_, din_, enn_, cpn_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); mtl_swx_up_batches(&ub_, &sp_); mtl_swx_up_times(&a_ns, &a_n, &rc_ns, &cb_ns, &sw_ns, &sw_n, &dr_ns, &dr_n, &oq_ns, &oq_n); mtl_swx_up_paths(&di_, &en_, &cp_); mtl_swx_up_path_ns(&din_, &enn_, &cpn_);
+             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
+             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
+-            r->hy = (unsigned)(hy - phy); r->up_batches = (unsigned)(ub_ - pupb); r->up_split = (unsigned)(sp_ - pups); r->up_direct = (unsigned)(di_ - pdi); r->up_enc = (unsigned)(en_ - pen); r->up_cpu = (unsigned)(cp_ - pcp); r->up_an = (unsigned)(a_n - pa_n); r->up_dn = (unsigned)(dr_n - pdr_n);
++            r->hy = (unsigned)(hy - phy); r->up_batches = (unsigned)(ub_ - pupb); r->up_split = (unsigned)(sp_ - pups); r->up_direct = (unsigned)(di_ - pdi); r->up_enc = (unsigned)(en_ - pen); r->up_cpu = (unsigned)(cp_ - pcp); r->up_pdi_ms = (din_ - pdin) / 1e6; r->up_pen_ms = (enn_ - penn) / 1e6; r->up_pcp_ms = (cpn_ - pcpn) / 1e6; r->up_an = (unsigned)(a_n - pa_n); r->up_dn = (unsigned)(dr_n - pdr_n);
+             r->up_ams = (a_ns - pa_ns) / 1e6; r->up_rcms = (rc_ns - prc_ns) / 1e6; r->up_cbms = (cb_ns - pcb_ns) / 1e6; r->up_swms = (sw_ns - psw_ns) / 1e6; r->up_drms = (dr_ns - pdr_ns) / 1e6; r->up_oqms = (oq_ns - poq_ns) / 1e6;
+-            plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; pupb = ub_; pups = sp_; pdi = di_; pen = en_; pcp = cp_; pa_ns = a_ns; pa_n = a_n; prc_ns = rc_ns; pcb_ns = cb_ns; psw_ns = sw_ns; psw_n = sw_n; pdr_ns = dr_ns; pdr_n = dr_n; poq_ns = oq_ns; poq_n = oq_n;
++            plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; pupb = ub_; pups = sp_; pdin = din_; penn = enn_; pcpn = cpn_; pdi = di_; pen = en_; pcp = cp_; pa_ns = a_ns; pa_n = a_n; prc_ns = rc_ns; pcb_ns = cb_ns; psw_ns = sw_ns; psw_n = sw_n; pdr_ns = dr_ns; pdr_n = dr_n; poq_ns = oq_ns; poq_n = oq_n;
+         }
+         plib = lib_; ppso = pso_;
+         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
+@@ -2716,9 +2716,9 @@
+           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
+           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
+           if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[768];
+-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms in %u batches (%u split) [upload alloc %.1f ms (%u bufs) + rescommit %.1f ms + commit %.1f ms + drain %.1f ms (%u) + slotwait %.1f ms + oldq %.1f ms + path %u/%u/%u]; draws with a hybrid pipeline %u",
++              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms in %u batches (%u split) [upload alloc %.1f ms (%u bufs) + rescommit %.1f ms + commit %.1f ms + drain %.1f ms (%u) + slotwait %.1f ms + oldq %.1f ms + path %u/%u/%u (%0.1f/%0.1f/%0.1f ms)]; draws with a hybrid pipeline %u",
+                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->up_batches, r->up_split,
+-                       r->up_ams, r->up_an, r->up_rcms, r->up_cbms, r->up_drms, r->up_dn, r->up_swms, r->up_oqms, r->up_direct, r->up_enc, r->up_cpu, r->hy);
++                       r->up_ams, r->up_an, r->up_rcms, r->up_cbms, r->up_drms, r->up_dn, r->up_swms, r->up_oqms, r->up_direct, r->up_enc, r->up_cpu, r->up_pdi_ms, r->up_pen_ms, r->up_pcp_ms, r->hy);
+               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
+               dm_longframe_note(b); } }
+         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }

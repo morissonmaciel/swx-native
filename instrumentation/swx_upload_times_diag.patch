@@ -1,0 +1,138 @@
+# SWX upload timing instrumentation (diag only, no behavior change).
+# Splits the submit-thread upload cost per frame into alloc / rescommit /
+# commit / drain / slotwait / oldq, e.g. "alloc 3.1 ms (4 bufs) + rescommit
+# 4.2 ms + commit 1.0 ms + drain 0.0 ms + slotwait 0.0 ms + oldq 0.0 ms".
+# Decides the pooled-staging slice with numbers instead of theory. Cumulative
+# counters, per-frame deltas on the longframe line (parsed by log_report).
+# verify: dm/gfx/nvn/nvn_mtl.m:mtl_swx_up_times
+# verify: dm/gfx/nvn/hle_nvn.c:up_ams
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -1585,7 +1585,30 @@
+ // Old-queue command buffers (readback / diagnostics / present; to be deleted once M4-4 and M4-5 are migrated away): uploads are already on the Metal 4 queue, and there is no ordering guarantee between the two queues -
+ // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
+ static void up_wait_zero(_Atomic int *v, int site);
+-static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return cl_cb(); }
++// SWX upload timing instrumentation (diag only, no behavior change): per-flush submit-thread
++// cost split, so one burst frame reads e.g. "alloc 3.1 ms + rescommit 4.2 ms +
++// commit 1.0 ms + drain 0.0 ms + slotwait 0.0 ms + oldq 0.0 ms" instead of one
++// submit number. Cumulative counters; hle_nvn.c takes per-frame deltas.
++static _Atomic uint64_t g_swx_up_alloc_ns, g_swx_up_alloc_n;
++static _Atomic uint64_t g_swx_up_rescommit_ns;
++static _Atomic uint64_t g_swx_up_cbend_ns;
++static _Atomic uint64_t g_swx_up_slotwait_ns, g_swx_up_slotwait_n;
++static _Atomic uint64_t g_swx_up_drain_ns, g_swx_up_drain_n;
++static _Atomic uint64_t g_swx_up_oldq_ns, g_swx_up_oldq_n;
++static uint64_t swx_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
++void mtl_swx_up_times(uint64_t *a_ns, uint64_t *a_n, uint64_t *rc_ns, uint64_t *cb_ns, uint64_t *sw_ns, uint64_t *sw_n, uint64_t *dr_ns, uint64_t *dr_n, uint64_t *oq_ns, uint64_t *oq_n) {
++    *a_ns = atomic_load(&g_swx_up_alloc_ns); *a_n = atomic_load(&g_swx_up_alloc_n); *rc_ns = atomic_load(&g_swx_up_rescommit_ns); *cb_ns = atomic_load(&g_swx_up_cbend_ns);
++    *sw_ns = atomic_load(&g_swx_up_slotwait_ns); *sw_n = atomic_load(&g_swx_up_slotwait_n); *dr_ns = atomic_load(&g_swx_up_drain_ns); *dr_n = atomic_load(&g_swx_up_drain_n);
++    *oq_ns = atomic_load(&g_swx_up_oldq_ns); *oq_n = atomic_load(&g_swx_up_oldq_n);
++}
++static id<MTLCommandBuffer> q_cb(void) {
++    if (on_sub_thread()) {
++        up_flush();
++        { uint64_t t0 = swx_now_ns(); rec_drain(); atomic_fetch_add(&g_swx_up_drain_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_drain_n, 1); }
++        { uint64_t t0 = swx_now_ns(); up_wait_zero(&g_up_pending, WS_OLDQ); atomic_fetch_add(&g_swx_up_oldq_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_oldq_n, 1); }
++    }
++    return cl_cb();
++}
+ static post_op *g_post; static int g_npost, g_postcap;
+ // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
+ // (command buffers, encoders, pass descriptors, etc.) are never released unless put in a pool. Measured on the character select screen of a real iOS device: the host heap grows by about 47 objects per frame, 0.22 MiB/s.
+@@ -3365,12 +3388,13 @@
+         atomic_fetch_sub(&g_up_pending, 1);
+         up_wake();
+     }];
+-    res_commit();
+-    cb_end(cb, nil);
++    { uint64_t t0 = swx_now_ns(); res_commit(); atomic_fetch_add(&g_swx_up_rescommit_ns, swx_now_ns() - t0); }
++    { uint64_t t0 = swx_now_ns(); cb_end(cb, nil);
+     rec_commit_upload(cb, o);
+     // Outside a submission nothing else hands the encode thread its current block until the next submission, so a batch flushed on the spot stayed a record and every wait for it
+     // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
+     if (!g_cb) rec_publish();
++    atomic_fetch_add(&g_swx_up_cbend_ns, swx_now_ns() - t0); }
+     if (up_reuse()) g_up_slot_want[slot] = MAX(g_up_slot_want[slot], g_up_batch_bytes);
+     g_up_cb = nil;
+     up_diag();
+@@ -3385,8 +3409,10 @@
+     // The slot's last batch may still be only a commit record in the encode thread's current block (rec_commit_upload), which is handed over when it fills or the submission drains:
+     // waiting without handing it over waited for a batch never committed. Little Nightmares II's first render passes zero-filled enough new targets to come round to a slot within one
+     // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
++    { uint64_t t0 = swx_now_ns();
+     if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
+     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
++    atomic_fetch_add(&g_swx_up_slotwait_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_slotwait_n, 1); }
+     atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
+     g_up_batch_bytes = 0; g_up_over_used = 0;
+     [g_up_alloc4[slot] reset];
+@@ -3434,7 +3460,7 @@
+         size_t demand = up_reuse() ? MAX(need, g_up_slot_want[g_up_cur_slot]) : need;
+         size_t want = UP_SLOT_BLOCK; while (want < demand) want <<= 1;
+         if (*sb && (*sb).length < want) { defer_obj_release(*sb); *sb = nil; }   // the slot's previous batch has finished (up_begin waited for it)
+-        if (!*sb) { *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); res_add(*sb); g_up_blocks_new++; }
++        if (!*sb) { uint64_t t0 = swx_now_ns(); *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); res_add(*sb); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+         g_up_block = *sb; g_up_block_size = (*sb).length; g_up_block_off = 0;
+         g_up_staging_bytes += (*sb).length;
+     }
+@@ -3446,12 +3472,12 @@
+             if (!up_retained(g_up_block, g_up_cur_slot)) { if (!g_up_keep) g_up_keep = [NSMutableArray array]; [g_up_keep addObject:g_up_block]; } }
+         if (up_reuse() && need <= UP_BLOCK_SIZE && !g_up_over_used) {
+             __strong id<MTLBuffer> *sb = &g_up_slot_over[g_up_cur_slot];
+-            if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
++            if (!*sb) { uint64_t t0 = swx_now_ns(); *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+             g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1;
+         } else {
+             g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
+-            g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
+-            res_add(g_up_block); g_up_blocks_new++;
++            { uint64_t t0 = swx_now_ns(); g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
++            res_add(g_up_block); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+         }
+         if (!g_up_block) MDIE("failed to create the swizzled-upload staging block %#zx", g_up_block_size);
+         g_up_staging_bytes += g_up_block_size;
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2011,10 +2011,10 @@
+ __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+ // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
+ #define LFN 16
+-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, up_batches, up_split; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; up_batches/split: upload batches this frame, flushes triggered by SWX count split
++typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, up_batches, up_split, up_an, up_dn; double up_ams, up_rcms, up_cbms, up_swms, up_drms, up_oqms; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; up_batches/split: upload batches this frame, flushes triggered by SWX count split; up_*ms: per-frame submit-thread upload cost split (alloc/rescommit/commit/drain/slotwait/oldq)
+ static lf_rec g_lf[LFN];
+ __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
+-extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads); extern void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches);
++extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads); extern void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches); extern void mtl_swx_up_times(uint64_t *a_ns, uint64_t *a_n, uint64_t *rc_ns, uint64_t *cb_ns, uint64_t *sw_ns, uint64_t *sw_n, uint64_t *dr_ns, uint64_t *dr_n, uint64_t *oq_ns, uint64_t *oq_n);
+ static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
+ static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
+ // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
+@@ -2695,10 +2695,12 @@
+         static uint64_t plib, ppso; uint64_t lib_, pso_; mtl_create_stats(&lib_, &pso_);
+         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
+         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
+-            static uint64_t plns, ppns, pup, prup, pub, phy, pupb, pups; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, ub_, sp_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); mtl_swx_up_batches(&ub_, &sp_);
++            static uint64_t plns, ppns, pup, prup, pub, phy, pupb, pups, pa_ns, pa_n, prc_ns, pcb_ns, psw_ns, psw_n, pdr_ns, pdr_n, poq_ns, poq_n; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, ub_, sp_, a_ns, a_n, rc_ns, cb_ns, sw_ns, sw_n, dr_ns, dr_n, oq_ns, oq_n; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); mtl_swx_up_batches(&ub_, &sp_); mtl_swx_up_times(&a_ns, &a_n, &rc_ns, &cb_ns, &sw_ns, &sw_n, &dr_ns, &dr_n, &oq_ns, &oq_n);
+             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
+             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
+-            r->hy = (unsigned)(hy - phy); r->up_batches = (unsigned)(ub_ - pupb); r->up_split = (unsigned)(sp_ - pups); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; pupb = ub_; pups = sp_;
++            r->hy = (unsigned)(hy - phy); r->up_batches = (unsigned)(ub_ - pupb); r->up_split = (unsigned)(sp_ - pups); r->up_an = (unsigned)(a_n - pa_n); r->up_dn = (unsigned)(dr_n - pdr_n);
++            r->up_ams = (a_ns - pa_ns) / 1e6; r->up_rcms = (rc_ns - prc_ns) / 1e6; r->up_cbms = (cb_ns - pcb_ns) / 1e6; r->up_swms = (sw_ns - psw_ns) / 1e6; r->up_drms = (dr_ns - pdr_ns) / 1e6; r->up_oqms = (oq_ns - poq_ns) / 1e6;
++            plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; pupb = ub_; pups = sp_; pa_ns = a_ns; pa_n = a_n; prc_ns = rc_ns; pcb_ns = cb_ns; psw_ns = sw_ns; psw_n = sw_n; pdr_ns = dr_ns; pdr_n = dr_n; poq_ns = oq_ns; poq_n = oq_n;
+         }
+         plib = lib_; ppso = pso_;
+         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
+@@ -2713,9 +2715,10 @@
+           // "Long" is relative to recent conditions: when running steadily at 30 fps (menus / windowless host) or under sustained overload, every frame is > 20 ms; those are not long frames and must not flood the log - a frame has to be 40% above the sliding mean of the last 16 frames to count
+           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
+           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
+-          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
+-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms in %u batches (%u split); draws with a hybrid pipeline %u",
+-                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->up_batches, r->up_split, r->hy);
++          if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[768];
++              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms in %u batches (%u split) [upload alloc %.1f ms (%u bufs) + rescommit %.1f ms + commit %.1f ms + drain %.1f ms (%u) + slotwait %.1f ms + oldq %.1f ms]; draws with a hybrid pipeline %u",
++                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->up_batches, r->up_split,
++                       r->up_ams, r->up_an, r->up_rcms, r->up_cbms, r->up_drms, r->up_dn, r->up_swms, r->up_oqms, r->hy);
+               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
+               dm_longframe_note(b); } }
+         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }

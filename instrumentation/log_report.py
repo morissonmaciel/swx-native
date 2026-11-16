@@ -26,6 +26,8 @@ def classify(line):
     m_gpu = re.search(r"GPU ([\d.]+) ms", line)
     m_fr = re.search(r"frame (\d+)", line)
     m_ba = re.search(r"in (\d+) batches \((\d+) split\)", line)
+    m_tm = re.search(r"\[upload alloc ([\d.]+) ms \((\d+) bufs\) \+ rescommit ([\d.]+) ms \+ commit ([\d.]+) ms \+ drain ([\d.]+) ms \((\d+)\) \+ slotwait ([\d.]+) ms \+ oldq ([\d.]+) ms\]", line)
+    m_pa = re.search(r"\+ path (\d+)/(\d+)/(\d+) \(([\d.]+)/([\d.]+)/([\d.]+) ms\)\]", line)
     np_ = int(m_np.group(1)) if m_np else 0
     up = int(m_up.group(1)) if m_up else 0
     return {
@@ -38,6 +40,20 @@ def classify(line):
         "gpu_ms": float(m_gpu.group(1)) if m_gpu else 0.0,
         "batches": int(m_ba.group(1)) if m_ba else 0,
         "split_batches": int(m_ba.group(2)) if m_ba else 0,
+        "up_alloc_ms": float(m_tm.group(1)) if m_tm else 0.0,
+        "up_alloc_n": int(m_tm.group(2)) if m_tm else 0,
+        "up_rescommit_ms": float(m_tm.group(3)) if m_tm else 0.0,
+        "up_cbend_ms": float(m_tm.group(4)) if m_tm else 0.0,
+        "up_drain_ms": float(m_tm.group(5)) if m_tm else 0.0,
+        "up_drain_n": int(m_tm.group(6)) if m_tm else 0,
+        "up_slotwait_ms": float(m_tm.group(7)) if m_tm else 0.0,
+        "up_oldq_ms": float(m_tm.group(8)) if m_tm else 0.0,
+        "up_direct": int(m_pa.group(1)) if m_pa else 0,
+        "up_enc": int(m_pa.group(2)) if m_pa else 0,
+        "up_cpu": int(m_pa.group(3)) if m_pa else 0,
+        "up_pdi_ms": float(m_pa.group(4)) if m_pa else 0.0,
+        "up_pen_ms": float(m_pa.group(5)) if m_pa else 0.0,
+        "up_pcp_ms": float(m_pa.group(6)) if m_pa else 0.0,
     }
 
 
@@ -92,6 +108,15 @@ def report(path):
     up_lfs = [l for l in lfs if l["first_uploads"] > 0 and l["batches"] > 0]
     rep["upload_frames_with_batches"] = len(up_lfs)
     rep["upload_batch_rate"] = round(sum(l["first_uploads"] for l in up_lfs) / max(sum(l["batches"] for l in up_lfs), 1), 1) if up_lfs else 0.0
+    for k in ("up_alloc_ms", "up_rescommit_ms", "up_cbend_ms", "up_drain_ms", "up_slotwait_ms", "up_oldq_ms"):
+        rep[f"{k}_total"] = round(sum(l[k] for l in lfs), 1)
+    rep["up_alloc_n_total"] = sum(l["up_alloc_n"] for l in lfs)
+    rep["up_drain_n_total"] = sum(l["up_drain_n"] for l in lfs)
+    rep["up_direct_total"] = sum(l["up_direct"] for l in lfs)
+    rep["up_enc_total"] = sum(l["up_enc"] for l in lfs)
+    rep["up_cpu_total"] = sum(l["up_cpu"] for l in lfs)
+    for k in ("up_pdi_ms", "up_pen_ms", "up_pcp_ms"):
+        rep[k + "_total"] = round(sum(l[k] for l in lfs), 1)
     return rep
 
 
@@ -119,6 +144,12 @@ def main(argv=None):
     print(f"upload batches: {rep['batches_total']} total ({rep['split_batches_total']} by count-split) "
           f"over {rep['upload_frames_with_batches']} frames with batch data, "
           f"{rep['upload_batch_rate']} uploads/batch")
+    print(f"upload cost split: alloc {rep.get('up_alloc_ms_total', 0.0):.1f} ms ({rep.get('up_alloc_n_total', 0)} bufs) + "
+          f"rescommit {rep.get('up_rescommit_ms_total', 0.0):.1f} ms + commit {rep.get('up_cbend_ms_total', 0.0):.1f} ms + "
+          f"drain {rep.get('up_drain_ms_total', 0.0):.1f} ms ({rep.get('up_drain_n_total', 0)} waits) + "
+          f"slotwait {rep.get('up_slotwait_ms_total', 0.0):.1f} ms + oldq {rep.get('up_oldq_ms_total', 0.0):.1f} ms")
+    print(f"upload paths: {rep.get('up_direct_total', 0)} direct + {rep.get('up_enc_total', 0)} GPU-encode + {rep.get('up_cpu_total', 0)} CPU")
+    print(f"upload path ms: direct {rep.get('up_pdi_ms_total', 0.0):.1f} + enc {rep.get('up_pen_ms_total', 0.0):.1f} + cpu {rep.get('up_pcp_ms_total', 0.0):.1f}")
     print(f"frame-step transitions: {', '.join(rep['steps']) if rep['steps'] else 'none'}")
     for r in rep["red"][:10]:
         print(f"RED: {r}")

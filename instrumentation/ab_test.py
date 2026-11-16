@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set split|keepalive|lag|snap|save|pso on|off|clear
+  ab_test.py set split|keepalive|lag|snap|save|pso|pool on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
@@ -37,6 +37,7 @@ KEYS = {
     "snap": "DM_PRESENT_SNAP",
     "save": "DM_SAVE_ASYNC",
     "pso": "DM_PSO_USER_ASYNC",
+    "pool": "SWX_UPLOAD_POOL",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4"}
@@ -88,7 +89,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set split|keepalive|lag|snap|save|pso on|off|clear",
+        print("usage: ab_test.py set split|keepalive|lag|snap|save|pso|pool on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]
@@ -148,6 +149,18 @@ def one_line(path):
         "batches": rep.get("batches_total", 0),
         "split": rep.get("split_batches_total", 0),
         "up_per_batch": rep.get("upload_batch_rate", 0.0),
+        "u_alloc": rep.get("up_alloc_ms_total", 0.0),
+        "u_rescommit": rep.get("up_rescommit_ms_total", 0.0),
+        "u_commit": rep.get("up_cbend_ms_total", 0.0),
+        "u_drain": rep.get("up_drain_ms_total", 0.0),
+        "u_slotwait": rep.get("up_slotwait_ms_total", 0.0),
+        "u_oldq": rep.get("up_oldq_ms_total", 0.0),
+        "p_direct": rep.get("up_direct_total", 0),
+        "p_enc": rep.get("up_enc_total", 0),
+        "p_cpu": rep.get("up_cpu_total", 0),
+        "p_di_ms": rep.get("up_pdi_ms_total", 0.0),
+        "p_en_ms": rep.get("up_pen_ms_total", 0.0),
+        "p_cp_ms": rep.get("up_pcp_ms_total", 0.0),
         "steps": ",".join(rep["steps"]) or "-",
         "keepalive": rep["keepalive"],
     }
@@ -167,7 +180,9 @@ def cmd_compare(args):
         rows.append(one_line(p))
     cols = ["label", "frames", "longframes", "worst", "lf_up", "lf_up_worst",
             "lf_gpu", "lf_gpu_worst", "uploads", "mb", "batches", "split",
-            "up_per_batch", "steps", "keepalive"]
+            "up_per_batch", "u_alloc", "u_rescommit", "u_commit", "u_drain",
+            "u_slotwait", "u_oldq", "p_direct", "p_enc", "p_cpu",
+            "p_di_ms", "p_en_ms", "p_cp_ms", "steps", "keepalive"]
     width = [max(len(c), max(len(str(r[c])) for r in rows)) for c in cols]
     print("  ".join(c.ljust(w) for c, w in zip(cols, width)))
     for r in rows:
