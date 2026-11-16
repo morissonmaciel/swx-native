@@ -1,1 +1,3 @@
 swx_keepalive_gpu.patch
+texture_upload_split.patch
+swx_upload_batches_diag.patch

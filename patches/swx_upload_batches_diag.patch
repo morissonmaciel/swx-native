@@ -1,0 +1,80 @@
+# SWX: upload batch instrumentation (diag only, no behavior change).
+# verify: dm/gfx/nvn/nvn_mtl.m:g_swx_up_batches
+# verify: dm/gfx/nvn/hle_nvn.c:up_batches
+# Counts batches flushed per frame and flushes triggered by the count split,
+# surfaced on the longframe line as "in N batches (M split)". Answers whether
+# a 254-texture / ~50 ms submit frame is one giant batch (split did not fire)
+# or several batches whose encode cost still lands on the submit thread.
+# See docs/texture_streaming_hitches.md sections 1a and 5.
+--- a/dm/gfx/nvn/nvn_mtl.m	2026-11-16 11:59:36
++++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-16 11:59:59
+@@ -3273,6 +3273,14 @@
+     }
+     return n;
+ }
++
++// SWX upload batch instrumentation (diag only, no behavior change): cumulative
++// batches flushed and flushes triggered by the count split. hle_nvn.c takes
++// per-frame deltas for the longframe line, so one 254-texture frame reads as
++// e.g. "254 first ... in 4 batches (3 split)" when the split fires, or
++// "in 1 batches (0 split)" when it did not.
++static _Atomic uint64_t g_swx_up_batches, g_swx_up_split_batches;
++void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches) { *batches = atomic_load(&g_swx_up_batches); *split_batches = atomic_load(&g_swx_up_split_batches); }
+ 
+ 
+ // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
+@@ -3287,6 +3295,7 @@
+ static void up_flush(void) {
+     up_owner_check("up_flush");
+     if (!g_up_cb) return;
++    if (g_up_batch_tex > 0 || g_nup_blits > 0) atomic_fetch_add(&g_swx_up_batches, 1);
+     if (g_up_ce) {
+         m4_end(g_up_ce); g_up_ce = nil;
+     }
+@@ -3393,6 +3402,7 @@
+     if (g_up_staging_bytes && ((!g_up_block || need > g_up_block_size - g_up_block_off)
+         && extra > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES)
+         || (swx_upload_split_max() > 0 && g_up_batch_tex >= swx_upload_split_max()))) {
++        if (swx_upload_split_max() > 0 && g_up_batch_tex >= swx_upload_split_max()) atomic_fetch_add(&g_swx_up_split_batches, 1);
+         up_flush();
+         up_begin();
+     }
+--- a/dm/gfx/nvn/hle_nvn.c	2026-11-16 11:59:36
++++ b/dm/gfx/nvn/hle_nvn.c	2026-11-16 11:59:59
+@@ -2011,10 +2011,10 @@
+ __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+ // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
+ #define LFN 16
+-typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline
++typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy, up_batches, up_split; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline; up_batches/split: upload batches this frame, flushes triggered by SWX count split
+ static lf_rec g_lf[LFN];
+ __attribute__((weak)) void dm_longframe_note(const char *what) { LOG("[longframe] %s", what); }   // Default (graphics unit tests); the strong definition in the host's diag.c adds scene context and writes perf.txt
+-extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);
++extern void mtl_create_ns(uint64_t *lib_ns, uint64_t *pso_ns); extern void mtl_hybrid_stats(uint64_t *draws, uint64_t *made, uint64_t *none); extern uint64_t mtl_upload_bytes(void); extern void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads); extern void mtl_swx_up_batches(uint64_t *batches, uint64_t *split_batches);
+ static const char *const g_tname[6] = {"frame time", "frame work", "NVN submit+present", "GPU", "translation layer recording", "translation layer submit"};
+ static void tpush(int k, double v) { g_tw[k][g_tn[k]++ % TWIN] = v; }
+ // Thermal attribution (iOS DM_HEAT): per-frame GPU milliseconds are kept in a separate ring, taking the mean / p95 "since the last read" (at most the last HRN frames), without interfering with the timing summary's 300-frame window
+@@ -2695,10 +2695,10 @@
+         static uint64_t plib, ppso; uint64_t lib_, pso_; mtl_create_stats(&lib_, &pso_);
+         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
+         {   // long-frame log: this frame's items are first recorded into the ring; whether to print is decided 8 frames later, once the GPU time has arrived (see below)
+-            static uint64_t plns, ppns, pup, prup, pub, phy; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_);
++            static uint64_t plns, ppns, pup, prup, pub, phy, pupb, pups; uint64_t lns, pns, up, rup, ub, hy, hm_, hn_, ub_, sp_; mtl_create_ns(&lns, &pns); mtl_pkg_stats(&up, &rup); ub = mtl_upload_bytes(); mtl_hybrid_stats(&hy, &hm_, &hn_); mtl_swx_up_batches(&ub_, &sp_);
+             lf_rec *r = &g_lf[f % LFN]; r->f = f; r->fr = fr; r->nv = nv; r->t_s = (now_ns() - g_t0_ns) / 1e9; r->pso = (unsigned)(pso_ - ppso); r->lib = (unsigned)(lib_ - plib);
+             r->make_ms = ((lns - plns) + (pns - ppns)) / 1e6; r->up = (unsigned)(up - pup); r->rup = (unsigned)(rup - prup); r->up_mb = (ub - pub) / 1048576.0; r->up_ms = up_ms;
+-            r->hy = (unsigned)(hy - phy); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy;
++            r->hy = (unsigned)(hy - phy); r->up_batches = (unsigned)(ub_ - pupb); r->up_split = (unsigned)(sp_ - pups); plns = lns; ppns = pns; pup = up; prup = rup; pub = ub; phy = hy; pupb = ub_; pups = sp_;
+         }
+         plib = lib_; ppso = pso_;
+         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
+@@ -2714,8 +2714,8 @@
+           static double ef = 16.7, eg = 8; int lf = r->fr > 20.0 && r->fr > 1.4 * ef, lg = g > 16.7 && g > 1.3 * eg;
+           if (r->f == f - 8) { ef += ((r->fr < 3 * ef ? r->fr : 3 * ef) - ef) / 16; eg += ((g < 3 * eg ? g : 3 * eg) - eg) / 16; }
+           if (on && r->f == f - 8 && f - 8 > 0 && (lf || lg)) { char b[512];
+-              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u",
+-                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
++              snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms in %u batches (%u split); draws with a hybrid pipeline %u",
++                       (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->up_batches, r->up_split, r->hy);
+               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
+               dm_longframe_note(b); } }
+         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }

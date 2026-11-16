@@ -480,6 +480,11 @@ def redirect_saves(cfg, master, phase_log):
         with open(env_path, "r", encoding="utf-8", errors="replace") as f:
             kept = [ln for ln in f.read().splitlines()
                     if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=", "DM_PSO_PAIRS="))]
+    # SWX runtime switches default ON in code (keep-alive: on on macOS;
+    # split: on when unset). env.txt holds only overrides: =0 to turn off
+    # for A/B, tuning like SWX_UPLOAD_SPLIT_MAX_TEX / SWX_GPU_KEEPALIVE_US.
+    # Kept lines pass through untouched, so an explicit override survives
+    # reinstalls and a clean file means defaults.
     shaders_dir = os.path.join(cfg["install_dir"], "shaders")
     os.makedirs(shaders_dir, exist_ok=True)
     pso_user = os.path.join(shaders_dir, "pso_user.tsv")
@@ -496,7 +501,8 @@ def redirect_saves(cfg, master, phase_log):
         if os.path.isfile(pso_pairs):
             f.write(f"DM_PSO_PAIRS={pso_pairs}\n")
     log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE"
-                     f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''} to {env_path}")
+                     f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''} to {env_path} "
+                     f"(SWX_* defaults stay in code; env.txt keeps only overrides)")
 
     moved, kept_back = [], []
     old_save = os.path.join(as_dir, "save")

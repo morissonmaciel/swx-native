@@ -1,0 +1,56 @@
+# SWX: split upload batches by texture count as well as by bytes (area-entry bursts).
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_upload_split_max
+# verify: dm/gfx/nvn/nvn_mtl.m:g_up_batch_tex += 1;
+# See docs/texture_streaming_hitches.md sections 1a and 5.
+--- a/dm/gfx/nvn/nvn_mtl.m	2026-11-16 11:01:40
++++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-16 11:01:40
+@@ -3257,7 +3257,24 @@
+ static size_t g_up_staging_bytes;
+ #define UP_BATCH_BYTES (128u * 1024u * 1024u)
+ 
++// SWX: split an upload batch after this many textures as well as after 128 MB, so one
++// area-entry burst cannot keep the submit thread encoding while the GPU idles
++// (a 304-texture burst measured ~75 ms in one batch on BOTW; byte counting alone
++// never splits it, as one reused 32 MB block holds far less than 128 MB of demand).
++// SWX_UPLOAD_SPLIT=0 keeps the stock byte-count rule only; SWX_UPLOAD_SPLIT_MAX_TEX=N
++// sets the count (8..4096, default 64: about one vsync of encode work).
++static int g_up_batch_tex;   // textures started in this batch (up_alloc is per-texture)
++static int swx_upload_split_max(void) {
++    static int n = -1;
++    if (n < 0) {
++        const char *e = getenv("SWX_UPLOAD_SPLIT");
++        if (e && !strcmp(e, "0")) n = 0;
++        else { const char *m = getenv("SWX_UPLOAD_SPLIT_MAX_TEX"); int v = m ? atoi(m) : 64; n = (v >= 8 && v <= 4096) ? v : 64; }
++    }
++    return n;
++}
+ 
++
+ // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
+ // and if the pool memory on the game side no longer changes it will never be re-uploaded. Record this batch of target textures, and the next time any of them is fetched treat it as dirty and re-upload once.
+ // DM_TEST_UP_LOST=<batch index> (for testing): treat that batch of uploads as dropped, to verify the re-upload path.
+@@ -3292,7 +3309,7 @@
+     if (g_up_block && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
+     NSMutableArray *views = g_up_views; g_up_views = nil;
+     g_up_keep = nil; g_up_block = nil;
+-    g_up_block_off = g_up_block_size = g_up_staging_bytes = 0;
++    g_up_block_off = g_up_block_size = g_up_staging_bytes = g_up_batch_tex = 0;
+     NSMutableSet *targets = [NSMutableSet setWithArray:g_up_texs]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [targets addObject:g_up_blits[i].dst];
+     NSArray *dsts = targets.allObjects;
+     static int lost_at = -2; static uint64_t batch_n; if (lost_at == -2) { const char *e = getenv("DM_TEST_UP_LOST"); lost_at = e ? atoi(e) : -1; } int fake_lost = dsts.count && lost_at > 0 && (int)++batch_n == lost_at;
+@@ -3373,11 +3390,13 @@
+     size_t extra = MAX(need, UP_BLOCK_SIZE);
+     // This call starts one texture's upload: all prior deswizzles and copies are
+     // complete records, so the batch can be split without ending the render pass.
+-    if (g_up_staging_bytes && (!g_up_block || need > g_up_block_size - g_up_block_off)
+-        && extra > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES)) {
++    if (g_up_staging_bytes && ((!g_up_block || need > g_up_block_size - g_up_block_off)
++        && extra > UP_BATCH_BYTES - MIN(g_up_staging_bytes, UP_BATCH_BYTES)
++        || (swx_upload_split_max() > 0 && g_up_batch_tex >= swx_upload_split_max()))) {
+         up_flush();
+         up_begin();
+     }
++    g_up_batch_tex += 1;
+     g_up_batch_bytes += MIN(need, UP_BLOCK_SIZE - g_up_batch_bytes);   // demand saturates at one retained block
+     if (!g_up_block && need <= UP_BLOCK_SIZE) {   // first allocation of the batch: the slot's own block, grown to the next power of two that holds it (a movie frame re-uploaded every frame, 8 MB in Link's Awakening)
+         __strong id<MTLBuffer> *sb = &g_up_slot_blk[g_up_cur_slot];

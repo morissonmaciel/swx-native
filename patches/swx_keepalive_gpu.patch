@@ -1,4 +1,6 @@
 # SWX GPU keep-alive: hold the GPU clock up between the game submissions.
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_start
+# verify: dm/gfx/nvn/swx_keepalive.m
 # See docs/gpu_keep_alive.md (adapted design) and the file header for rationale.
 --- a/dm/gfx/nvn/nvn_mtl.m	2026-11-16 10:17:29
 +++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-16 10:17:29
