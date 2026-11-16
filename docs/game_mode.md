@@ -46,16 +46,20 @@ entitlements, no `GKGame`). Listing needs only the games category
 Minimal recipe (mac-nativegames `games/odyssey/PLAYBOOK.md`): games category
 + `LSSupportsGameMode` (macOS 26) or `GCSupportsGameMode`.
 
-## Verdict
+## Verdict (adopted)
 
-Only the built `.app`'s `Info.plist` matters here: `LSApplicationCategoryType`,
-`LSSupportsGameMode`, `GCSupportsControllerUserInteraction`. The Application
-Support layout is orthogonal (it serves signing, updates, and size — see
-`app_layout.md`). Our wrapper generates that plist when packing into
-`<I>/host`, so Game Mode becomes a build preset (`game_mode on|off`).
+Ship Game Mode **on** paired with GPU keep-alive **on** (see `gpu_keep_alive.md`).
+Rationale: nxnative's collapse needs idle gaps to trigger — Game Mode enables
+an aggressive DPS policy (`Set DPS to 2`) that parks the GPU at its lowest
+clock *when it sees idle*; the keep-alive removes the idle signature, so the
+trigger never fires. Their own doc leaves the mechanism open ("Why Game Mode
+does this is open"), and their setup had no spinner. Present snapshots address
+pacing, not GPU load, so they cannot substitute for the spinner.
+Field evidence (local, uncontrolled run — hardware to record): P-core affinity
+forced via command line + Game Mode on + keep-alive held up for hours of
+gameplay with no collapse, while the snapshot-only setup did not hold.
 
-Deferred decision: default to `false` per nxnative's measurement on this exact
-BOTW profile (frame-step 60 fps + Metal), unless our own runs show otherwise.
-Empirical note: P-core affinity forced via command line ran with Game Mode on
-and no error in a local nxnative install (custom hack, to be re-validated in
-our wrapper).
+What the wrapper generates in the built `.app`'s `Info.plist`
+(`LSApplicationCategoryType` games category, `LSSupportsGameMode=true`,
+`GCSupportsControllerUserInteraction=true`) stays as specified above; only the
+default flips from the deferred `false`.

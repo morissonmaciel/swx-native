@@ -40,12 +40,14 @@ nxnative has no spinner. Its answer to the same idle-downclock problem is
 64 long frames with neither → 4 with snapshots alone). Same disease, two
 therapies: filler compute vs continuous presentation.
 
-## Recommendation
+## Recommendation (adopted)
 
-Keep-alive pairs with Game Mode on: it neutralizes the idle→downclock path
-that motivated nxnative's Game Mode opt-out, which is consistent with
-mac-nativegames shipping `LSSupportsGameMode=True` without that collapse.
-For our wrapper it becomes a future preset (`gpu_keepalive on|off`, default
-on on Mac): map to `TOTK_GPU_KEEPALIVE` if the host supports it, else port the
-(~100 line + thread) patch. Orthogonal to the `<I>` folder layout. iOS stays
-off by default.
+Ship keep-alive **on by default on Mac, paired with Game Mode on** (see
+`game_mode.md`): the spinner neutralizes the idle→downclock path behind
+nxnative's Game Mode collapse finding, which is what makes opting in viable.
+Their collapse was measured without any spinner; their doc leaves the mechanism
+open. Present snapshots complement the spinner (pacing) but cannot replace it
+(no GPU load in the gaps). iOS stays off by default (heat).
+Field evidence (local, uncontrolled — hardware to record): hours of gameplay
+with P-core affinity + Game Mode on + keep-alive held the frame rate where the
+snapshot-only setup did not.
