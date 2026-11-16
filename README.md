@@ -44,6 +44,14 @@ Nothing from the game ships in this repository.
 
 Populate `core/nxnative` with the upstream checkout before building.
 
+## Status
+
+Working: full mac-app install through the wrapper (input validation, `<I>`
+layout, nxnative extract/rewrite/shaders/host/pack, signed `.app` with Game
+Mode on, `DM_SAVE`/`DM_PSO_USER`/`DM_PSO_ARCHIVE` redirected into `<I>`).
+
+Needs testing: iCloud Drive saves (`--icloud-drive-save`).
+
 ## Legal
 
 Use only your own legally obtained copy of the game, dumped from your own

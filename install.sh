@@ -6,6 +6,9 @@
 # ready and exits with a clear message when it is missing.
 set -eu
 
+# Soft exit on Ctrl+C: no stack traces, standard 130 status.
+trap 'echo "" >&2; echo "interrupted." >&2; exit 130' INT
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 NX="$ROOT/core/nxnative"
 VENV="$ROOT/.venv"

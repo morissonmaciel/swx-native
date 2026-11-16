@@ -23,6 +23,7 @@ of prompting).
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,10 +33,11 @@ import time
 from datetime import datetime
 
 TITLE_ID = "01007EF00011E000"
+SHORT_NAME = "Breath of The Wild"
 EXPECTED_UPDATE_HINTS = ("1.9.0", "v1114112", "1114112")
 GAME_EXTS = (".nsp", ".xci", ".nsz", ".xcz")
 LAYOUT_VERSION = 1
-LAYOUT_DIRS = ("game", "save", "host", "shaders")
+LAYOUT_DIRS = ("game", "save", "shaders")
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 ENV = {
@@ -43,6 +45,7 @@ ENV = {
     "update": "SWX_UPDATE_NSP",
     "keys": "SWX_PROD_KEYS",
     "install_dir": "SWX_INSTALL_DIR",
+    "icloud_drive_save": "SWX_ICLOUD_DRIVE_SAVE",
 }
 
 
@@ -54,6 +57,29 @@ class InstallError(Exception):
         self.phase = phase
         self.log_path = log_path
         self.tail = tail
+
+
+class _Interrupted(Exception):
+    """User pressed Ctrl+C; the child (if any) was already terminated."""
+
+
+def _terminate(proc):
+    """Terminate a running child quietly; escalate to kill if it lingers."""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    except Exception:
+        pass
+    try:
+        if proc.stdout:
+            proc.stdout.close()
+    except Exception:
+        pass
 
 
 def here_root():
@@ -79,13 +105,38 @@ def parse_args(argv):
                    help="nxnative platform (default: mac-app)")
     p.add_argument("--app-name", default="Breath of the Wild",
                    help="name of the built .app (default: Breath of the Wild)")
+    p.add_argument("--icloud-drive-save", action="store_true",
+                   default=os.environ.get(ENV["icloud_drive_save"], "").lower() in ("1", "true", "yes"),
+                   help="keep saves on iCloud Drive (<I>/save becomes a symlink to "
+                        "iCloud Drive/Games/<short name>/Saves)")
     p.add_argument("--print-config", action="store_true",
                    help="print the resolved config as JSON and exit")
     p.add_argument("--validate-only", action="store_true",
-                   help="validate inputs and prepare <I>, then exit before calling nxnative")
+                   help="validate inputs, then exit before calling nxnative")
     p.add_argument("--no-spinner", action="store_true",
                    help="never show the braille spinner (one line per event instead)")
     return p.parse_args(argv)
+
+
+def normalize_path(raw):
+    """Clean a user-supplied path.
+
+    Strips whitespace and surrounding quotes (users often paste quoted
+    paths), and un-escapes shell-style drag-and-drop paths (``Home\\ Data``)
+    when — and only when — the raw form does not exist but the unescaped one
+    does, so genuine backslashes in filenames are never mangled.
+    """
+    if not raw:
+        return raw
+    p = raw.strip()
+    if len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+        p = p[1:-1].strip()
+    p = os.path.expanduser(p)
+    if not os.path.exists(p) and "\\" in p:
+        unescaped = re.sub(r"\\(.)", r"\1", p)
+        if os.path.exists(unescaped):
+            p = unescaped
+    return p
 
 
 def ask(prompt, current):
@@ -238,7 +289,9 @@ class Spinner:
             with self._lock:
                 title = self.title
             frame = SPINNER_FRAMES[i % len(SPINNER_FRAMES)]
-            sys.stdout.write(f"\r{frame} {title}   ")
+            # Clear the whole line first: a shorter title must not leave the
+            # tail of a longer one behind (\r alone only rewinds the cursor).
+            sys.stdout.write(f"\r\x1b[2K{frame} {title} ")
             sys.stdout.flush()
             i += 1
             self._stop.wait(0.08)
@@ -256,19 +309,240 @@ class Spinner:
 # ---- install phases ----
 
 def phase_prepare_dirs(cfg, master, phase_log):
-    """Fase 1: create <I>/{game,save,host,shaders} + layout marker."""
+    """Fase 1: create <I> layout (game/save/shaders + marker)."""
     t0 = time.monotonic()
     install_dir = cfg["install_dir"]
-    for d in LAYOUT_DIRS:
+    for d in ("game", "shaders"):
         os.makedirs(os.path.join(install_dir, d), exist_ok=True)
+    save_target = prepare_save_dir(cfg, master, phase_log)
     marker = os.path.join(install_dir, ".swx-layout")
     with open(marker, "w", encoding="utf-8") as f:
         f.write(f"layout_version={LAYOUT_VERSION}\n")
     secs = time.monotonic() - t0
-    log_line(master, f"phase prepare-dirs ok ({secs:.1f}s): {', '.join(LAYOUT_DIRS)}")
+    log_line(master, f"phase prepare-dirs ok ({secs:.1f}s): game, shaders, "
+                     f"save ({'iCloud Drive' if cfg.get('icloud_drive_save') and save_target else 'local'})")
     with open(phase_log, "a", encoding="utf-8") as f:
-        f.write(f"created {', '.join(LAYOUT_DIRS)} under {install_dir}\n")
-    return {"name": "prepare-dirs", "seconds": round(secs, 1), "status": "ok"}
+        f.write(f"created game, shaders under {install_dir}\n")
+    return ({"name": "prepare-dirs", "seconds": round(secs, 1), "status": "ok"},
+            save_target)
+
+
+def icloud_saves_root():
+    """iCloud Drive root for saves: ~/.../Games/<Short Name>/Saves."""
+    base = os.path.expanduser("~/Library/Mobile Documents")
+    return (os.path.join(base, "com~apple~CloudDocs", "Games", SHORT_NAME, "Saves")
+            if os.path.isdir(base) else None)
+
+
+def icloud_saves_dir():
+    """Backward-compatible alias (root without game id)."""
+    return icloud_saves_root()
+
+
+def save_root_for(cfg):
+    """Where game-id save folders live: iCloud root or <I>/save."""
+    if bool(cfg.get("icloud_drive_save")):
+        root = icloud_saves_root()
+        if root is not None:
+            return root
+    return os.path.join(cfg["install_dir"], "save")
+
+
+def dm_save_for(cfg):
+    """This game's save folder: <root>/<title id> (never <I> root itself,
+    so the <id>.work clone stays out of sight one level down)."""
+    return os.path.join(save_root_for(cfg), cfg["title_id"])
+
+
+def prepare_save_dir(cfg, master, phase_log):
+    """<I>/save as a real folder, or as a symlink to iCloud Drive.
+
+    Returns the resolved target (or None for a local folder). Migrates
+    existing local saves into the iCloud target instead of dropping them.
+    """
+    save = os.path.join(cfg["install_dir"], "save")
+    target = None
+    use_icloud = bool(cfg.get("icloud_drive_save"))
+    if use_icloud:
+        target = icloud_saves_root()
+        if target is None:
+            msg = "iCloud Drive not available locally; using local saves."
+            log_line(master, f"prepare-dirs: {msg}")
+            print(f"warning: {msg}", file=sys.stderr)
+            use_icloud = False
+        else:
+            os.makedirs(target, exist_ok=True)
+    with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+        if use_icloud:
+            if os.path.islink(save):
+                if os.path.realpath(save) == os.path.realpath(target):
+                    f.write(f"save already linked to iCloud: {save} -> {target}\n")
+                else:
+                    os.remove(save)
+                    os.symlink(target, save)
+                    f.write(f"save re-pointed to iCloud: {save} -> {target}\n")
+            elif os.path.isdir(save):
+                moved = 0
+                for entry in sorted(os.listdir(save)):
+                    shutil.move(os.path.join(save, entry), os.path.join(target, entry))
+                    moved += 1
+                os.rmdir(save)
+                os.symlink(target, save)
+                f.write(f"save migrated {moved} entries to iCloud, linked: {save} -> {target}\n")
+            else:
+                os.symlink(target, save)
+                f.write(f"save linked to iCloud: {save} -> {target}\n")
+            log_line(master, f"prepare-dirs: saves on iCloud Drive ({target})")
+        else:
+            os.makedirs(save, exist_ok=True)
+            f.write(f"save is a local folder: {save}\n")
+            log_line(master, "prepare-dirs: saves are local")
+    return target
+
+
+def app_support_dir(title_id):
+    """The launcher's per-game folder (created by the app on first launch)."""
+    return os.path.expanduser(
+        os.path.join("~/Library/Application Support/nxnative", title_id))
+
+
+def _nest_flat_saves(cfg, dm_save, master, phase_log):
+    """Move a previous flat layout into the nested <root>/<game id>/ standard.
+
+    The old DM_SAVE pointed at the root itself, so committed saves lived
+    directly in it and the work clone sat beside it as <rootname>.work. Move
+    everything under the game-id folder (and the old work clone next to it);
+    colliding names stay in place with a warning.
+    """
+    moved, kept = [], []
+    save_root = os.path.dirname(dm_save)
+    idname = os.path.basename(dm_save)
+    candidates = []
+    if os.path.isdir(save_root):
+        candidates = [(e, os.path.join(dm_save, e))
+                      for e in sorted(os.listdir(save_root)) if e != idname]
+    parent, workname = os.path.dirname(save_root), os.path.basename(save_root) + ".work"
+    if os.path.isdir(os.path.join(parent, workname)):
+        candidates.append((workname, dm_save + ".work"))
+    for name, dst in candidates:
+        src = (os.path.join(save_root, name) if name != workname
+               else os.path.join(parent, name))
+        if os.path.lexists(dst):
+            kept.append(name)
+            continue
+        shutil.move(src, dst)
+        moved.append(name)
+    if moved or kept:
+        with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"nested {len(moved)} flat entries under {dm_save}\n")
+            for name in kept:
+                f.write(f"kept (name collision, left in place): {name}\n")
+        log_line(master, f"save-redirect: nested {len(moved)} entries under {dm_save}")
+    return moved, kept
+
+
+def redirect_saves(cfg, master, phase_log):
+    """Point the built app at <I>/save via its env.txt override, then move any
+    existing saves there and remove the old folder from Application Support.
+
+    Supported hook (launcher.c): the launcher's own DM_SAVE never overwrites
+    one already set, and <app support>/env.txt wins. Cache (pso_*), temp and
+    env.txt itself stay in Application Support.
+    """
+    t0 = time.monotonic()
+    as_dir = app_support_dir(cfg["title_id"])
+    os.makedirs(as_dir, exist_ok=True)
+    dm_save = dm_save_for(cfg)
+    os.makedirs(dm_save, exist_ok=True)
+    nest_moved, nest_kept = _nest_flat_saves(cfg, dm_save, master, phase_log)
+
+    env_path = os.path.join(as_dir, "env.txt")
+    kept = []
+    if os.path.isfile(env_path):
+        with open(env_path, "r", encoding="utf-8", errors="replace") as f:
+            kept = [ln for ln in f.read().splitlines()
+                    if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE="))]
+    shaders_dir = os.path.join(cfg["install_dir"], "shaders")
+    os.makedirs(shaders_dir, exist_ok=True)
+    pso_user = os.path.join(shaders_dir, "pso_user.tsv")
+    # Pipeline archive: nxnative defaults to pso_archive/ beside pso_user.tsv
+    # (nvn_mtl.m). Pinned explicitly so the layout holds whatever the default.
+    pso_archive = os.path.join(shaders_dir, "pso_archive")
+    with open(env_path, "w", encoding="utf-8") as f:
+        for ln in kept:
+            f.write(ln + "\n")
+        f.write(f"DM_SAVE={dm_save}\n")
+        f.write(f"DM_PSO_USER={pso_user}\n")
+        f.write(f"DM_PSO_ARCHIVE={pso_archive}\n")
+    log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE to {env_path}")
+
+    moved, kept_back = [], []
+    old_save = os.path.join(as_dir, "save")
+    if os.path.isdir(old_save) and not os.path.islink(old_save):
+        for entry in sorted(os.listdir(old_save)):
+            src, dst = os.path.join(old_save, entry), os.path.join(dm_save, entry)
+            if os.path.lexists(dst):
+                kept_back.append(entry)
+                continue
+            shutil.move(src, dst)
+            moved.append(entry)
+        with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"moved {len(moved)} entries from {old_save} to {dm_save}\n")
+            for entry in kept_back:
+                f.write(f"kept (name collision, left in place): {entry}\n")
+    removed_work = False
+    if os.path.isdir(old_save) and not os.listdir(old_save):
+        os.rmdir(old_save)
+        work = os.path.join(as_dir, "save.work")
+        if os.path.isdir(work) and not os.path.islink(work):
+            shutil.rmtree(work)
+            removed_work = True
+        log_line(master, "save-redirect: removed old save folder from Application Support")
+    pso_moved = pso_merged = 0
+    stray = os.path.join(cfg["install_dir"], "pso_user.tsv")
+    if os.path.isfile(stray) and os.path.realpath(stray) != os.path.realpath(pso_user):
+        seen = set()
+        if os.path.isfile(pso_user):
+            with open(pso_user, "r", encoding="utf-8", errors="replace") as f:
+                seen = {ln for ln in f.read().splitlines() if ln and not ln.startswith("#")}
+        with open(stray, "r", encoding="utf-8", errors="replace") as f:
+            new_rows = [ln for ln in f.read().splitlines()
+                        if ln and not ln.startswith("#") and ln not in seen]
+        with open(pso_user, "a", encoding="utf-8") as f:
+            for ln in new_rows:
+                f.write(ln + "\n")
+        pso_moved, pso_merged = len(new_rows), len(new_rows)
+        os.remove(stray)
+        log_line(master, f"save-redirect: merged {pso_moved} rows into {pso_user}")
+    arch_moved, arch_kept = [], []
+    stray_arch = os.path.join(cfg["install_dir"], "pso_archive")
+    if os.path.isdir(stray_arch) and os.path.realpath(stray_arch) != os.path.realpath(pso_archive):
+        os.makedirs(pso_archive, exist_ok=True)
+        for entry in sorted(os.listdir(stray_arch)):
+            src, dst = os.path.join(stray_arch, entry), os.path.join(pso_archive, entry)
+            if os.path.lexists(dst):
+                arch_kept.append(entry)
+                continue
+            shutil.move(src, dst)
+            arch_moved.append(entry)
+        with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"moved {len(arch_moved)} archive files to {pso_archive}\n")
+            for entry in arch_kept:
+                f.write(f"kept (name collision, left in place): {entry}\n")
+        if not os.listdir(stray_arch):
+            os.rmdir(stray_arch)
+            log_line(master, "save-redirect: removed stray pso_archive from <I> root")
+    secs = time.monotonic() - t0
+    info = {"name": "save-redirect", "seconds": round(secs, 1), "status": "ok",
+            "dm_save": dm_save, "moved": moved, "kept": kept_back,
+            "removed_work_clone": removed_work,
+            "dm_pso_user": pso_user, "pso_rows_merged": pso_merged,
+            "dm_pso_archive": pso_archive, "archive_moved": arch_moved,
+            "archive_kept": arch_kept,
+            "nested_moved": nest_moved, "nested_kept": nest_kept}
+    record_note = f"phase save-redirect ok ({secs:.1f}s): {len(moved)} moved"
+    log_line(master, record_note)
+    return info
 
 
 def stage_game_files(cfg, master):
@@ -294,7 +568,7 @@ def run_nxnative(cfg, stage, master, phase_log, spinner):
         raise InstallError("nxnative", phase_log,
                            f"nxnative script missing: {script} (see README: populate core/nxnative)")
     work_dir = os.path.join(cfg["install_dir"], "game", "build")
-    app_path = os.path.join(cfg["install_dir"], "host", cfg["app_name"] + ".app")
+    app_path = os.path.join(cfg["install_dir"], cfg["app_name"] + ".app")
     cmd = [sys.executable, script, stage,
            "-k", cfg["keys"],
            "--platform", cfg["platform"],
@@ -308,24 +582,28 @@ def run_nxnative(cfg, stage, master, phase_log, spinner):
         f.write(f"$ {' '.join(cmd)}\n")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, errors="replace", env=env, bufsize=1)
-    with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
-        for raw in proc.stdout:
-            line = raw.rstrip("\n")
-            f.write(line + "\n")
-            try:
-                ev = json.loads(line)
-            except (ValueError, TypeError):
-                log_line(master, f"nxnative: {line[:200]}")
-                continue
-            kind = ev.get("ev")
-            if kind == "stage":
-                title = f"[{ev.get('k')}/{ev.get('n')}] {ev.get('name')} — {ev.get('step', '')}"
-                spinner.set_title(title.strip(" —"))
-                log_line(master, f"nxnative stage: {title}")
-            elif kind == "stage_end":
-                log_line(master, f"nxnative stage_end ok={ev.get('ok')}: {ev.get('summary', '')}")
-            elif kind == "say":
-                log_line(master, f"nxnative: {str(ev.get('msg', ''))[:300]}")
+    try:
+        with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+            for raw in proc.stdout:
+                line = raw.rstrip("\n")
+                f.write(line + "\n")
+                try:
+                    ev = json.loads(line)
+                except (ValueError, TypeError):
+                    log_line(master, f"nxnative: {line[:200]}")
+                    continue
+                kind = ev.get("ev")
+                if kind == "stage":
+                    title = f"[{ev.get('k')}/{ev.get('n')}] {ev.get('name')} — {ev.get('step', '')}"
+                    spinner.set_title(title.strip(" —"))
+                    log_line(master, f"nxnative stage: {title}")
+                elif kind == "stage_end":
+                    log_line(master, f"nxnative stage_end ok={ev.get('ok')}: {ev.get('summary', '')}")
+                elif kind == "say":
+                    log_line(master, f"nxnative: {str(ev.get('msg', ''))[:300]}")
+    except KeyboardInterrupt:
+        _terminate(proc)
+        raise _Interrupted()
     rc = proc.wait()
     secs = time.monotonic() - t0
     if rc != 0:
@@ -386,6 +664,8 @@ def run_install(cfg, spinner_enabled):
               "inputs": {k: file_info(cfg[k]) for k in ("base", "update", "keys")},
               "nxnative_commit": nxnative_commit(os.path.join(here_root(), "core", "nxnative")),
               "master_log": master, "phases": [], "result": "error", "error": None,
+              "icloud_drive_save": bool(cfg.get("icloud_drive_save")),
+              "save_target": None, "save_redirect": None, "dm_save": None,
               "app_path": None}
     log_line(master, f"install start: title {cfg['title_id']} platform {cfg['platform']} "
                      f"inputs base={cfg['base']} update={cfg['update']} keys={cfg['keys']} "
@@ -407,7 +687,9 @@ def run_install(cfg, spinner_enabled):
         print(f"warning: {note}", file=sys.stderr)
 
     try:
-        record["phases"].append(phase_prepare_dirs(cfg, master, phase_log("prepare")))
+        prepare_info, save_target = phase_prepare_dirs(cfg, master, phase_log("prepare"))
+        record["phases"].append(prepare_info)
+        record["save_target"] = save_target
 
         stage = stage_game_files(cfg, master)
         spinner.set_title("starting nxnative")
@@ -428,13 +710,43 @@ def run_install(cfg, spinner_enabled):
             spinner.stop()
         print("signed: Game Mode on, controller support on, bundle sealed")
 
+        spinner.set_title("redirecting saves to <I>/save")
+        spinner.start()
+        try:
+            record["phases"].append(redirect_saves(cfg, master, phase_log("saves")))
+            record["save_redirect"] = record["phases"][-1]
+            record["dm_save"] = record["save_redirect"]["dm_save"]
+        finally:
+            spinner.stop()
+        save_disp = (record.get("dm_save")
+                     or record["save_target"]
+                     or os.path.join(cfg["install_dir"], "save"))
+        print(f"saves: {save_disp}")
+
         record["result"] = "ok"
         record["receipt"] = write_receipt(cfg["install_dir"], record)
         log_line(master, f"install ok: receipt {record['receipt']}")
         print(f"done: {app_path}")
         print(f"master log: {master}")
         print(f"receipt: {record['receipt']}")
+        if maybe_open_app(app_path):
+            print(f"opened: {app_path}")
         return 0
+    except (KeyboardInterrupt, _Interrupted):
+        try:
+            spinner.stop()
+        except Exception:
+            pass
+        record["error"] = "interrupted by user"
+        record["result"] = "interrupted"
+        try:
+            record["receipt"] = write_receipt(cfg["install_dir"], record)
+        except OSError:
+            pass
+        log_line(master, "install INTERRUPTED by user")
+        print("interrupted by user; partial outputs kept.", file=sys.stderr)
+        print(f"master log: {master}", file=sys.stderr)
+        return 130
     except InstallError as e:
         try:
             spinner.stop()
@@ -454,6 +766,23 @@ def run_install(cfg, spinner_enabled):
         return 1
 
 
+def maybe_open_app(app_path):
+    """Ask whether to open the built game now; launch via `open` on yes.
+
+    Never fails the install: a refused open only warns. Skipped without a TTY.
+    """
+    if not sys.stdin.isatty():
+        return False
+    ans = ask("Open the game now? [Y/n]", "Y")
+    if ans.lower() not in ("", "y", "yes"):
+        return False
+    r = subprocess.run(["open", app_path])
+    if r.returncode != 0:
+        print(f"warning: could not open {app_path}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = {
@@ -464,6 +793,7 @@ def main(argv=None):
         "title_id": args.title_id,
         "platform": args.platform,
         "app_name": args.app_name,
+        "icloud_drive_save": args.icloud_drive_save,
     }
     missing = [k for k in ("base", "update", "keys", "install_dir") if not cfg[k]]
     if missing:
@@ -475,7 +805,12 @@ def main(argv=None):
 
     for k in ("base", "update", "keys", "install_dir"):
         if cfg[k]:
-            cfg[k] = os.path.abspath(os.path.expanduser(cfg[k]))
+            cfg[k] = os.path.abspath(normalize_path(cfg[k]))
+
+    if (not args.print_config and not args.validate_only
+            and not cfg["icloud_drive_save"] and sys.stdin.isatty()):
+        ans = ask("Use iCloud Drive for saves? [y/N]", "")
+        cfg["icloud_drive_save"] = ans.lower() in ("y", "yes")
 
     if args.print_config:
         errors = validate(cfg)
@@ -507,4 +842,9 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        # Soft exit on Ctrl+C (e.g. during interactive prompts): no traceback.
+        print("\ninterrupted.", file=sys.stderr)
+        raise SystemExit(130)

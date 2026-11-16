@@ -2,7 +2,8 @@
 
 How mac-nativegames splits game content between the signed `.app` and
 `~/Library/Application Support`, why, and how that maps to our self-contained
-Install Dir (`<I>`: `/game`, `/save`, `/host`, `/shaders`).
+Install Dir (`<I>`: `/game`, `/save`, `/shaders`; the built `.app` sits at
+`<I>` root, and `/game` keeps nxnative's standard structure).
 
 ## Where mac-nativegames puts things
 
@@ -55,10 +56,10 @@ model — every location is already env-directed (see its Mac run command:
 
 | `<I>` dir | Holds | nxnative env |
 |---|---|---|
-| `/game` | RomFS image + rewritten modules | `DM_ROMFS`, `DM_ROOT` |
-| `/save` | saves + settings | `DM_SAVE` |
-| `/host` | `dmhost`, launcher, built `.app` | — |
-| `/shaders` | Metal shader cache | `DM_MSL_DIR` |
+| `/game` | nxnative's standard structure (`<id>_build`: extract, rewritten modules, shader cache, `tools/dmhost`, logs) | `DM_ROOT`, `DM_ROMFS` |
+| `/save` | saves + settings, nested per game (`<id>/`, work clone `<id>.work` beside it; the wrapper points the app here via `DM_SAVE` in the launcher's `env.txt`) | `DM_SAVE` |
+| `/shaders` | Metal shader cache + `pso_user.tsv` (per-machine warm list) + `pso_archive/` (pipeline bases); the wrapper points the app here via `DM_PSO_USER` + `DM_PSO_ARCHIVE` | `DM_MSL_DIR`, `DM_PSO_USER`, `DM_PSO_ARCHIVE` |
+| `<I>/<App>.app` | signed, read-only bundle (host inside `Contents/MacOS`) | — |
 
 Constraint (from the read-only rule above): saves and shaders must sit
 *beside* the `.app` inside `<I>`, never inside the bundle.
