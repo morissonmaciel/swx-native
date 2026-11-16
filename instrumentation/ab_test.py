@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set split|keepalive|lag|snap on|off|clear
+  ab_test.py set split|keepalive|lag|snap|save|pso on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
@@ -35,6 +35,8 @@ KEYS = {
     "keepalive": "SWX_GPU_KEEPALIVE",
     "lag": "DM_NVN_SYNC_LAG",
     "snap": "DM_PRESENT_SNAP",
+    "save": "DM_SAVE_ASYNC",
+    "pso": "DM_PSO_USER_ASYNC",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4"}
@@ -86,7 +88,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set split|keepalive|lag|snap on|off|clear",
+        print("usage: ab_test.py set split|keepalive|lag|snap|save|pso on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]

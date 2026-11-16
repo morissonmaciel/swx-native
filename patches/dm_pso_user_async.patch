@@ -1,0 +1,82 @@
+# DM_PSO_USER_ASYNC=0 turns it off (default ON since Gate 1 pass).
+# Batch pso_user.tsv rows in memory, one fflush per flush on a background
+# serial queue. Covers submit, prefetch and warm record paths (single writer
+# choke point: pso_user_record). A crash loses only unflushed rows, which are
+# re-learned next run. See docs/async_writes_evaluation.md.
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_pso_user_async_on
+# verify: dm/gfx/nvn/nvn_mtl.m:g_swx_user_pending
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -6308,9 +6308,40 @@
+     if (path) g_pso_user = fopen(path.fileSystemRepresentation, "a");
+     return g_pso_user;
+ }
+-static void pso_user_record(const char *fmt, ...) {
++// DM_PSO_USER_ASYNC=1: batch pso_user.tsv rows in memory, one fflush per flush
++// on a serial background queue (default off). A crash loses only unflushed rows,
++// which are re-learned next run (same self-healing as a torn tail: the reader is
++// parse-or-skip). Row order is irrelevant (set semantics + in-memory dedup).
++static int swx_pso_user_async_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("DM_PSO_USER_ASYNC"); v = !e || atoi(e) != 0;
++        if (v) MLOG("DM_PSO_USER_ASYNC=1: pso_user rows batch in memory, one fflush per flush off the submit thread (DM_PSO_USER_ASYNC=0 turns it off)"); }
++    return v;
++}
++static NSMutableArray<NSString *> *g_swx_user_pending; static os_unfair_lock g_swx_user_mu = OS_UNFAIR_LOCK_INIT;
++static dispatch_queue_t swx_user_q(void) { static dispatch_queue_t q; static dispatch_once_t o;
++    dispatch_once(&o, ^{ q = dispatch_queue_create("dm.nvn.pso-user", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); }); return q; }
++static void swx_user_flush_rows(NSArray<NSString *> *rows) {   // always on swx_user_q (serial): no interleave, order preserved
+     FILE *f = pso_user_file();
+-    if (!f) return;
++    if (!f) return;   // path unset: same as today's early return, rows dropped
++    for (NSString *s in rows) { fputs(s.UTF8String, f); fputc('\n', f); }
++    fflush(f);
++}
++static void swx_user_flush_async(void) {   // hand the batch to the background queue, fire-and-forget
++    os_unfair_lock_lock(&g_swx_user_mu);
++    if (!g_swx_user_pending.count) { os_unfair_lock_unlock(&g_swx_user_mu); return; }
++    NSArray *rows = g_swx_user_pending; g_swx_user_pending = [NSMutableArray array];
++    os_unfair_lock_unlock(&g_swx_user_mu);
++    dispatch_async(swx_user_q(), ^{ @autoreleasepool { swx_user_flush_rows(rows); } });
++}
++static void swx_user_flush_inline(void) {   // drain everything on the caller (quit path: an in-flight async flush may interleave rows, which is harmless — set semantics)
++    os_unfair_lock_lock(&g_swx_user_mu);
++    NSArray *rows = g_swx_user_pending; g_swx_user_pending = [NSMutableArray array];
++    os_unfair_lock_unlock(&g_swx_user_mu);
++    if (rows.count) swx_user_flush_rows(rows);
++}
++static void swx_user_flush_atexit(void) { swx_user_flush_inline(); }
++static void pso_user_record(const char *fmt, ...) {
+     char line[8192]; va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
+     if (!g_pso_user_seen) {
+         g_pso_user_seen = [NSMutableSet set];
+@@ -6320,8 +6351,27 @@
+             for (NSString *old in [txt componentsSeparatedByString:@"\n"]) if (old.length && ![old hasPrefix:@"#"]) [g_pso_user_seen addObject:old]; }
+     }
+     size_t ll = strlen(line); NSString *s = [[NSString alloc] initWithBytes:line length:ll && line[ll - 1] == '\n' ? ll - 1 : ll encoding:NSUTF8StringEncoding];   // Compared with the manifest file line by line (without the newline)
+-    if (!s || [g_pso_user_seen containsObject:s]) return;
+-    [g_pso_user_seen addObject:s]; fputs(line, f); fflush(f);
++    if (!swx_pso_user_async_on()) {
++        if (!s || [g_pso_user_seen containsObject:s]) return;
++        [g_pso_user_seen addObject:s];
++        FILE *f = pso_user_file();
++        if (!f) return;
++        fputs(line, f); fflush(f);
++        return;
++    }
++    // Async: the whole check-and-queue holds one leaf lock (prefetch/warm may
++    // record off the submit thread); only the file write leaves the thread.
++    // The tail flushes at quit even with the archive off (arch_at_exit only
++    // runs when archiving): one atexit drains whatever is left, inline.
++    static int atexit_done; if (!atexit_done) { atexit_done = 1; atexit(swx_user_flush_atexit); }
++    os_unfair_lock_lock(&g_swx_user_mu);
++    if (!s || [g_pso_user_seen containsObject:s]) { os_unfair_lock_unlock(&g_swx_user_mu); return; }
++    [g_pso_user_seen addObject:s];
++    if (!g_swx_user_pending) g_swx_user_pending = [NSMutableArray array];
++    [g_swx_user_pending addObject:s];
++    int n = (int)g_swx_user_pending.count;
++    os_unfair_lock_unlock(&g_swx_user_mu);
++    if (n >= 64) swx_user_flush_async();   // bounded memory; the file stays fresh enough to debug
+ }
+ // A library's name for the pipeline archive's index (arch_key): a digest of its bytes (SHA-256, first 16 bytes in hex), the same at every start and in every container. Not the file
+ // it came from: Metal hands out one MTLFunction per function content, device-wide, so two shader keys whose libraries are the same bytes (Unity's sprite shaders: Cuphead's

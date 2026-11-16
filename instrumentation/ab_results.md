@@ -64,3 +64,20 @@ pinned by `wrapper/main.py`; `=0` / `snap 2` restores stock for A/B.
 Win confirmed: flatness (no plateaus), not faster bursts — half the MNG
 promise. The prototype stays env-gated, default-pinned, not promoted to a
 profile key.
+
+## Gate 1 (save-async S2) — PASS, promoted to default ON
+
+Slice: `patches/dm_save_async.patch` (single file, `hle_fs.c`): only the
+post-swap `rm_tree` moved to a joinable background thread; the next
+commit's pre-clear joins it; spawn failure falls back to sync; refused
+path and cloud sender untouched. 3 runs (`save-on`, `save-on-settings`,
+`save-on-long`, up to 26254 frames), zero `[RED]`, saves commit
+(`DM_SAVE_ASYNC=1` logged once at boot), no new longframe class;
+clone+swap timings fell to sub-ms (995/656 us vs 2–4 ms stock).
+Commit-path coverage verified: manual save, autosave and in-game config
+save all funnel into `commit_mount_locked` (4 entry points,
+`hle_fs.c:1034-1073`; one mount in BOTW, no `_device`/system save).
+Promoted: code default ON + install pins `DM_SAVE_ASYNC=1`
+(`=0` restores stock). Gate 2 left open: no save-attributed ≥20 ms spike
+occurred in either condition to compare (settings/manual writes showed
+only sub-detector ripples).

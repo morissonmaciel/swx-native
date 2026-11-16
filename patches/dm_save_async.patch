@@ -1,0 +1,57 @@
+# DM_SAVE_ASYNC=0 turns it off (default ON since Gate 1 pass).
+# Commit itself (clonefile + atomic swap) stays synchronous, preserving the
+# exact durability contract; only the trailing rm_tree leaves the frame,
+# joined by the next commit's pre-clear (normally instant). Covers manual
+# save, autosave and in-game config save: all commit entries funnel into
+# commit_mount_locked (hle_fs.c:969-1073). See docs/async_writes_evaluation.md.
+# verify: dm/host/hle_fs.c:swx_save_async_on
+# verify: dm/host/hle_fs.c:g_swx_del_thr
+--- a/dm/host/hle_fs.c
++++ b/dm/host/hle_fs.c
+@@ -947,7 +947,23 @@
+     int r = clonefile(dir, to, 0) ? -1 : 0, e = errno;
+     pthread_mutex_unlock(&g_lock);
+     errno = e; return r;
++}
++// DM_SAVE_ASYNC=0 turns it off (default on since Gate 1 pass): the commit
++// itself (clone + atomic swap) stays synchronous, preserving the exact
++// durability contract, but deleting the swapped-out old version moves to a
++// The next commit joins any in-flight delete in its pre-clear step (normally
++// instant: commits are seconds apart, deletes take milliseconds), so the
++// staging path is never reused while being deleted and a crash orphan is
++// still cleaned by the existing mount/commit pre-clears. pthread_create
++// failure falls back to today's synchronous delete.
++static int swx_save_async_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("DM_SAVE_ASYNC"); v = !e || atoi(e) != 0;
++        if (v) LOG("DM_SAVE_ASYNC=1: swapped-out save versions are deleted on a background thread (clone+swap stay synchronous)"); }
++    return v;
+ }
++static pthread_t g_swx_del_thr; static int g_swx_del_busy; static pthread_mutex_t g_swx_del_mu = PTHREAD_MUTEX_INITIALIZER;
++static void *swx_save_bg_rm(void *arg) { char *path = arg; if (rm_tree(path)) { static int n; if (n++ < 4) LOG("DM_SAVE_ASYNC: background delete of %s failed errno=%d (next commit pre-clears it)", path, errno); } free(path); return NULL; }
+ // Both Commit overloads share this transaction engine. Caller holds the path
+ // and mount locks; front-end failure notification is delivered after unlocking.
+ static Result commit_mount_locked(int i, int *notify_error) {
+@@ -990,9 +1006,22 @@
+     }
+     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
+     Result r = RES_OK;
++    if (swx_save_async_on()) {   // never reuse the staging path while its background delete runs (normally already done)
++        pthread_mutex_lock(&g_swx_del_mu);
++        if (g_swx_del_busy) { pthread_join(g_swx_del_thr, NULL); g_swx_del_busy = 0; }
++        pthread_mutex_unlock(&g_swx_del_mu);
++    }
+     if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+     else if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+     else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
++    else if (swx_save_async_on()) {                                 // the old version that was swapped out: delete it off-thread
++        char *stale = strdup(neu);                                  // joinable thread: the next commit's pre-clear joins it, so the
++        int bg = 0;                                                 // staging path is never reused mid-delete (normally already done)
++        pthread_mutex_lock(&g_swx_del_mu);
++        if (stale && !pthread_create(&g_swx_del_thr, NULL, swx_save_bg_rm, stale)) { g_swx_del_busy = 1; bg = 1; }
++        pthread_mutex_unlock(&g_swx_del_mu);
++        if (!bg) { free(stale); rm_tree(neu); }                    // thread spawn failed: today's synchronous delete
++    }
+     else rm_tree(neu);                                                  // the old version that was swapped out
+     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
+     static int n; if (r == RES_OK) { uint64_t tc2 = clock_gettime_nsec_np(CLOCK_MONOTONIC);

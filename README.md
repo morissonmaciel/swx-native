@@ -59,10 +59,15 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   area-entry region, zero 30 fps holds over thousands of frames, zero
   repeated present blinks (ring 2 blinked under lag; ring 4 does not).
   See `docs/sync_lag_evaluation.md`, `instrumentation/ab_results.md`.
+- `DM_SAVE_ASYNC=1` (pinned by the installer; `=0` restores stock):
+  swapped-out save versions delete on a background thread while
+  clone+swap stay synchronous — commits measure sub-ms, no save-attributed
+  longframe in the corpus. `DM_PSO_USER_ASYNC=1` (pinned; `=0` restores
+  stock): `pso_user.tsv` rows batch in memory, one fflush per flush.
 - To re-measure after the I/O work lands: same fixed route, `instrumentation/ab_test.py`
   (`collect`/`compare` labels). Expected to move: burst `submit+present`
-  (still 30–55 ms stock — untouched by lag) once pooled staging / deferred
-  writeback / async save land (`docs/io_paths_nxnative_vs_mng.md`).
+  (still 30–55 ms stock — untouched by lag, save-async and pso batch) once pooled staging / deferred
+  writeback land (`docs/io_paths_nxnative_vs_mng.md`, `docs/async_writes_evaluation.md`).
   Upload split stays OFF by default (`SWX_UPLOAD_SPLIT=1` opts in; Gate 1
   measured +13 ms submit with it on).
 
@@ -75,11 +80,18 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   (both pinned by the installer); ring 2 blinks under lag.
 - Single white-frame display drops happen rarely in stock too; ring 4
   absorbs them.
-- Autosave commits block the committing thread (whole-tree clone+swap,
-  ~2–4 ms measured) — enough to tip an already-heavy frame. Async save is
-  future work.
+- Autosave commits are background-cleaned by default (`DM_SAVE_ASYNC=1`):
+  clone+swap stay synchronous (~1 ms measured), the swapped-out tree is
+  deleted off-thread. Forced writes (manual/config save) still show as
+  sub-detector ripples in flat regions — the remaining floor is clone+swap
+  + locks, which only a durability-changing redesign would remove.
 - First-seen pipeline builds can stall the submit thread once (rows
   self-heal into `pso_user.tsv`).
+- One-off ~77 ms freeze with no submit/GPU/upload/pipeline footprint and
+  zero acquire timeouts (frame 14638 class) — outside NVN accounting
+  (game-side, present path, or OS). To hunt it: a focused run with
+  `DM_NVN_WAITS=1` (wait-ledger timings) plus per-thread CPU; no code
+  change until attributed.
 
 ## Legal
 
