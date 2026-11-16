@@ -10,7 +10,7 @@ re-run; conflicts surface loudly instead of silently rotting.
 
 | Path | Role |
 |---|---|
-| `patches/series` | ordered list of patch files (`#` comments allowed); empty = nothing to apply |
+| `patches/series` | ordered list of patch files (`#` comments allowed); entries are paths relative to `patches/` — instrumentation (diag-only) patches live in `instrumentation/` and are listed as `../instrumentation/<name>.patch` |
 | `patches/*.patch` | unified diffs, `-p1`, paths relative to `core/nxnative`, with `# verify:` sentinel headers (see below) |
 | `core/nxnative/.swx-patches-applied` | marker with the hash of series + patch contents (state lives with the patched tree; `core/` itself is not versioned here) |
 
@@ -69,3 +69,13 @@ the script applies onto a fresh tree with `-p1`. Every patch must declare
 `# verify:` sentinel headers — one `grep -F` literal per hunk region (plus a
 bare path for any new file) — chosen so they are absent on the pristine tree
 and present only when the patch landed; the script trusts nothing else.
+
+To change an existing patch's *content* (not just add a file): the tree
+holding the old application cannot be forward-patched, and sentinels cannot
+tell versions apart — so normalize first with the *current* files, then
+edit, then run. Either `sh patches/patch_nxnative.sh <core> --force`
+(reverts the whole stack in reverse order), or revert that patch and
+everything above it in reverse order with the current files; never revert a
+single stacked patch with the old file (its context is gone under the
+patches above it — learned 2026-11-16). To add a new file at the top of the
+stack, no revert is needed: append to `series` and run.

@@ -13,7 +13,7 @@ port, and a minimal gated action plan. Step 2 of the texture investigation;
 kept out of `feat/texture_uploads` on purpose.
 
 Roots: `NX=core/nxnative`, `MNG=refs/mac-nativegames/games/totk/third_party/d2r_gfx`.
-Log context: BOTW 1.9.0 local runs, `wrapper/log_report.py` output.
+Log context: BOTW 1.9.0 local runs, `instrumentation/log_report.py` output.
 
 ## 1. What MNG SYNC_LAG does
 
@@ -143,15 +143,18 @@ For `/Volumes/Home Data/Games/Breath of The Wild/Breath of the Wild.app`
 Player `env.txt`
 (`~/Library/Application Support/nxnative/01007EF00011E000/env.txt`) holds
 only `DM_SAVE`/`DM_PSO_USER`/`DM_PSO_ARCHIVE`/`DM_PSO_PAIRS`; the bundle
-ships no `dm/env.txt`. Nothing performance-related is pinned by file — the
-six toggles hold by default plus two saved choices. `SWX_*` (keep-alive,
-upload split) default ON in code; `env.txt` carries only overrides
-(`=0` for A/B), per `wrapper/main.py:477-507`.
+ships no `dm/env.txt`. Since the Gate 3a pass, install pins the decided
+defaults in player `env.txt`: `DM_NVN_SYNC_LAG=1` (one submission ahead;
+host default is strict) and `DM_PRESENT_SNAP=4` (ring fits CPU-ahead +
+screen-ahead; the game profile only promises 2). `SWX_*` default in code
+(keep-alive on on macOS; upload split opt-in with `SWX_UPLOAD_SPLIT=1`
+since Gate 1). `=0` (or `snap 2`) in `env.txt` restores stock for A/B, per
+`wrapper/main.py:redirect_saves`.
 
 ## 5. Empirical motivation (why overlap is the remaining lever)
 
 - Upload bursts are now *measured*, not inferred. With the batch
-  instrumentation (`patches/swx_upload_batches_diag.patch`): frame 622 —
+  instrumentation (`instrumentation/swx_upload_batches_diag.patch`): frame 622 —
   `254 first / 38.4 MB / 8.3 ms in 8 batches (3 split)`,
   `submit+present 52.7 ms`, whole 60.9 ms. The count split fires (3
   split-triggered flushes) yet submit time is unchanged: fragmenting batches
@@ -190,7 +193,9 @@ upload split) default ON in code; `env.txt` carries only overrides
    watch in testing.
 4. **Snapshot ring.** `DM_PRESENT_SNAP` already lets the game run ahead of
    the *screen*; adding GPU lag stacks two kinds of "ahead". Test with
-   snapshots on (this install's state).
+   snapshots on (this install's state). — Confirmed 2026-11-16: ring 2
+   blinked repeatedly under lag, ring 4 holds flat with zero blinks
+   (Gate 3a, `instrumentation/ab_results.md`). Ring size is load-bearing for any lag design.
 5. **Scope discipline.** Per `core/nxnative/AGENTS.md`: prefer a general
    mechanism with a per-game default over a BOTW-only branch; gate fixed
    addresses/build IDs if anydos traces are used (none expected here —
@@ -198,35 +203,33 @@ upload split) default ON in code; `env.txt` carries only overrides
    elsewhere. Keep the switch (`DM_NVN_SYNC_LAG`) so A/B never needs a
    rebuild.
 
-## 7. Minimal action plan (gates, in order — implement only after approval)
+## 7. Minimal action plan — status 2026-11-16 (see `instrumentation/ab_results.md`)
 
-- **Gate 0 — baseline (no code).** Fixed area-entry route, `DM_NVN_WAITS=1`
-  in player `env.txt` (ledger only, then remove): record newest-fence wait
-  ms, `log_report.py` submit p50/p95, hold transitions. Freeze as
-  `docs/texture_baseline.json` v2. Success: reproducible burst frame with
-  batch data (like frame 622).
-- **Slice 1 — prototype behind `DM_NVN_SYNC_LAG` (default off).**
-  Record last two submission fences at `mtl_sub_commit`
-  (`nvn_mtl.m:2733-2748`, `g_fence`/`g_sub_cmt` at `:318`); in `nvnSyncWait`
-  (`hle_nvn.c:876-886`) or `mtl_wait_at` (`:2763-2804`), when the switch is
-  on and `o->fence` is the newest, wait for the previous fence instead —
-  after translation/drain complete. New patch file in `patches/series`,
-  scratch-tested first (`docs/nxnative_patches.md` procedure); `SWX_` vs
-  `DM_` naming: host switch → `DM_NVN_SYNC_LAG`, consistent with
-  `DM_NVN_WAITS`/`DM_NVN_CUT`.
-- **Gate 1 — correctness (same route).** Zero `[RED]`, no new longframe
-  class, save/load + shrine route from `docs/reference/frame-rate.md:588`
-  clean, `draws that waited` empty. Any failure stops the slice.
-- **Slice 2 — quantify.** A/B `DM_NVN_SYNC_LAG=0/1` via player `env.txt`
-  (no rebuilds): submit+present p50/p95 on burst frames, whole-frame worst,
-  hold-transition counts, uploads/batch unchanged. Expected: submit blocked
-  time down, totals unchanged.
-- **Gate 2 — decision.** If submit-blocked time drops with no correctness
-  cost: promote to profile key (`sync_lag on` for BOTW only,
-  `DM_GAME_SYNC_LAG`), default off elsewhere. If not: keep env-only or drop.
-- **Non-goals for this branch.** Pooled upload staging, deferred writeback
-  (`late_land` equivalent), vertex-descriptor rework — each a separate
-  evaluation with its own gates.
+- **Gate 0 — baseline: PASS.** Reproducible burst with batch data
+  (frames 612/622/609, 237–254 first uploads).
+- **Slice 1 — prototype: DONE.** `patches/dm_nvn_sync_lag.patch`: single
+  choke point `mtl_wait()` (covers `nvnSyncWait` fenced==1 and
+  `nvn_sync_wait` fenced==3 paths; acquire/finish/drain call
+  `mtl_wait_at` directly and are unchanged). No fence-history state
+  needed: `g_fence` increments by 1 per `mtl_sub_commit`, so newest−1 is
+  always a committed submission.
+- **Gate 1 — correctness: PASS with recipe, FAIL stock.** Stock ring (2):
+  repeated black blinks — game ahead of screen + CPU ahead of GPU = 2
+  frames of latency in a 2-slot ring (hypothesis confirmed by the fix).
+  With `DM_PRESENT_SNAP=4`: 4724 frames, 0 RED, 0 blinks, 0 gameplay
+  holds. Decided install defaults: `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4`
+  pinned by the wrapper (`=0` / `snap 2` restores stock for A/B).
+- **Slice 2 / Gate 2 — quantify/decision: MIXED, parked.** Holds suppressed
+  (0 episodes) but burst submit unchanged (within noise) — flatness win,
+  not faster bursts. Prototype stays env-gated + install-pinned; NOT
+  promoted to a profile key. Revisit only with the writeback/pooling
+  follow-ups (`docs/io_paths_nxnative_vs_mng.md`).
+- **Original Gate 2 sketch (superseded):** promote to profile key
+  (`sync_lag on` for BOTW only) — declined for now; the ring-size coupling
+  makes a per-game default premature.
+- **Non-goals (unchanged).** Pooled upload staging, deferred writeback
+  (`late_land` equivalent), vertex-descriptor rework, async save commit —
+  each a separate evaluation with its own gates.
 
 ## 8. Open questions
 

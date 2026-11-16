@@ -43,11 +43,13 @@ def classify(line):
 
 def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
-           "keepalive": False, "prewarm": {}, "frames": 0}
+           "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "[swx-keepalive]" in line:
                 rep["keepalive"] = True
+            if "DM_NVN_SYNC_LAG=1: newest-fence" in line:
+                rep["synclag"] = True
             if "[RED]" in line and "swx" not in line and "keepalive" not in line:
                 rep["red"].append(line.strip()[:200])
             m = re.search(r"frame step: hold (\d) → (\d)", line)
@@ -105,7 +107,7 @@ def main(argv=None):
         print(json.dumps(rep, indent=2))
         return 0
     print(f"log: {rep['log']}")
-    print(f"frames seen: {rep['frames']}, keep-alive: {rep['keepalive']}, [RED]: {len(rep['red'])}")
+    print(f"frames seen: {rep['frames']}, keep-alive: {rep['keepalive']}, sync-lag: {rep.get('synclag', False)}, [RED]: {len(rep['red'])}")
     print(f"prewarm: {rep.get('prewarm', {})}")
     print(f"longframes: {rep['longframe_count']} (worst {rep['worst_ms']:.1f} ms)")
     print(f"  with new pipelines : {rep['lf_pipelines']} (worst {rep['lf_pipelines_worst_ms']:.1f} ms)")

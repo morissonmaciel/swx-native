@@ -12,16 +12,21 @@
 # file declares its sentinels in `# verify:` header lines:
 #   # verify: <relpath>:<literal>  — grep -F must find <literal> in the file
 #   # verify: <relpath>             — the file itself must exist
-# A patch counts as applied only when every sentinel holds.
+# A patch counts as applied only when every sentinel holds. Sentinels prove
+# applied-ness, not applied-version: after a patch file's *content* changes,
+# only a revert with the old version (e.g. `git show HEAD:patches/<p>`)
+# followed by a re-run converges — the script errors out loudly instead of
+# blessing stale code (see the apply loop).
 #
 # Guarantees:
 # - sequential check-then-apply: each patch dry-runs just before it applies,
 #   so a dependent patch sees the tree its context was written against.
-#   Already-applied prefixes are skipped. A failure stops before later
-#   patches; earlier ones may already be applied (--force normalizes).
+# - self-normalizing: any applied state that is not the verified marked
+#   state is reverted (reverse order) and applied fresh — no silent
+#   adoption, no resume-and-hope. A failure stops before later patches.
 # - a marker is a *verified* claim: it is only written after every sentinel
 #   of every patch holds on the just-patched tree, and an existing marker is
-#   only trusted after the same check passes.
+#   only trusted (same hash) after the same check passes.
 # - --batch everywhere and exactly one stdin redirect (the patch file).
 #   NEVER add a second stdin redirect (e.g. </dev/null after the file):
 #   the last redirect wins, patch reads empty stdin, exits 0 doing nothing,
@@ -104,44 +109,53 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; t
     rm -f "$MARKER"
 fi
 
-# 0. --force normalizes first: revert in reverse order (a later patch's
-# context depends on the earlier ones, so forward-order revert fails),
-# each revert independently best-effort, then drop any stale marker.
-if [ "$FORCE" -eq 1 ]; then
+# 0. normalize first when the tree is not the verified marked state:
+# revert whatever is applied, in reverse order (a later patch's context
+# depends on the earlier ones, so forward-order revert fails), each revert
+# independently best-effort, then drop any stale marker. --force asks for
+# this explicitly; otherwise it happens automatically whenever sentinels
+# show applied state outside the fast path above. This is what recovers
+# half-applied trees and stale adoptions instead of failing on them.
+any_applied() {
+    for p in $PATCHES; do
+        is_applied "$p" && return 0
+    done
+    return 1
+}
+if { [ "$FORCE" -eq 1 ] || any_applied; } then
+    if [ "$FORCE" -eq 1 ]; then
+        echo "patches: normalizing (forced clean slate)"
+    else
+        echo "patches: tree shows applied state outside the marked stack; normalizing"
+    fi
     for p in $(echo "$PATCHES" | tac 2>/dev/null || echo "$PATCHES" | tail -r); do
         if is_applied "$p"; then
             patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$p" >/dev/null 2>&1 || true
             if is_applied "$p"; then
-                echo "warning: revert did not clear sentinels: $p" >&2
+                echo "warning: revert did not clear sentinels (content changed?): $p" >&2
             else
-                echo "patches: reverted $p (forced clean slate)"
+                echo "patches: reverted $p"
             fi
         fi
     done
     rm -f "$MARKER"
 fi
 
-# Adopt a fully-patched tree that lost its marker instead of erroring on
-# per-patch context overlap.
-if stack_verified; then
-    echo "$WANT" > "$MARKER"
-    echo "patches: already applied and verified ($WANT)."
-    exit 0
-fi
-
-# 1-2. check-then-apply in series order: each patch dry-runs just before it
-# applies, so a dependent patch sees the tree its context was written
-# against. A failure stops before later patches (--force normalizes).
+# 1-2. check-then-apply in series order on a clean tree: each patch dry-runs
+# just before it applies, so a dependent patch sees the tree its context
+# was written against. A failure stops before later patches.
 for p in $PATCHES; do
     [ -f "$HERE/$p" ] || { echo "[ERROR] patch listed in series but missing: $p" >&2; exit 1; }
-    if is_applied "$p"; then
-        echo "patches: already applied, skipping $p"
-        continue
-    fi
     if ! patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$p" >/dev/null 2>&1; then
-        echo "[ERROR] patch does not apply cleanly (rebase it): $p" >&2
-        echo "        resolve inside core/nxnative, then refresh patches/$p -- never edit core directly." >&2
-        echo "        (if the tree itself diverged from a marked state, re-run with --force to normalize it first.)" >&2
+        if is_applied "$p"; then
+            echo "[ERROR] patch content changed but the tree still holds the old application: $p" >&2
+            echo "        revert it with the old version first, e.g." >&2
+            echo "          git show HEAD:patches/$p > /tmp/old.patch && patch -p1 -R -d <core> < /tmp/old.patch" >&2
+            echo "        then re-run $0." >&2
+        else
+            echo "[ERROR] patch does not apply cleanly (rebase it): $p" >&2
+            echo "        resolve inside core/nxnative, then refresh patches/$p -- never edit core directly." >&2
+        fi
         exit 1
     fi
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$p" >/dev/null || { echo "[ERROR] failed applying: $p" >&2; exit 1; }

@@ -1,0 +1,39 @@
+# DM_NVN_SYNC_LAG: let the CPU run one submission ahead of the GPU (default ON).
+# Ports mac-nativegames TOTK_SYNC_LAG=1 (BOTW default on there) to nxnative,
+# which otherwise waits every SyncWait on the newest fence (see
+# docs/sync_lag_evaluation.md). Default ON since the Gate 3a pass with SNAP=4
+# (flat frametime, zero holds, zero blinks at ring 4); DM_NVN_SYNC_LAG=0 off.
+# Single choke point: mtl_wait() serves the game's SyncWaits (hle_nvn.c
+# nvnSyncWait fenced==1, nvn_queue.inc nvn_sync_wait fenced==3);
+# acquire/finish/drain paths call mtl_wait_at directly and are unchanged.
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_sync_lag_on
+# verify: dm/gfx/nvn/nvn_mtl.m:DM_NVN_SYNC_LAG=0 turns it off
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2798,7 +2798,25 @@
+     return ok;
+ }
+ // The game's SyncWait (hle_nvn.c), with what it waits for in the wait ledger
+-int mtl_wait(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, timeout_ns, !timeout_ns ? WS_SYNC_POLL : fence >= g_fence ? WS_SYNC_NEWEST : WS_SYNC); }
++// DM_NVN_SYNC_LAG=0 turns it off (default on since the Gate 3a pass
++// with SNAP=4: flat frametime, zero holds; env.txt pins =1 explicitly). a wait on the newest submitted
++// fence settles for the previous submission's fence, so the CPU computes
++// frame N+1 while the GPU draws frame N (mac-nativegames TOTK_SYNC_LAG=1).
++// Older-fence waits, acquire waits and finish/drain paths are unchanged.
++static int swx_sync_lag_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("DM_NVN_SYNC_LAG"); v = !e || atoi(e) != 0; }
++    return v;
++}
++int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
++    int newest = fence && fence >= mtl_last_fence();
++    uint64_t wait = fence;
++    if (swx_sync_lag_on() && newest && fence > 1) {
++        wait = fence - 1;   // the previous submission is fully committed (its mtl_sub_commit ran before this fence existed)
++        static _Atomic int said; if (!atomic_exchange(&said, 1)) MLOG("DM_NVN_SYNC_LAG=1: newest-fence SyncWaits settle for the previous submission (CPU runs a frame ahead of the GPU)");
++    }
++    return mtl_wait_at(wait, timeout_ns, !timeout_ns ? WS_SYNC_POLL : newest ? WS_SYNC_NEWEST : WS_SYNC);
++}
+ int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns) { return mtl_wait_at(fence, timeout_ns, !timeout_ns ? WS_SYNC_POLL : WS_ACQ); }
+ 
+ static void mtl_finish_gpu_at(int site) {

@@ -52,6 +52,35 @@ Mode on, `DM_SAVE`/`DM_PSO_USER`/`DM_PSO_ARCHIVE` redirected into `<I>`).
 
 Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 
+## On Tests (experimental, installed by default)
+
+- `DM_PRESENT_SNAP=4` + `DM_NVN_SYNC_LAG=1` (pinned by the installer;
+  `=0` / `snap 2` restores stock for A/B): flat frametime in the heavy
+  area-entry region, zero 30 fps holds over thousands of frames, zero
+  repeated present blinks (ring 2 blinked under lag; ring 4 does not).
+  See `docs/sync_lag_evaluation.md`, `instrumentation/ab_results.md`.
+- To re-measure after the I/O work lands: same fixed route, `instrumentation/ab_test.py`
+  (`collect`/`compare` labels). Expected to move: burst `submit+present`
+  (still 30–55 ms stock — untouched by lag) once pooled staging / deferred
+  writeback / async save land (`docs/io_paths_nxnative_vs_mng.md`).
+  Upload split stays OFF by default (`SWX_UPLOAD_SPLIT=1` opts in; Gate 1
+  measured +13 ms submit with it on).
+
+## Known issues (measured — evidence in `instrumentation/ab_results.md`)
+
+- Texture bursts still cost 30–55 ms submit (stock batching): splitting by
+  count adds commit overhead without moving encode off the submit thread.
+  Pools/overlap are future work, not this split.
+- Frame-ahead + snapshot ring: `DM_NVN_SYNC_LAG=1` needs `DM_PRESENT_SNAP=4`
+  (both pinned by the installer); ring 2 blinks under lag.
+- Single white-frame display drops happen rarely in stock too; ring 4
+  absorbs them.
+- Autosave commits block the committing thread (whole-tree clone+swap,
+  ~2–4 ms measured) — enough to tip an already-heavy frame. Async save is
+  future work.
+- First-seen pipeline builds can stall the submit thread once (rows
+  self-heal into `pso_user.tsv`).
+
 ## Legal
 
 Use only your own legally obtained copy of the game, dumped from your own

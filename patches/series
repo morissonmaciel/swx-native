@@ -1,3 +1,4 @@
 swx_keepalive_gpu.patch
 texture_upload_split.patch
-swx_upload_batches_diag.patch
+../instrumentation/swx_upload_batches_diag.patch
+dm_nvn_sync_lag.patch
