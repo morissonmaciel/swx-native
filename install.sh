@@ -94,6 +94,15 @@ else
 fi
 say "nx_extract + spirv-cross present and executable."
 
+# ---- Our patches onto the vendored core (quiet no-op with an empty series).
+# Runs before anything that consumes the core (venv, wrapper, build), so the
+# patched tree is a precondition. SWX_SKIP_PATCHES=1 runs pristine (debug).
+if [ "${SWX_SKIP_PATCHES:-0}" = "1" ]; then
+  say "patches skipped (SWX_SKIP_PATCHES=1)."
+else
+  sh "$ROOT/patches/patch_nxnative.sh" "$NX" || fail "patch step failed (see above; fix patches/series)."
+fi
+
 # ---- uv ----
 if ! command -v uv >/dev/null 2>&1; then
   warn "uv not found; installing..."

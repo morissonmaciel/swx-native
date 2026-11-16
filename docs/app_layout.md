@@ -58,7 +58,7 @@ model — every location is already env-directed (see its Mac run command:
 |---|---|---|
 | `/game` | nxnative's standard structure (`<id>_build`: extract, rewritten modules, shader cache, `tools/dmhost`, logs) | `DM_ROOT`, `DM_ROMFS` |
 | `/save` | saves + settings, nested per game (`<id>/`, work clone `<id>.work` beside it; the wrapper points the app here via `DM_SAVE` in the launcher's `env.txt`) | `DM_SAVE` |
-| `/shaders` | Metal shader cache + `pso_user.tsv` (per-machine warm list) + `pso_archive/` (pipeline bases); the wrapper points the app here via `DM_PSO_USER` + `DM_PSO_ARCHIVE` | `DM_MSL_DIR`, `DM_PSO_USER`, `DM_PSO_ARCHIVE` |
+| `/shaders` | Metal shader cache + `pso_user.tsv` (per-machine warm list) + `pso_archive/` (pipeline bases) + `swx_pairs.tsv` (community pair overlay, see below) | `DM_MSL_DIR`, `DM_PSO_USER`, `DM_PSO_ARCHIVE`, `DM_PSO_PAIRS` |
 | `<I>/<App>.app` | signed, read-only bundle (host inside `Contents/MacOS`) | — |
 
 Constraint (from the read-only rule above): saves and shaders must sit

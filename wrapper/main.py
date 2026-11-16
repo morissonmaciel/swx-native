@@ -105,6 +105,8 @@ def parse_args(argv):
                    help="nxnative platform (default: mac-app)")
     p.add_argument("--app-name", default="Breath of the Wild",
                    help="name of the built .app (default: Breath of the Wild)")
+    p.add_argument("--mng-list", default=os.environ.get("SWX_MNG_LIST", ""),
+                   help="shared shader list for the derived profile (default: refs checkout; missing = stock profile)")
     p.add_argument("--icloud-drive-save", action="store_true",
                    default=os.environ.get(ENV["icloud_drive_save"], "").lower() in ("1", "true", "yes"),
                    help="keep saves on iCloud Drive (<I>/save becomes a symlink to "
@@ -461,20 +463,24 @@ def redirect_saves(cfg, master, phase_log):
     if os.path.isfile(env_path):
         with open(env_path, "r", encoding="utf-8", errors="replace") as f:
             kept = [ln for ln in f.read().splitlines()
-                    if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE="))]
+                    if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=", "DM_PSO_PAIRS="))]
     shaders_dir = os.path.join(cfg["install_dir"], "shaders")
     os.makedirs(shaders_dir, exist_ok=True)
     pso_user = os.path.join(shaders_dir, "pso_user.tsv")
     # Pipeline archive: nxnative defaults to pso_archive/ beside pso_user.tsv
     # (nvn_mtl.m). Pinned explicitly so the layout holds whatever the default.
     pso_archive = os.path.join(shaders_dir, "pso_archive")
+    pso_pairs = os.path.join(shaders_dir, "swx_pairs.tsv")
     with open(env_path, "w", encoding="utf-8") as f:
         for ln in kept:
             f.write(ln + "\n")
         f.write(f"DM_SAVE={dm_save}\n")
         f.write(f"DM_PSO_USER={pso_user}\n")
         f.write(f"DM_PSO_ARCHIVE={pso_archive}\n")
-    log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE to {env_path}")
+        if os.path.isfile(pso_pairs):
+            f.write(f"DM_PSO_PAIRS={pso_pairs}\n")
+    log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE"
+                     f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''} to {env_path}")
 
     moved, kept_back = [], []
     old_save = os.path.join(as_dir, "save")
@@ -539,10 +545,47 @@ def redirect_saves(cfg, master, phase_log):
             "dm_pso_user": pso_user, "pso_rows_merged": pso_merged,
             "dm_pso_archive": pso_archive, "archive_moved": arch_moved,
             "archive_kept": arch_kept,
+            "dm_pso_pairs": pso_pairs if os.path.isfile(pso_pairs) else None,
             "nested_moved": nest_moved, "nested_kept": nest_kept}
     record_note = f"phase save-redirect ok ({secs:.1f}s): {len(moved)} moved"
     log_line(master, record_note)
     return info
+
+
+def derive_community_profile(cfg, master, phase_log):
+    """Community coverage into the build (pairs file + derived manifest).
+
+    - swx_pairs.tsv (profile pairs + new community pairs) -> DM_PSO_PAIRS:
+      prebuild/hybrid coverage without touching validated tables.
+    - Derived profile overlay (full copy minus patches.py, manifest extended
+      with converted R rows) -> DM_GAMES_DIR + DM_GAMES_FIRST: warm-up
+      coverage. Split-validated tables stay byte-identical, so checks pass.
+    Returns (pairs_path, out_id), or None when the shared list is unavailable.
+    """
+    try:
+        from shader_derive import write_pairs_file, build_derived, DEFAULT_MNG_LIST
+    except ImportError as e:
+        log_line(master, f"derive-profile: skipped ({e})")
+        return None
+    mng_list = cfg.get("mng_list") or DEFAULT_MNG_LIST
+    if not os.path.isfile(mng_list):
+        msg = f"shared shader list not found: {mng_list}; continuing stock"
+        log_line(master, f"derive-profile: {msg}")
+        print(f"warning: {msg}", file=sys.stderr)
+        return None
+    profile_dir = os.path.join(here_root(), "core", "nxnative", "dm", "games", cfg["title_id"])
+    if not os.path.isdir(profile_dir):
+        log_line(master, f"derive-profile: no profile for {cfg['title_id']}; continuing stock")
+        return None
+    pairs_path = os.path.join(cfg["install_dir"], "shaders", "swx_pairs.tsv")
+    pairs_stats = write_pairs_file(profile_dir, mng_list, pairs_path)
+    out_id = os.path.join(cfg["install_dir"], "game", "derived", cfg["title_id"])
+    mani_stats = build_derived(profile_dir, mng_list, out_id)
+    log_line(master, f"derive-profile: pairs_added={pairs_stats['added']} "
+                     f"manifest_rows_added={mani_stats['manifest_rows_added']} -> {out_id}")
+    with open(phase_log, "a", encoding="utf-8", errors="replace") as f:
+        f.write(f"community coverage: pairs {pairs_stats} manifest {mani_stats}\n")
+    return pairs_path, out_id
 
 
 def stage_game_files(cfg, master):
@@ -577,6 +620,14 @@ def run_nxnative(cfg, stage, master, phase_log, spinner):
            "--progress", "json"]
     env = dict(os.environ)
     env["DM_GAME"] = cfg["title_id"]
+    derived = derive_community_profile(cfg, master, phase_log)
+    if derived is not None:
+        pairs_path, out_id = derived
+        env["DM_PSO_PAIRS"] = pairs_path
+        env["DM_GAMES_DIR"] = os.path.dirname(out_id)
+        env["DM_GAMES_FIRST"] = "1"
+        log_line(master, f"nxnative: prebuild pairs overlay DM_PSO_PAIRS={pairs_path}")
+        log_line(master, f"nxnative: warm-up overlay DM_GAMES_DIR={env['DM_GAMES_DIR']}")
     log_line(master, f"phase nxnative start: {' '.join(cmd)} (DM_GAME={cfg['title_id']})")
     with open(phase_log, "a", encoding="utf-8") as f:
         f.write(f"$ {' '.join(cmd)}\n")
@@ -793,6 +844,7 @@ def main(argv=None):
         "title_id": args.title_id,
         "platform": args.platform,
         "app_name": args.app_name,
+        "mng_list": args.mng_list,
         "icloud_drive_save": args.icloud_drive_save,
     }
     missing = [k for k in ("base", "update", "keys", "install_dir") if not cfg[k]]
