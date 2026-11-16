@@ -25,7 +25,10 @@ debugging (the wrapper then runs against a pristine core).
 ## Semantics
 
 1. Check-then-apply: every patch in series order is verified first
-   (`patch -p1 --dry-run`); any failure stops the run before anything is
+   (`patch --batch -p1 --dry-run`; `--batch`, and a single stdin redirect —
+   on 2026-11-16 a stray `</dev/null` after the file redirect fed patch
+   empty stdin, which exits 0 doing nothing, and the marker blessed a
+   pristine tree). Any failure stops the run before anything is
    modified — no half-patched tree.
 2. Idempotent: when the marker hash matches the current series + contents,
    the script reports "already applied" and exits 0.

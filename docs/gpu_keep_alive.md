@@ -33,7 +33,33 @@ switch (`gpu-keepalive.txt` via `dm_gfx_keepalive_start`, live toggle via
 `dm_gfx_keepalive_set`). Off in play only sleeps the thread. Stats (kernels,
 summed/longest GPU time) surface in the overlay (`mtl_keepalive_stats`).
 
-## Contrast with nxnative
+## Adapted implementation (swx, `patches/swx_keepalive_gpu.patch`)
+
+Status: patch written, applies cleanly, new file compiles standalone;
+gameplay A/B pending (requires an install, which rebuilds the host).
+
+- New file `dm/gfx/nvn/swx_keepalive.m` (picked up automatically — both
+  Makefiles glob `*.m`, no build-system change): own Metal device reference
+  and classic command queue, runtime-compiled spin kernel, thread on
+  `USER_INITIATED`, self-calibrating ~1 ms kernels, `SWX_GPU_KEEPALIVE=0`
+  to disable (default on macOS, off on iOS), `SWX_GPU_KEEPALIVE_US=100..1000`.
+- Two one-line hooks in `nvn_mtl.m` (no hot-path changes): `swx_gpu_inflight()`
+  reader next to `g_seg_inflight`, and start-on-first-presented-frame in
+  `mtl_ub_present` (`iv > 0`). Unit tests, the prebuild tool and dropped
+  presents never start it (they never present).
+- Divergences from the reference: no early-exit stop word in v1 (kernels are
+  capped ~1 ms on a separate queue; a game submission never waits behind
+  one) — add it with a commit hook only if measurements show interference.
+- Why it cannot disturb the frame step: the step's GPU cost comes from the
+  game's own per-fence `GPUStartTime/GPUEndTime` (`hle_nvn.c fstep_tick` via
+  `mtl_gpu_ms`); the spinner's command buffers have their own fences and
+  never touch those numbers. The spinner thread mostly sleeps, so the
+  process-level CPU share check is unaffected.
+- Thermal note: sustained spinning holds the GPU out of its floor state by
+  design; on thermal pressure macOS still governs (probes gate on
+  `dm_thermal_now()`, unchanged).
+
+## Contrast with nxnative (reference design)
 
 nxnative has no spinner. Its answer to the same idle-downclock problem is
 **present snapshots** (keep CPU/GPU flowing through presentation; BOTW note:

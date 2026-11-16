@@ -86,6 +86,16 @@ def here_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _env_flag(name):
+    """Env tri-state: true/false/None (unset)."""
+    v = os.environ.get(name, "").lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def parse_args(argv):
     p = argparse.ArgumentParser(
         prog="main.py",
@@ -107,10 +117,16 @@ def parse_args(argv):
                    help="name of the built .app (default: Breath of the Wild)")
     p.add_argument("--mng-list", default=os.environ.get("SWX_MNG_LIST", ""),
                    help="shared shader list for the derived profile (default: refs checkout; missing = stock profile)")
-    p.add_argument("--icloud-drive-save", action="store_true",
-                   default=os.environ.get(ENV["icloud_drive_save"], "").lower() in ("1", "true", "yes"),
-                   help="keep saves on iCloud Drive (<I>/save becomes a symlink to "
-                        "iCloud Drive/Games/<short name>/Saves)")
+    p.add_argument("--icloud-drive-save", dest="icloud_drive_save", action="store_true",
+                   default=_env_flag(ENV["icloud_drive_save"]),
+                   help="keep saves on iCloud Drive (<I>/save becomes a symlink)")
+    p.add_argument("--no-icloud-drive-save", dest="icloud_drive_save", action="store_false",
+                   help="keep saves local, never ask (pairs with --open for unattended runs)")
+    p.add_argument("--open", dest="open_game", action="store_true",
+                   default=_env_flag("SWX_OPEN"),
+                   help="open the built game when the install finishes (no prompt)")
+    p.add_argument("--no-open", dest="open_game", action="store_false",
+                   help="do not open the game at the end (no prompt)")
     p.add_argument("--print-config", action="store_true",
                    help="print the resolved config as JSON and exit")
     p.add_argument("--validate-only", action="store_true",
@@ -780,7 +796,7 @@ def run_install(cfg, spinner_enabled):
         print(f"done: {app_path}")
         print(f"master log: {master}")
         print(f"receipt: {record['receipt']}")
-        if maybe_open_app(app_path):
+        if maybe_open_app(app_path, cfg.get("open_game")):
             print(f"opened: {app_path}")
         return 0
     except (KeyboardInterrupt, _Interrupted):
@@ -817,16 +833,20 @@ def run_install(cfg, spinner_enabled):
         return 1
 
 
-def maybe_open_app(app_path):
-    """Ask whether to open the built game now; launch via `open` on yes.
+def maybe_open_app(app_path, mode):
+    """Open the built game, per mode: True = always, False = never,
+    None = ask on a TTY (never without one).
 
     Never fails the install: a refused open only warns. Skipped without a TTY.
     """
-    if not sys.stdin.isatty():
+    if mode is False:
         return False
-    ans = ask("Open the game now? [Y/n]", "Y")
-    if ans.lower() not in ("", "y", "yes"):
-        return False
+    if mode is None:
+        if not sys.stdin.isatty():
+            return False
+        ans = ask("Open the game now? [Y/n]", "Y")
+        if ans.lower() not in ("", "y", "yes"):
+            return False
     r = subprocess.run(["open", app_path])
     if r.returncode != 0:
         print(f"warning: could not open {app_path}", file=sys.stderr)
@@ -846,6 +866,7 @@ def main(argv=None):
         "app_name": args.app_name,
         "mng_list": args.mng_list,
         "icloud_drive_save": args.icloud_drive_save,
+        "open_game": args.open_game,
     }
     missing = [k for k in ("base", "update", "keys", "install_dir") if not cfg[k]]
     if missing:
@@ -859,10 +880,13 @@ def main(argv=None):
         if cfg[k]:
             cfg[k] = os.path.abspath(normalize_path(cfg[k]))
 
-    if (not args.print_config and not args.validate_only
-            and not cfg["icloud_drive_save"] and sys.stdin.isatty()):
+    if (cfg["icloud_drive_save"] is None
+            and not args.print_config and not args.validate_only
+            and sys.stdin.isatty()):
         ans = ask("Use iCloud Drive for saves? [y/N]", "")
         cfg["icloud_drive_save"] = ans.lower() in ("y", "yes")
+    elif cfg["icloud_drive_save"] is None:
+        cfg["icloud_drive_save"] = False
 
     if args.print_config:
         errors = validate(cfg)

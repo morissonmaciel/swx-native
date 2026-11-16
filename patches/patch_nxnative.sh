@@ -45,16 +45,26 @@ fi
 # 1. check everything first
 for p in $PATCHES; do
     [ -f "$HERE/$p" ] || { echo "[ERROR] patch listed in series but missing: $p" >&2; exit 1; }
-    if ! patch -p1 --dry-run -d "$CORE" < "$HERE/$p" >/dev/null 2>&1; then
+    if ! patch --batch -p1 --dry-run -d "$CORE" < "$HERE/$p" >/dev/null 2>&1; then
         echo "[ERROR] patch does not apply cleanly (rebase it): $p" >&2
         echo "        resolve inside core/nxnative, then refresh patches/$p -- never edit core directly." >&2
         exit 1
     fi
 done
-# 2. then apply everything
+# 2. then apply everything (single stdin redirect = the patch file, plus
+# --batch so patch never prompts; NEVER add a second stdin redirect such as
+# </dev/null after the file: the last redirect wins, patch would read empty
+# stdin, exit 0 doing nothing, and the marker below would bless a tree that
+# was never patched -- this exact bug happened once, 2026-11-16).
 for p in $PATCHES; do
-    patch -p1 -d "$CORE" < "$HERE/$p" >/dev/null || { echo "[ERROR] failed applying: $p" >&2; exit 1; }
+    patch --batch -p1 -d "$CORE" < "$HERE/$p" >/dev/null || { echo "[ERROR] failed applying: $p" >&2; exit 1; }
     echo "patches: applied $p"
+done
+# 3. verify every NEW file the patches claim to create actually exists.
+# A marker must never claim an application that did not land (silent skip).
+# (New files are the `--- /dev/null` + `+++ b/<path>` hunks.)
+for f in $(awk '/^--- \/dev\/null$/{getline; if ($0 ~ /^\+\+\+ b\//) print substr($0, 7)}' $HERE/$PATCHES 2>/dev/null); do
+  [ -e "$CORE/$f" ] || { echo "[ERROR] patch applied but new file $f is missing in $CORE -- not marking as done." >&2; exit 1; }
 done
 echo "$WANT" > "$MARKER"
 echo "patches: done ($WANT)."

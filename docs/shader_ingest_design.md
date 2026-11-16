@@ -103,8 +103,18 @@ players' new rows flow in.
   collapsed, 1,179 shader-not-in-map, 222 specialized-a2c skipped). Semantic
   validation: stage bytes match the profile map's own stage column on all
   25,815 rows (0 mismatches); all outputs are 1024 hex chars with sane
-  names/stages/samples. Delivery into the warm-up manifest is the remaining
-  step before the empirical gate (install → play → `new pipelines` counts).
+  names/stages/samples.
+
+## Empirical gate: PASSED (live gameplay, keep-alive build)
+
+Warm-up: 18,172 render pipelines, 0 stale keys, 0 pipelines without a base,
+zero `[RED]`; prebuild union 16,103 pairs including `swx_pairs.tsv`. Session:
+84 longframes, of which only 9 involve new pipelines (40–126 ms,
+hybrid-covered); the rest are texture first-uploads on area entry and
+GPU-bound steady frames. Cross-check: all 633 runtime-built R rows reference
+known shaders but none matches a converted row (genuinely new states, not
+conversion misses), and 633/633 of their pairs were prebuild-covered — zero
+full stalls by design, with learnings accumulating into `pso_user.tsv`.
 
 ## Residual backlog (explicitly deferred)
 
