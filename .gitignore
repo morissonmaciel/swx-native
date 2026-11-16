@@ -1,0 +1,32 @@
+# Upstream / reference checkouts (large, local only; see README for how to fetch core)
+core/
+refs/
+
+# Local Python environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Game files, keys and dumps (never commit)
+*.nsp
+*.nsx
+*.xci
+*.nsz
+*.xcz
+*.nup
+prod.keys
+keys.txt
+*_build/
+*.img
+
+# Build outputs
+*.app
+*.ipa
+*.dmg
+
+# Logs, caches and local state
+*.log
+shader/
+.DS_Store
+.env
