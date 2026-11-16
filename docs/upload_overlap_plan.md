@@ -60,7 +60,7 @@ Each dated 2026-11-16 with a one-line rationale:
   runs 4724 frames with 0 RED/0 blinks — `instrumentation/ab_results.md`
   Gate 3a, pinned by `wrapper/main.py` / player `env.txt`.
 
-## 3. Slice 1 — pooled resident staging (env-gated, default off, e.g. `SWX_UPLOAD_POOL`)
+## 3. Slice 1 — pooled resident staging (env-gated, default off: `SWX_TEXTURE_POOL`)
 
 Shape (MNG mirror, NX-sized): keep a small pool of private + shared staging
 blocks resident across submissions — cf. MNG 6x32 MB private + 4x8 MB shared,

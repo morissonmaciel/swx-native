@@ -150,3 +150,13 @@ OFF since (opt in with `SWX_UPLOAD_SPLIT=1`); the counters stay as
 measurement infrastructure. Takeaway 1 stands, sharpened: byte-count
 *or* texture-count splitting cannot fix a submit-thread encode bottleneck —
 only overlap (CPU ahead of GPU) or pooled resident staging removes it.
+
+## Open: unattributed submit blocks (frame 755 family, 2026-11-16)
+
+Long run (19,854 frames, `SWX_TEXTURE_POOL=1`): frame 755 whole 26.3 ms with
+submit+present 24.9 ms against GPU 0.3 ms, 0 pipelines, 4 uploads / 0.8 MB /
+0.1 ms encode — ~24 ms of submit with no owner in the log. Same family as
+the earlier 77/69 ms freeze with no attributed cause. Not reproducible on
+demand; next step when it recurs is a `DM_NVN_WAITS=1` run to name the
+waiter. Upload, pipeline and GPU causes excluded by the longframe
+decomposition above.

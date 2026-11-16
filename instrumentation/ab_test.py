@@ -37,7 +37,7 @@ KEYS = {
     "snap": "DM_PRESENT_SNAP",
     "save": "DM_SAVE_ASYNC",
     "pso": "DM_PSO_USER_ASYNC",
-    "pool": "SWX_UPLOAD_POOL",
+    "pool": "SWX_TEXTURE_POOL",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4"}
