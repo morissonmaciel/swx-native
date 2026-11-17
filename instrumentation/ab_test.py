@@ -7,17 +7,18 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
 "on" writes an explicit value (visible as `launcher: env K=V` at boot;
-=1, except snap=4); "off" forces stock (=0, except snap=2); "clear" removes
-the line so the compiled/profile default applies. Strict stock measurement
-baseline is pinned by every install: snapshot ring 2 (`DM_PRESENT_SNAP=2`);
-`snap 4` is an optional smoothness experiment that can conceal the visible
-hitch; keep-alive on on macOS (texture-upload count split was removed after
-Gate 1 showed +13 ms).
+=1, except snap=4 and vfr=relaxed); "off" forces stock (=0, except snap=2);
+"clear" removes the line so the compiled/profile default applies. Every
+install pins the steady-beat baseline: `SWX_VFR=relaxed` at auto Hz plus
+snapshot ring 2 (`DM_PRESENT_SNAP=2`); `set vfr off` restores the legacy
+Switch-interval frame step for A/B. `snap 4` is an optional smoothness
+experiment that can conceal the visible hitch; keep-alive on on macOS
+(texture-upload count split was removed after Gate 1 showed +13 ms).
 """
 import json
 import os
@@ -38,10 +39,11 @@ KEYS = {
     "pso": "DM_PSO_USER_ASYNC",
     "pool": "SWX_GPU_TEXTURE_POOL",
     "bind_once": "SWX_GPU_BIND_ONCE",
+    "vfr": "SWX_VFR",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
-ON_VALUES = {"snap": "4"}
-OFF_VALUES = {"snap": "2"}
+ON_VALUES = {"snap": "4", "vfr": "relaxed"}
+OFF_VALUES = {"snap": "2", "vfr": "0"}
 
 ENV_ALWAYS_KEEP = ("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=",
                    "DM_PSO_PAIRS=")
@@ -89,7 +91,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear",
+        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]

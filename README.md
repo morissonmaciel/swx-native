@@ -54,6 +54,12 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 
 ## On Tests (experimental, installed by default)
 
+- `SWX_VFR=relaxed` + `SWX_VFR_HZ=auto` (pinned by the installer;
+  `=0` restores the legacy Switch-interval frame step): the game's clock
+  follows the host's steady beat at the display rate (VFR ratio published
+  per frame, 1/15 s step cap, bounded debt) instead of the 1/2/3-vsync
+  intervals — movies and VFR overrides suspend it back to legacy. See
+  `docs/vfr_framepace.md`, `instrumentation/ab_results.md`.
 - `DM_PRESENT_SNAP=2` (stock snapshot ring, pinned by the installer for
   current texture-hitch testing; `snap 4` is an optional smoothness
   experiment, not the default): the frame-ahead overlap (`DM_NVN_SYNC_LAG`)

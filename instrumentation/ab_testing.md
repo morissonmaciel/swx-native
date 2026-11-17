@@ -21,19 +21,25 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
 
 `on` writes an explicit `=1` (visible as `launcher: env K=1` at boot);
 `off` writes `=0` (forces stock behavior); `clear` removes the line so the
-compiled default applies. Strict stock measurement baseline is pinned by
-every install (`DM_PRESENT_SNAP=2`, stock snapshot ring) for current
-texture-hitch testing; `snap 4` is an optional smoothness experiment
+compiled default applies. Every install pins the steady-beat baseline
+(`SWX_VFR=relaxed` at auto Hz, `DM_PRESENT_SNAP=2` stock snapshot ring);
+`set vfr off` restores the legacy Switch-interval frame step for A/B
+(`ab_results.md` keeps the stock-baseline numbers for comparison).
+`snap 4` is an optional smoothness experiment
 (Gate 3a recipe, preserved in `ab_results.md`), not the default.
 Keep-alive on on macOS (the texture-upload count split was removed after its
 Gate 1 showed +13 ms; numbers preserved in `instrumentation/ab_results.md`).
+Do not combine relaxed with `DM_FPS_TARGET=0`: target 0 hands the interval
+back to the game's dynamic logic while the host ratio would still apply,
+so the host suspends the beat and runs legacy (logged) — keep the target
+at 60 (or unset) with relaxed.
 
 `collect` snapshots the finished run's game log (default: the current
 log; `--log` for the rotated `.prev.log`), the `env.txt` state, and the

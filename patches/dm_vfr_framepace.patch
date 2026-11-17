@@ -1,12 +1,12 @@
-# SWX_VFR=relaxed: steady-beat frame pace for BOTW 1.9.0 (experimental opt-in, default off).
+# SWX_VFR=relaxed: steady-beat frame pace for BOTW 1.9.0 (install-pinned default; SWX_VFR=0 restores legacy).
 # The game clock follows a host beat at the display rate instead of the Switch 1/2/3-vsync intervals:
 # hle_nvn.c paces nvnWindowAcquireTexture on an nvn_pace beat after the previous texture ticket is released
 # (ticket, snapshot-ring and fence waits still run; no sync-lag), publishes a 5-sample-averaged, 1/15 s-capped
 # real-time VFR ratio with bounded debt to state +0xA0 (64-bit atomic pair, MNG shape) and reports every 300 presents;
 # the BOTW profile forces setWaitVsyncInterval to 1 and loads the published ratio at the fcmp site in
 # VFR::updateInterval (entry stubs unchanged), gated by the VFR_FRAMEPACE capability the loader reads from
-# fixups.tsv; loader.c seeds the vfr words and hle.h/dm.h carry the capability. Pure logic lives in
-# nvn_vfr_pace.h (unit test t_vfr_pace.c); stub semantics are emulated in test_vfr_stub.py.
+# fixups.tsv; loader.c seeds the vfr words and hle.h/dm.h carry the capability; DM_FPS_TARGET=0 suspends the beat.
+# Pure logic lives in nvn_vfr_pace.h (unit test t_vfr_pace.c); stub semantics are emulated in test_vfr_stub.py.
 # State offsets stay clear of the duo_anchor params (+0x80..+0x98): ratio+seconds +0xA0, mode +0xA8, flags +0xAC, steps +0xB0.
 # verify: dm/gfx/nvn/nvn_vfr_pace.h
 # verify: dm/gfx/nvn/hle_nvn.c:swx_vfr_poll
@@ -27,7 +27,7 @@
  # a stub there publishes it at state +0x24 so the host holds frames that long, and the setter stub leaves the framework's interval to the game while it is set. x16 / x17 are free
 -# at both entries
 +# at both entries.
-+# VFR frame pace (SWX_VFR=relaxed, experimental opt-in): the setter stub hands a steady interval 1 while vfr mode is set (state +0xA8), unless the VFR override
++# VFR frame pace (SWX_VFR=relaxed, install-pinned default): the setter stub hands a steady interval 1 while vfr mode is set (state +0xA8), unless the VFR override
 +# is set (the original path then, as above); a mid-function stub at the ratio compare (main+0x151d484, fcmp s1,s0) loads the host's real-time ratio from state +0xA0 instead of the
 +# framework's candidate, after the same override check and a bit-range validity check (0 < bits <= 2.0, i.e. at most a 1/15 s step; anything else runs the original fcmp).
 +# x16 / x17 are free in the whole VFR body (verified: no use between main+0x151d3d0 and its ret), s2 is dead after main+0x151d470, and x19 still holds the VFR at the site.
@@ -114,11 +114,11 @@
  #include "nvn_fstep.h"
  #include "nvn_rt.h"
  #include "nvn_timestamp.h"
-@@ -1908,14 +1909,68 @@
+@@ -1908,14 +1909,70 @@
  uint64_t dm_nvn_frame_count(void) { return g_frame; }
  extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
  uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
-+// ---- VFR frame pace (SWX_VFR=relaxed, experimental opt-in, default off) ----
++// ---- VFR frame pace (SWX_VFR=relaxed, install-pinned default; SWX_VFR=0 restores legacy) ----
 +// The game's clock follows a steady host beat at the display rate instead of the Switch's 1/2/3-vsync intervals. Active only when the profile
 +// declared VFR_FRAMEPACE (dm_vfr_capable, set by the loader from the fixups table), the state page exists, DETCLOCK is off, and neither a
 +// movie nor the game's own VFR override is in force. The ticket, snapshot-ring and fence waits below still run: the beat never frees a texture the
@@ -150,6 +150,8 @@
 +}
 +static int swx_vfr_suspended(void) {
 +    if (!dm_fps_state || dm_detclock_enabled()) return 1;
++    { uint32_t b = __atomic_load_n((uint32_t *)dm_fps_state, __ATOMIC_RELAXED); float t; memcpy(&t, &b, 4);
++      if (!(t > 0)) return 1; }   // no frame-step target (DM_FPS_TARGET=0): the game runs its own interval logic, and the host ratio must not mix with it
 +    if (__atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED)) return 1;        // a movie: its player steps by pictures
 +    if (__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED)) return 1;    // the VFR override: the game fixed its step
 +    return 0;
@@ -166,7 +168,7 @@
 +        g_vfr_on = 0;
 +        __atomic_store_n((uint32_t *)(dm_fps_state + SWX_VFR_MODE_OFF), 0u, __ATOMIC_RELAXED);
 +        swx_vfr_reset(&g_vfr);
-+        static int n; if (n++ < 8) LOG("[nvn] vfr frame pace off (movie, VFR override, DETCLOCK, env or capability)");
++        static int n; if (n++ < 8) LOG("[nvn] vfr frame pace off (movie, VFR override, DETCLOCK, no frame-step target, env or capability)");
 +    }
 +}
  NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
@@ -183,7 +185,7 @@
          uint64_t p0 = now_ns(); int snap = mtl_snap_on();
          o->follow = 1;   // the beat paces this frame only where the branches below wait for the slot time (nvn_pace_follow)
          if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
-@@ -1928,17 +1983,31 @@
+@@ -1928,17 +1985,31 @@
          if (!present_unpaced(o) && mtl_present_screen_wait(period / 1e9)) atomic_store(&g_screen_at, now_ns());   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
          drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
          pace_ns = now_ns() - p0;
@@ -217,7 +219,7 @@
      if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
      if (!g_fs_start) { g_fs_start = now_ns(); g_fs_wait = pace_ns; g_fs_drain += drain_ns; }   // the frame starts when the first acquire after a present returns: on a display-link tick when on time
      else g_fs_drain_late += drain_ns;
-@@ -2431,7 +2500,7 @@
+@@ -2431,7 +2502,7 @@
      LOG("[nvn] present tick %d Hz, interval mode %s (%s; present interval set by the game %d; %s)", g_hz, g_display_mode ? "display (one frame per tick, a cut)" : "game (original semantics)",
          m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
  }
@@ -226,7 +228,7 @@
  // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
  // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
  // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
-@@ -2463,6 +2532,7 @@
+@@ -2463,6 +2534,7 @@
  }
  static uint64_t present_period(const win_t *o) {
      present_cfg(o);
@@ -234,7 +236,7 @@
      int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
      if (want != was) {
          atomic_store(&g_game_itv, want);
-@@ -2612,7 +2682,7 @@
+@@ -2612,7 +2684,7 @@
      int c = fps_step_cap();
      if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
          LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, why); was = c; } }
@@ -243,7 +245,7 @@
      dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
      static uint64_t prev_in, prev_out, prev_pass, prev_draw;
      present_cfg(o);
-@@ -2717,24 +2787,44 @@
+@@ -2717,24 +2789,44 @@
                snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u",
                         (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
                // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
@@ -368,12 +370,12 @@
  DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
  DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
  DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
-+SWX_VFR	switch	`=relaxed` (experimental opt-in, default off): a supported game's clock follows the host's steady beat at the display rate instead of the Switch's 1/2/3-vsync intervals (BOTW 1.9.0: VFR_FRAMEPACE stubs read the host's real-time ratio from the frame state page); anything else runs the legacy frame step
++SWX_VFR	switch	`=relaxed` (install-pinned default for supported games; `=0` restores the legacy frame step): a supported game's clock follows the host's steady beat at the display rate instead of the Switch's 1/2/3-vsync intervals (BOTW 1.9.0: VFR_FRAMEPACE stubs read the host's real-time ratio from the frame state page); needs a frame-step target (DM_FPS_TARGET=0 suspends it)
 +SWX_VFR_HZ	switch	`=auto` (the default) or `=30..120`: the vfr frame pace's beat; auto is the window's refresh rate up to 120 Hz (60 with no window). Outside 30..120 the mode stays off with a red line
 --- /dev/null
 +++ b/dm/gfx/nvn/nvn_vfr_pace.h
 @@ -0,0 +1,90 @@
-+// VFR frame pace (SWX_VFR=relaxed, experimental opt-in): the game's
++// VFR frame pace (SWX_VFR=relaxed, install-pinned default; SWX_VFR=0 restores legacy): the game's
 +// clock follows a steady host beat instead of the Switch's 1/2/3-vsync
 +// intervals. Pure logic, shared by Mac / iOS; unit test tests/t_vfr_pace.c.
 +// The caller (hle_nvn.c) owns the environment, the display rate, the window
