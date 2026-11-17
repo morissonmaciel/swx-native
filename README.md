@@ -70,8 +70,8 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   (`collect`/`compare` labels). Expected to move: burst `submit+present`
   (still 30–55 ms stock — untouched by lag, save-async and pso batch) once pooled staging / deferred
   writeback land (`docs/io_paths_nxnative_vs_mng.md`, `docs/async_writes_evaluation.md`).
-  Upload split stays OFF by default (`SWX_UPLOAD_SPLIT=1` opts in; Gate 1
-  measured +13 ms submit with it on).
+  The texture-upload count split was removed after Gate 1 measured +13 ms
+  submit with it on (`instrumentation/ab_results.md`).
 
 ## Known issues (measured — evidence in `instrumentation/ab_results.md`)
 

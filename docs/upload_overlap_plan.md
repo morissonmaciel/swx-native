@@ -45,12 +45,12 @@ Each dated 2026-11-16 with a one-line rationale:
 - S1-full no-clone save DROPPED in favor of S2 async delete with clone
   kept: APFS CoW clone+swap is metadata-cheap and preserving it keeps the
   exact durability/atomicity contract — `docs/async_writes_evaluation.md` §4.
-- Gate-1 split default flipped OFF: on the identical 237-first / 29.5 MB
-  burst, same route, split ON cost 8 batches / 44.2 ms submit vs OFF
-  6 batches / 31.1 ms (`instrumentation/ab_results.md` Gate 1) — rescommit
-  deltas measure single-digit ms in the times-diag, so +13 ms cannot be
-  commit cost; fragmentation adds overhead without moving encode off the
-  submit thread. Opt back in with `SWX_UPLOAD_SPLIT=1` only.
+- Gate-1 count split REMOVED (2026-11-16): on the identical 237-first /
+  29.5 MB burst, same route, split ON cost 8 batches / 44.2 ms submit vs OFF
+  6 batches / 31.1 ms (`instrumentation/ab_results.md` Gate 1). Fragmentation
+  adds overhead without moving encode off the submit thread, so the patch,
+  its env switch and its docs were deleted; numbers preserved in
+  `instrumentation/ab_results.md`.
 - Async pso batch implemented default ON: `pso_user_record` keeps dedup,
   appends under one leaf lock, flushes every 64 rows on a UTILITY serial
   queue — crash loses only unflushed rows, re-learned next run

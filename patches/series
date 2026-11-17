@@ -1,5 +1,4 @@
 swx_keepalive_gpu.patch
-texture_upload_split.patch
 dm_nvn_sync_lag.patch
 dm_save_async.patch
 dm_pso_user_async.patch

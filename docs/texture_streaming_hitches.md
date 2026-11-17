@@ -140,15 +140,12 @@ Anchors: NX `nvn_rec.h:1-16` (encode thread QoS), `nvn_mtl.m:10042-10147` (`pso_
 
 133 of 135 longframes show `new pipelines 0` (max observed: one frame with 6): the remaining hitches are texture uploads (e.g. frame 621: 99 first uploads, 24.3 MB) and GPU-bound frames (17–21 ms GPU vs 16.7 ms budget), not pipeline compiles. Prewarm covered 18,224 pipelines (community overlay) with 0 stale keys and 0 pipelines without a base; `draws that waited` empty; hybrid stand-ins covered first-seen draws. The shader side is converged — the residue is streaming + GPU budget.
 
-Gate 1 update (2026-11-16, `instrumentation/ab_results.md`): a count
-split was built (`SWX_UPLOAD_SPLIT`, default 64) plus per-frame batch
-instrumentation (`in N batches (M split)`). On the identical 237-first
-burst, split ON flushed `in 8 batches (3 split)` at 44.2 ms submit vs
-`in 6 batches (0 split)` at 31.1 ms stock — fragmenting adds ~13 ms of
-commit overhead without moving encode off the submit thread. Default is
-OFF since (opt in with `SWX_UPLOAD_SPLIT=1`); the counters stay as
-measurement infrastructure. Takeaway 1 stands, sharpened: byte-count
-*or* texture-count splitting cannot fix a submit-thread encode bottleneck —
+Gate 1 verdict (2026-11-16, numbers in `instrumentation/ab_results.md`): a
+texture-count split (`SWX_UPLOAD_SPLIT`) was built and measured +13 ms submit
+on the identical burst with no encode moved off the submit thread — so the
+patch and its docs were removed (only pooled resident staging remains as the
+batching answer). Takeaway 1 stands, sharpened: byte-count *or*
+texture-count splitting cannot fix a submit-thread encode bottleneck —
 only overlap (CPU ahead of GPU) or pooled resident staging removes it.
 
 ## Open: unattributed submit blocks (frame 755 family, 2026-11-16)

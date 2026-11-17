@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set split|keepalive|lag|snap|save|pso|pool|bind_once on|off|clear
+  ab_test.py set keepalive|lag|snap|save|pso|pool|bind_once on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
@@ -17,7 +17,7 @@ the line so the compiled/profile default applies. Strict stock measurement
 baseline is pinned by every install: lag OFF (DM_NVN_SYNC_LAG=0),
 snapshot ring 2 (DM_PRESENT_SNAP=2); lag ON + snap 4 is an optional
 smoothness experiment that can conceal the visible hitch; keep-alive on
-on macOS; upload split OFF unless SWX_UPLOAD_SPLIT=1 (Gate 1).
+on macOS (texture-upload count split was removed after Gate 1 showed +13 ms).
 """
 import json
 import os
@@ -32,7 +32,6 @@ APP_SUPPORT_ENV = os.path.expanduser(
     f"~/Library/Application Support/nxnative/{TITLE_ID}/env.txt")
 
 KEYS = {
-    "split": "SWX_UPLOAD_SPLIT",
     "keepalive": "SWX_GPU_KEEPALIVE",
     "lag": "DM_NVN_SYNC_LAG",
     "snap": "DM_PRESENT_SNAP",
@@ -91,7 +90,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set split|keepalive|lag|snap|save|pso|pool|bind_once on|off|clear",
+        print("usage: ab_test.py set keepalive|lag|snap|save|pso|pool|bind_once on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]
@@ -131,7 +130,7 @@ def cmd_collect(args):
     print(f"collected '{label}': {rep['frames']} frames, "
           f"{rep['longframe_count']} longframes (worst {rep['worst_ms']:.1f} ms), "
           f"uploads {rep['first_uploads_total']} in {rep.get('batches_total', 0)} batches "
-          f"({rep.get('split_batches_total', 0)} split) -> {dest}")
+          f"-> {dest}")
 
 
 def one_line(path):
@@ -150,7 +149,6 @@ def one_line(path):
         "uploads": rep["first_uploads_total"],
         "mb": rep["first_uploads_mb"],
         "batches": rep.get("batches_total", 0),
-        "split": rep.get("split_batches_total", 0),
         "up_per_batch": rep.get("upload_batch_rate", 0.0),
         "u_alloc": rep.get("up_alloc_ms_total", 0.0),
         "u_rescommit": rep.get("up_rescommit_ms_total", 0.0),
@@ -182,7 +180,7 @@ def cmd_compare(args):
             raise SystemExit(2)
         rows.append(one_line(p))
     cols = ["label", "frames", "longframes", "worst", "lf_up", "lf_up_worst", "lf_up_submit_p95",
-            "lf_gpu", "lf_gpu_worst", "uploads", "mb", "batches", "split",
+            "lf_gpu", "lf_gpu_worst", "uploads", "mb", "batches",
             "up_per_batch", "u_alloc", "u_rescommit", "u_commit", "u_drain",
             "u_slotwait", "u_oldq", "p_direct", "p_enc", "p_cpu",
             "p_di_ms", "p_en_ms", "p_cp_ms", "steps", "keepalive"]

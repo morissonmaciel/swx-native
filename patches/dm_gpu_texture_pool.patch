@@ -7,23 +7,25 @@
 # Slice 2 pre-reserve: resident pool blocks add no new bytes, so the 128 MB
 # batch cap counts the texture's own bytes instead of whole-block sizes;
 # stock keeps the worst-case block cost. One-offs (>32MB, pool exhausted)
-# keep today path. Commit and fence ordering untouched.
+# keep today's path. Commit and fence ordering untouched.
+# Rebased 2026-11-16 onto split-free tree (no instrumentation, no count-split
+# context); verified by full apply + build.
 # verify: dm/gfx/nvn/nvn_mtl.m:swx_pool_take
 # verify: dm/gfx/nvn/nvn_mtl.m:g_swx_pool_busy
 # verify: dm/gfx/nvn/nvn_mtl.m:!g_up_block_pooled && !up_retained
-# verify: dm/gfx/nvn/nvn_mtl.m:swx_gpu_texture_pool_on
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_texture_pool_on
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
-@@ -3311,6 +3311,36 @@
- // SWX_UPLOAD_SPLIT=1 enables it; SWX_UPLOAD_SPLIT_MAX_TEX=N sets the count
- // (8..4096, default 64) and also enables it.
- static int g_up_batch_tex;   // textures started in this batch (up_alloc is per-texture)
+@@ -3283,6 +3283,36 @@
+ // texture larger than the budget gets its own block (uploads are not tiled here).
+ static size_t g_up_staging_bytes;
+ #define UP_BATCH_BYTES (128u * 1024u * 1024u)
 +// SWX_GPU_TEXTURE_POOL=1: unified texture-loading improvements (default off).
 +// 6x32MB private blocks stay resident across batches; take = find free (busy
 +// bit clear) instead of per-batch newBuffer+res_add; retire = clear busy bit
 +// on upload completion instead of res_remove. Slice 2 pre-reserve: resident
 +// pool blocks add no new bytes, so the 128 MB batch cap counts the texture's
-+// own bytes instead of whole-block sizes (bursts stop over-splitting).
++// own bytes instead of whole-block sizes; stock keeps the worst-case block cost.
 +// One-offs (>32MB, pool exhausted) keep today's path. Slot retention, commit
 +// and fence ordering are untouched.
 +#define SWX_UP_POOL_N 6
@@ -31,7 +33,7 @@
 +static _Atomic uint64_t g_swx_pool_busy;
 +static _Atomic uint64_t g_swx_pool_hits, g_swx_pool_miss;
 +static unsigned g_swx_batch_pool; static int g_up_block_pooled;
-+static int swx_gpu_texture_pool_on(void) {
++static int swx_texture_pool_on(void) {
 +    static int v = -1;
 +    if (v < 0) { const char *e = getenv("SWX_GPU_TEXTURE_POOL"); v = e && atoi(e) != 0;
 +        if (v) MLOG("SWX_GPU_TEXTURE_POOL=1: unified texture staging (resident 6x32MB pool + pre-reserve); =0 keeps stock path"); }
@@ -48,10 +50,10 @@
 +    atomic_fetch_add(&g_swx_pool_miss, 1);
 +    return nil;
 +}
- static int swx_upload_split_max(void) {
-     static int n = -1;
-     if (n < 0) {
-@@ -3363,10 +3393,11 @@
+ 
+ 
+ // The upload command buffer was discarded by the system (dropped along during GPU error recovery; the first frame on entering Travincal drops one every run): the objects of this batch of textures are built and the timestamps updated, but the content was never written in,
+@@ -3319,10 +3349,11 @@
      // Only this upload batch uses its overflow staging. Retire it on upload
      // completion, even when the main rendering submission is still being built.
      NSMutableArray *staging = g_up_keep;
@@ -59,13 +61,13 @@
 +    if (g_up_block && !g_up_block_pooled && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
      NSMutableArray *views = g_up_views; g_up_views = nil;
      g_up_keep = nil; g_up_block = nil;
--    g_up_block_off = g_up_block_size = g_up_staging_bytes = g_up_batch_tex = 0;
+-    g_up_block_off = g_up_block_size = g_up_staging_bytes = 0;
 +    unsigned swx_pm = g_swx_batch_pool; g_swx_batch_pool = 0;
-+    g_up_block_off = g_up_block_size = g_up_staging_bytes = g_up_batch_tex = 0; g_up_block_pooled = 0;
++    g_up_block_off = g_up_block_size = g_up_staging_bytes = 0; g_up_block_pooled = 0;
      NSMutableSet *targets = [NSMutableSet setWithArray:g_up_texs]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [targets addObject:g_up_blits[i].dst];
      NSArray *dsts = targets.allObjects;
      static int lost_at = -2; static uint64_t batch_n; if (lost_at == -2) { const char *e = getenv("DM_TEST_UP_LOST"); lost_at = e ? atoi(e) : -1; } int fake_lost = dsts.count && lost_at > 0 && (int)++batch_n == lost_at;
-@@ -3389,6 +3420,7 @@
+@@ -3345,6 +3376,7 @@
              res_commit();
          }
          atomic_store(&g_up_alloc_busy[slot], 0);
@@ -73,25 +75,25 @@
          atomic_fetch_sub(&g_up_pending, 1);
          up_wake();
      }];
-@@ -3447,7 +3479,13 @@
+@@ -3401,7 +3433,13 @@
  } }
  static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
      size_t need = (n + 255u) & ~((size_t)255u);
 -    size_t extra = MAX(need, UP_BLOCK_SIZE);
 +    // Slice 2 pre-reserve: resident pool blocks add no new bytes, so the batch
 +    // cap counts the texture's own bytes; stock keeps the worst-case block cost.
-+    size_t extra = swx_gpu_texture_pool_on() ? need : MAX(need, UP_BLOCK_SIZE);
-+    if (swx_gpu_texture_pool_on() && need <= UP_BLOCK_SIZE && (!g_up_block || g_up_block_off + need > g_up_block_size)) {
++    size_t extra = swx_texture_pool_on() ? need : MAX(need, UP_BLOCK_SIZE);
++    if (swx_texture_pool_on() && need <= UP_BLOCK_SIZE && (!g_up_block || g_up_block_off + need > g_up_block_size)) {
 +        unsigned pi = 0; id<MTLBuffer> pb = swx_pool_take(&pi);
 +        if (pb) { g_up_block = pb; g_up_block_size = (size_t)[pb length]; g_up_block_off = 0; g_up_block_pooled = 1; g_swx_batch_pool |= 1u << pi; g_up_staging_bytes += need; }
 +    }
      // This call starts one texture's upload: all prior deswizzles and copies are
      // complete records, so the batch can be split without ending the render pass.
-     if (g_up_staging_bytes && ((!g_up_block || need > g_up_block_size - g_up_block_off)
-@@ -3465,22 +3503,22 @@
+     if (g_up_staging_bytes && (!g_up_block || need > g_up_block_size - g_up_block_off)
+@@ -3416,22 +3454,22 @@
          size_t want = UP_SLOT_BLOCK; while (want < demand) want <<= 1;
          if (*sb && (*sb).length < want) { defer_obj_release(*sb); *sb = nil; }   // the slot's previous batch has finished (up_begin waited for it)
-         if (!*sb) { uint64_t t0 = swx_now_ns(); *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); res_add(*sb); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+         if (!*sb) { *sb = [g_dev newBufferWithLength:want options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the swizzled-upload staging block %#zx", want); res_add(*sb); g_up_blocks_new++; }
 -        g_up_block = *sb; g_up_block_size = (*sb).length; g_up_block_off = 0;
 +        g_up_block = *sb; g_up_block_size = (*sb).length; g_up_block_off = 0; g_up_block_pooled = 0;
          g_up_staging_bytes += (*sb).length;
@@ -106,13 +108,13 @@
 +            if (!g_up_block_pooled && !up_retained(g_up_block, g_up_cur_slot)) { if (!g_up_keep) g_up_keep = [NSMutableArray array]; [g_up_keep addObject:g_up_block]; } }
          if (up_reuse() && need <= UP_BLOCK_SIZE && !g_up_over_used) {
              __strong id<MTLBuffer> *sb = &g_up_slot_over[g_up_cur_slot];
-             if (!*sb) { uint64_t t0 = swx_now_ns(); *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+             if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
 -            g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1;
 +            g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1; g_up_block_pooled = 0;
          } else {
              g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
--            { uint64_t t0 = swx_now_ns(); g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
-+            { uint64_t t0 = swx_now_ns(); g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate]; g_up_block_pooled = 0;
-             res_add(g_up_block); g_up_blocks_new++; atomic_fetch_add(&g_swx_up_alloc_ns, swx_now_ns() - t0); atomic_fetch_add(&g_swx_up_alloc_n, 1); }
+-            g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
++            { g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate]; g_up_block_pooled = 0;
+             res_add(g_up_block); g_up_blocks_new++;
          }
          if (!g_up_block) MDIE("failed to create the swizzled-upload staging block %#zx", g_up_block_size);

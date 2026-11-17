@@ -150,8 +150,8 @@ screen-ahead; the game profile only promises 2). Current installs pin the
 strict stock measurement baseline instead (`DM_NVN_SYNC_LAG=0` +
 `DM_PRESENT_SNAP=2`) for texture-hitch testing; `=1` / `snap 4` remains
 available as an optional smoothness experiment. `SWX_*` default in code
-(keep-alive on on macOS; upload split opt-in with `SWX_UPLOAD_SPLIT=1`
-since Gate 1). Stock baseline (`=0` / `snap 2`) is pinned by
+(keep-alive on on macOS; the upload-split opt-in was removed after Gate 1
+showed +13 ms — patch and docs deleted 2026-11-16). Stock baseline (`=0` / `snap 2`) is pinned by
 `wrapper/main.py:redirect_saves`; `=1` / `snap 4` opts into the smoothness
 experiment for A/B.
 
