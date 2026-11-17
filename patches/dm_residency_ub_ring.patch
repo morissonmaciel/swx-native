@@ -1,0 +1,120 @@
+# SWX_RESIDENCY_UB_RING=1: fence-safe resident ring for uniform-update bumps.
+# Rotation of g_ubs_buf used to allocate a new shared buffer + res_add it and
+# defer-release (+res_remove) the old one on every exhaust. The ring keeps up to
+# 4 settled buffers registered in the residency set and reuses one only after its
+# retire fence completed; a buffer referenced by an in-flight command buffer never
+# returns. Submission fences are assigned once in mtl_sub_commit (segments share
+# it and complete before it on the same queue): the rotated-away entry is stamped
+# with g_fence+1, the current one at commit. Under pressure (ring full, entry over
+# 4 MB) the write falls back to the legacy one-shot path instead of retaining
+# unboundedly. Install-pinned default on. Aggregate counters only (power-line log:
+# reuse, new, inflight, peak, fallback, KB reused; no per-write logging). A/B via
+# ab_test.py residency-ub-ring (=0 restores the legacy path).
+# verify: dm/gfx/nvn/nvn_mtl.m:SWX_RESIDENCY_UB_RING
+# verify: dm/gfx/nvn/nvn_mtl.m:void mtl_ubr_stats
+# verify: dm/gfx/nvn/nvn_mtl.m:ubr_rotate(need)
+# verify: dm/gfx/nvn/hle_nvn.c:ub-ring up to frame
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2299,7 +2299,62 @@
+ }
+ void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made = g_ubp_made; *reused = g_ubp_reused; *refused = g_ubp_refused; }
+ void mtl_ubp_why(uint64_t w[6]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
++// Fence-safe resident ring for mtl_sub_update bumps (SWX_RESIDENCY_UB_RING=1, default off).
++// Rotation used to allocate a new shared buffer + res_add it and defer-release (+res_remove) the old one on every
++// exhaust. The ring keeps up to UBR_MAX settled buffers registered in the residency set and reuses one only after its
++// retire fence completed; a buffer referenced by an in-flight command buffer never returns. Submission fences are
++// assigned once in mtl_sub_commit (++g_fence; sub_cut segments share it and complete before it on the same queue),
++// so the entry rotated away from is stamped with g_fence+1 (== that submission's fence) and the current one at
++// commit. Under pressure (ring full, entry too big) the write falls back to the legacy one-shot path instead of
++// retaining unboundedly.
++enum { UBR_MAX = 4 }; enum { UBR_CAP_MAX = 4u * 1024u * 1024u };
++static id<MTLBuffer> g_ubr_buf[UBR_MAX];   // strong refs: ring-owned, stay resident
++typedef struct { size_t cap; uint64_t fence; } ubr_ent;
++static ubr_ent g_ubr[UBR_MAX]; static int g_ubr_n, g_ubr_cur = -1, g_ubr_wrote;
++static _Atomic uint64_t g_ubr_reuse, g_ubr_new, g_ubr_fallback, g_ubr_bytes, g_ubr_peak;
++static int ubr_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("SWX_RESIDENCY_UB_RING"); v = e && atoi(e) != 0;
++        if (v) MLOG("SWX_RESIDENCY_UB_RING=1: fence-safe resident ring for uniform-update bumps"); }
++    return v;
+ }
++static void ubr_rotate(size_t need) {
++    int old = g_ubr_cur;
++    if (old >= 0) g_ubr[old].fence = g_fence + 1;   // == this submission's fence (assigned once at commit)
++    else if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // legacy one-shot, never inserted: existing path
++    uint64_t done = atomic_load(&g_done);
++    { int fly = 0; for (int i = 0; i < g_ubr_n; i++) if (g_ubr[i].fence > done) fly++;
++      uint64_t pk = atomic_load(&g_ubr_peak); if ((uint64_t)fly > pk) atomic_compare_exchange_strong(&g_ubr_peak, &pk, (uint64_t)fly); }
++    int best = -1;
++    for (int i = 0; i < g_ubr_n; i++) {
++        if (i == old || g_ubr[i].cap < need || g_ubr[i].fence > done) continue;
++        best = i; break;
++    }
++    if (best >= 0) {
++        g_ubr_cur = best; g_ubs_buf = g_ubr_buf[best]; g_ubs_size = g_ubr[best].cap; g_ubs_off = 0;
++        atomic_fetch_add(&g_ubr_reuse, 1); atomic_fetch_add(&g_ubr_bytes, (uint64_t)need);
++        return;
++    }
++    atomic_fetch_add(&g_ubr_new, 1);
++    g_ubs_size = MAX((size_t)1 << 20, need);
++    id<MTLBuffer> nb = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
++    if (!nb) MDIE("uniform update ring allocation failed %#zx", g_ubs_size);
++    res_add(nb);
++    if (g_ubr_n < UBR_MAX && g_ubs_size <= UBR_CAP_MAX) {   // retain for reuse; bigger one-shots stay legacy
++        g_ubr_buf[g_ubr_n] = nb; g_ubr[g_ubr_n].cap = g_ubs_size; g_ubr[g_ubr_n].fence = 0;
++        g_ubr_cur = g_ubr_n++;
++    } else {
++        atomic_fetch_add(&g_ubr_fallback, 1);
++        g_ubr_cur = -1;
++    }
++    g_ubs_buf = nb; g_ubs_off = 0;
++}
++void mtl_ubr_stats(uint64_t *reuse, uint64_t *nw, uint64_t *inflight, uint64_t *peak, uint64_t *fallback, uint64_t *bytes) {
++    if (reuse) *reuse = atomic_load(&g_ubr_reuse); if (nw) *nw = atomic_load(&g_ubr_new);
++    if (fallback) *fallback = atomic_load(&g_ubr_fallback); if (bytes) *bytes = atomic_load(&g_ubr_bytes);
++    if (peak) *peak = atomic_load(&g_ubr_peak);
++    if (inflight) { uint64_t done = atomic_load(&g_done); uint64_t fly = 0; for (int i = 0; i < g_ubr_n; i++) if (g_ubr[i].fence > done) fly++; *inflight = fly; }
++}
+ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+     if (!n) return;
+     rc_write(dst,n,data,0);
+@@ -2309,13 +2364,16 @@
+     int defer = (enc_open() || (ubd_lazy() && !g_blit)) && g_nubd < UBD_MAX && ubd_on();
+     size_t need = (n + 255u) & ~(size_t)255u;   // 256-aligned slots: a deferred update is read in place by draws as a uniform buffer
+     if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
++        if (ubr_on()) ubr_rotate(need);
++        else {
+         if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // copies already encoded still reference the old block: release after this submission completes
+         g_ubs_size = MAX((size_t)1 << 20, need);
+         g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
+         if (!g_ubs_buf) MDIE("uniform update ring allocation failed %#zx", g_ubs_size);
+         res_add(g_ubs_buf); g_ubs_off = 0;
++        }
+     }
+-    memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
++    memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n); g_ubr_wrote = 1;
+     if (pi >= 0) { g_upd[g_nupd] = (upd_ent){dst, g_ubs_off, g_ubs_buf}; g_pend_upd[pi] = (uint32_t)++g_nupd; }
+     if (defer) {
+         // A deferred update this one covers whole never needs to land: the same landing writes these bytes after it, and the draws that read it hold its ring copy (ubd_shadow).
+@@ -2708,6 +2766,7 @@
+     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
+     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
+     uint64_t fence = ++g_fence;
++    if (g_ubr_cur >= 0 && g_ubr_wrote) { g_ubr[g_ubr_cur].fence = fence; g_ubr_wrote = 0; }   // ub-ring: current entry retires behind this submission
+     if (g_nvs) { post((post_op){3, NULL, VIS_FOLD, 0, 0, 0, vis_snapshot()}); vis_clear(); }   // this submission's slots after its last report: read at its completion (Occlusion queries)
+     gw_commit(fence); rc_commit(fence);
+     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2164,7 +2164,9 @@
+         void swx_keepalive_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pkn, pku, pks; uint64_t kn, ku, kx, ks, kq; swx_keepalive_stats(&kn, &ku, &kx, &ks, &kq);
+         if (kn != pkn) LOG("[nvn] keep-alive up to frame %llu: %llu kernels, %.1f GPU ms, max %.2f ms, %llu stopped, stop-cb max %.3f ms", frame, (unsigned long long)(kn - pkn), (ku - pku) / 1e3, kx / 1e3, (unsigned long long)(ks - pks), kq / 1e6);
+         pkn = kn; pku = ku; pks = ks;
+-
++        void mtl_ubr_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pru, prw, prf, prb; uint64_t ru, rw, ri, rp, rf, rb; mtl_ubr_stats(&ru, &rw, &ri, &rp, &rf, &rb);
++        if (ru != pru || rw != prw || rf != prf) LOG("[nvn] ub-ring up to frame %llu: %llu reuse, %llu new, %llu inflight (peak %llu), %llu fallback, %.0f KB reused", frame, (unsigned long long)(ru - pru), (unsigned long long)(rw - prw), (unsigned long long)ri, (unsigned long long)rp, (unsigned long long)(rf - prf), (rb - prb) / 1024.0);
++        pru = ru; prw = rw; prf = rf; prb = rb;
+ 
+         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
+         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }

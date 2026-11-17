@@ -5,3 +5,4 @@ dm_gpu_texture_pool.patch
 dm_gpu_bind_once.patch
 dm_vfr_framepace.patch
 dm_gpu_keepalive_yield.patch
+dm_residency_ub_ring.patch

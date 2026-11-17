@@ -21,7 +21,7 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```

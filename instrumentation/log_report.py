@@ -63,7 +63,9 @@ def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
            "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0,
            "ka_kernels": 0, "ka_gpu_ms": 0.0, "ka_max_ms": 0.0,
-           "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0}
+           "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0,
+           "ubr_reuse": 0, "ubr_new": 0, "ubr_peak": 0,
+           "ubr_fallback": 0, "ubr_reused_kb": 0.0}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "[swx-keepalive] on:" in line:
@@ -92,6 +94,11 @@ def report(path):
                 rep["ka_max_ms"] = max(rep["ka_max_ms"], float(m.group(3)));
                 rep["ka_stopped"] += int(m.group(4));
                 rep["ka_stop_cb_max_ms"] = max(rep["ka_stop_cb_max_ms"], float(m.group(5)))
+            m = re.search(r"ub-ring up to frame \d+: (\d+) reuse, (\d+) new, \d+ inflight \(peak (\d+)\), (\d+) fallback, ([\d.]+) KB reused", line)
+            if m:
+                rep["ubr_reuse"] += int(m.group(1)); rep["ubr_new"] += int(m.group(2));
+                rep["ubr_peak"] = max(rep["ubr_peak"], int(m.group(3)));
+                rep["ubr_fallback"] += int(m.group(4)); rep["ubr_reused_kb"] += float(m.group(5))
             m = re.search(r"frame (\d+) \(", line)
             if m:
                 rep["frames"] = max(rep["frames"], int(m.group(1)))

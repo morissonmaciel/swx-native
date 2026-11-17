@@ -109,3 +109,30 @@ Promoted: install pins `SWX_GPU_KEEPALIVE=1` + `SWX_GPU_KEEPALIVE_YIELD=1`
 (macOS; code defaults already on). `=0` on either restores stock for A/B.
 `log_report` marks keepalive only on the `on:` line; the stop-callback lag
 is wall clock (includes CPU scheduling), not a kernel-exit proof.
+
+## Gate — ub-ring R1 (luneta): PASS, promoted to install default
+
+Slice: `patches/dm_residency_ub_ring.patch` (`SWX_RESIDENCY_UB_RING=1`,
+default off during the gate) — up to 4 settled shared buffers stay
+registered in the residency set; reuse only after the retire fence
+completed (submission fences assigned once in `mtl_sub_commit`, shared by
+`sub_cut` segments); pressure falls back to the legacy one-shot path.
+Same luneta route, 2 boots per side, keepalive+yield on, pool off.
+
+Verdict: causally removes the recurring `g_ubs_buf` alloc + add/remove-set
+churn with no regression in any scenario — promoted as a submission
+stability / resource-availability optimization, explicitly not a fix for
+the luneta's 20–24 ms GPU cost (that stays with passes/attachments).
+
+2×2 gate (same route, 2 boots/side, keepalive+yield on, pool off):
+off-side line 2373 created 34–41 1 MB buffers per hot window (+34–41 MB
+to the set, 3.1–5.2 ms in commits); on-side the source is gone after
+warm-up (stable reuse, zero fallback, zero new allocations hot).
+Hot UB rotation 0 vs 34–41 MB/window; residency commits 0.1–1.3 ms vs
+3.1–5.2 ms; frame p95 16.72–16.74 vs 16.73–16.75 ms; zero `[RED]`, VFR
+stable both sides. Two GPU-bound longframes on the off-side (frames 1924,
+2014, ~17 ms GPU, no uploads) are not used as standalone GPU-benefit proof.
+Details in `docs/residency_ub_ring.md`.
+
+Promoted: install pins `SWX_RESIDENCY_UB_RING=1`. `=0` restores the legacy
+path for A/B.
