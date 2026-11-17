@@ -21,7 +21,7 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|lag|snap|save|pso|pool|bind_once on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
@@ -29,12 +29,11 @@ python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 `on` writes an explicit `=1` (visible as `launcher: env K=1` at boot);
 `off` writes `=0` (forces stock behavior); `clear` removes the line so the
 compiled default applies. Strict stock measurement baseline is pinned by
-every install (`DM_NVN_SYNC_LAG=0`, `DM_PRESENT_SNAP=2`) for current
-texture-hitch testing; `=1` / `snap 4` is an optional smoothness experiment
+every install (`DM_PRESENT_SNAP=2`, stock snapshot ring) for current
+texture-hitch testing; `snap 4` is an optional smoothness experiment
 (Gate 3a recipe, preserved in `ab_results.md`), not the default.
 Keep-alive on on macOS (the texture-upload count split was removed after its
-Gate 1 showed +13 ms; numbers preserved in `instrumentation/ab_results.md`). `lag` arms the host switch; verify it took effect
-via `sync-lag: True` in the report.
+Gate 1 showed +13 ms; numbers preserved in `instrumentation/ab_results.md`).
 
 `collect` snapshots the finished run's game log (default: the current
 log; `--log` for the rotated `.prev.log`), the `env.txt` state, and the
@@ -62,11 +61,8 @@ improvement of at least 1 ms, and no individual regression above 1 ms.
    `compare split-on-baseline keepalive-off` (Gate 2, historical label).
    Then `set keepalive clear`. `compare` prints a `sync-lag:` line too —
    must read False on every stock-baseline run.
-3. Phase 3 (done — `patches/dm_nvn_sync_lag.patch`, default ON in code when
-   env is absent): the historical Gate 3a-pass recipe was
-   `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4` in player `env.txt`.
-   Current installs pin the strict stock baseline (`DM_NVN_SYNC_LAG=0` +
-   `DM_PRESENT_SNAP=2`); use `set lag on` / `set snap on` for the optional
-   smoothness experiment. A/B against stock: `set lag off` (plus
-   `set snap 2` for the pure-stock ring) vs defaults, `collect`, compare.
-   Gate 3a (correctness) before Gate 3b (numbers).
+3. Historical Gate 3 (done; frame-ahead patch since removed — the recipe
+   below no longer runs, kept for the record): `DM_NVN_SYNC_LAG=1` +
+   `DM_PRESENT_SNAP=4` in player `env.txt` passed Gate 3a (correctness) with
+   mixed Gate 3b (numbers), so the patch, its env switch and its dedicated
+   doc were deleted (`instrumentation/ab_results.md` Gate 3).

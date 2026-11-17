@@ -55,12 +55,12 @@ Each dated 2026-11-16 with a one-line rationale:
   appends under one leaf lock, flushes every 64 rows on a UTILITY serial
   queue — crash loses only unflushed rows, re-learned next run
   (`patches/dm_pso_user_async.patch`, `docs/async_writes_evaluation.md` §6).
-- Lag + `SNAP=4` historical Gate 3a recipe (now an optional smoothness
-  experiment, not the install default): ring 2 blinks
-  (2 frames of latency in a 2-slot ring), ring 4 (`DM_PRESENT_SNAP=4`)
-  runs 4724 frames with 0 RED/0 blinks — `instrumentation/ab_results.md`
-  Gate 3a. Current installs pin the strict stock baseline
-  (`DM_NVN_SYNC_LAG=0` + `DM_PRESENT_SNAP=2`) for texture-hitch testing.
+- Frame-ahead overlap REMOVED (2026-11-17): the `DM_NVN_SYNC_LAG` port of
+  MNG's `SYNC_LAG` (Gate 3a recipe `=1` + `DM_PRESENT_SNAP=4`, ring 4 runs
+  4724 frames with 0 RED/0 blinks) was not approved as default — subjective
+  call, Gates 3a/3b mixed. Patch, env switch and dedicated doc deleted;
+  numbers preserved in `instrumentation/ab_results.md`. Current installs pin
+  the stock snapshot ring (`DM_PRESENT_SNAP=2`) for texture-hitch testing.
 
 ## 3. Slice 0 — bind-once state cache (env-gated, default off: `SWX_GPU_BIND_ONCE`)
 
@@ -181,9 +181,9 @@ ship a wrong texel. Parked until slices 1–2 numbers demand it.
   (`docs/nxnative_patches.md`); the marker file never blesses an unverified
   tree.
 - A/B via `instrumentation/ab_test.py set` keys (source of truth is
-  `ab_test.py:10,38-40`): `split`, `keepalive`, `lag`, `snap`, `save`,
-  `pso` — `on` writes `=1` (snap `=4`), `off` writes `=0` (snap `=2`),
-  `clear` restores the compiled default. (The prose list in
+  `ab_test.py:10,38-40`): `keepalive`, `snap`, `save`,
+  `pso`, `pool`, `bind_once` — `on` writes `=1` (snap `=4`), `off` writes
+  `=0` (snap `=2`), `clear` restores the compiled default. (The prose list in
   `instrumentation/ab_testing.md` shows only the first four; the tool
   supports all six.)
 - Rollback = revert patch + rebuild: `sh patches/patch_nxnative.sh <core>

@@ -54,13 +54,11 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 
 ## On Tests (experimental, installed by default)
 
-- `DM_PRESENT_SNAP=2` + `DM_NVN_SYNC_LAG=0` (strict stock measurement
-  baseline, pinned by the installer for current texture-hitch testing;
-  `=1` / `snap 4` is an optional smoothness experiment, not the default):
-  historical Gate 3a finding with lag=1/snap=4 was flat frametime in the heavy
-  area-entry region, zero 30 fps holds over thousands of frames, zero
-  repeated present blinks (ring 2 blinked under lag; ring 4 does not).
-  See `docs/sync_lag_evaluation.md`, `instrumentation/ab_results.md`.
+- `DM_PRESENT_SNAP=2` (stock snapshot ring, pinned by the installer for
+  current texture-hitch testing; `snap 4` is an optional smoothness
+  experiment, not the default): the frame-ahead overlap (`DM_NVN_SYNC_LAG`)
+  was removed (not approved as default — subjective call, Gates 3a/3b
+  mixed); numbers preserved in `instrumentation/ab_results.md`.
 - `DM_SAVE_ASYNC=1` (pinned by the installer; `=0` restores stock):
   swapped-out save versions delete on a background thread while
   clone+swap stay synchronous — commits measure sub-ms, no save-attributed
@@ -68,7 +66,7 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   stock): `pso_user.tsv` rows batch in memory, one fflush per flush.
 - To re-measure after the I/O work lands: same fixed route, `instrumentation/ab_test.py`
   (`collect`/`compare` labels). Expected to move: burst `submit+present`
-  (still 30–55 ms stock — untouched by lag, save-async and pso batch) once pooled staging / deferred
+  (still 30–55 ms stock — untouched by save-async and pso batch) once pooled staging / deferred
   writeback land (`docs/io_paths_nxnative_vs_mng.md`, `docs/async_writes_evaluation.md`).
   The texture-upload count split was removed after Gate 1 measured +13 ms
   submit with it on (`instrumentation/ab_results.md`).
@@ -78,8 +76,6 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 - Texture bursts still cost 30–55 ms submit (stock batching): splitting by
   count adds commit overhead without moving encode off the submit thread.
   Pools/overlap are future work, not this split.
-- Frame-ahead + snapshot ring: `DM_NVN_SYNC_LAG=1` needs `DM_PRESENT_SNAP=4`
-  (optional smoothness experiment, not installer-pinned); ring 2 blinks under lag.
 - Single white-frame display drops happen rarely in stock too; ring 4
   absorbs them.
 - Autosave commits are background-cleaned by default (`DM_SAVE_ASYNC=1`):

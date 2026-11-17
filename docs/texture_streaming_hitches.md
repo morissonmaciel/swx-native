@@ -144,9 +144,11 @@ Gate 1 verdict (2026-11-16, numbers in `instrumentation/ab_results.md`): a
 texture-count split (`SWX_UPLOAD_SPLIT`) was built and measured +13 ms submit
 on the identical burst with no encode moved off the submit thread — so the
 patch and its docs were removed (only pooled resident staging remains as the
-batching answer). Takeaway 1 stands, sharpened: byte-count *or*
+batching answer; the frame-ahead overlap port was likewise removed after
+Gates 3a/3b came back mixed — numbers in `instrumentation/ab_results.md`).
+Takeaway 1 stands, sharpened: byte-count *or*
 texture-count splitting cannot fix a submit-thread encode bottleneck —
-only overlap (CPU ahead of GPU) or pooled resident staging removes it.
+only pooled resident staging removes it.
 
 ## Open: unattributed submit blocks (frame 755 family, 2026-11-16)
 

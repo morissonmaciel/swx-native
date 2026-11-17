@@ -7,17 +7,17 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|lag|snap|save|pso|pool|bind_once on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
 "on" writes an explicit value (visible as `launcher: env K=V` at boot;
 =1, except snap=4); "off" forces stock (=0, except snap=2); "clear" removes
 the line so the compiled/profile default applies. Strict stock measurement
-baseline is pinned by every install: lag OFF (DM_NVN_SYNC_LAG=0),
-snapshot ring 2 (DM_PRESENT_SNAP=2); lag ON + snap 4 is an optional
-smoothness experiment that can conceal the visible hitch; keep-alive on
-on macOS (texture-upload count split was removed after Gate 1 showed +13 ms).
+baseline is pinned by every install: snapshot ring 2 (`DM_PRESENT_SNAP=2`);
+`snap 4` is an optional smoothness experiment that can conceal the visible
+hitch; keep-alive on on macOS (texture-upload count split was removed after
+Gate 1 showed +13 ms).
 """
 import json
 import os
@@ -33,7 +33,6 @@ APP_SUPPORT_ENV = os.path.expanduser(
 
 KEYS = {
     "keepalive": "SWX_GPU_KEEPALIVE",
-    "lag": "DM_NVN_SYNC_LAG",
     "snap": "DM_PRESENT_SNAP",
     "save": "DM_SAVE_ASYNC",
     "pso": "DM_PSO_USER_ASYNC",
@@ -76,7 +75,7 @@ def cmd_status(args):
     _ = args
     print(f"env.txt: {APP_SUPPORT_ENV}")
     for ln in read_env_lines():
-        if ln.strip().startswith(("SWX_", "DM_NVN_SYNC_LAG", "DM_NVN_WAITS")) \
+        if ln.strip().startswith(("SWX_", "DM_NVN_WAITS")) \
                 or ln.strip().startswith(ENV_ALWAYS_KEEP):
             print(f"  {ln}")
     for p in (DEFAULT_LOG, DEFAULT_LOG.replace(".log", ".prev.log")):
@@ -90,7 +89,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set keepalive|lag|snap|save|pso|pool|bind_once on|off|clear",
+        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]
