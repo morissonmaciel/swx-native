@@ -7,15 +7,16 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
 "on" writes an explicit value (visible as `launcher: env K=V` at boot;
 =1, except snap=4 and vfr=relaxed); "off" forces stock (=0, except snap=2);
 "clear" removes the line so the compiled/profile default applies. Every
-install pins the steady-beat baseline: `SWX_VFR=relaxed` at auto Hz plus
-snapshot ring 2 (`DM_PRESENT_SNAP=2`); `set vfr off` restores the legacy
+install pins the steady-beat baseline: `SWX_VFR=relaxed` at auto Hz (the
+snapshot ring is not pinned, so the compiled default applies unless set
+for A/B); `set vfr off` restores the legacy
 Switch-interval frame step for A/B. `snap 4` is an optional smoothness
 experiment that can conceal the visible hitch; keep-alive on on macOS
 (texture-upload count split was removed after Gate 1 showed +13 ms).
@@ -40,6 +41,7 @@ KEYS = {
     "pool": "SWX_GPU_TEXTURE_POOL",
     "bind_once": "SWX_GPU_BIND_ONCE",
     "vfr": "SWX_VFR",
+    "yield": "SWX_GPU_KEEPALIVE_YIELD",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4", "vfr": "relaxed"}
@@ -91,7 +93,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear",
+        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]
@@ -165,6 +167,11 @@ def one_line(path):
         "p_cp_ms": rep.get("up_pcp_ms_total", 0.0),
         "steps": ",".join(rep["steps"]) or "-",
         "keepalive": rep["keepalive"],
+        "ka_kernels": rep.get("ka_kernels", 0),
+        "ka_gpu_ms": rep.get("ka_gpu_ms", 0.0),
+        "ka_max_ms": rep.get("ka_max_ms", 0.0),
+        "ka_stopped": rep.get("ka_stopped", 0),
+        "ka_stop_cb_max_ms": rep.get("ka_stop_cb_max_ms", 0.0),
     }
 
 
@@ -184,7 +191,8 @@ def cmd_compare(args):
             "lf_gpu", "lf_gpu_worst", "uploads", "mb", "batches",
             "up_per_batch", "u_alloc", "u_rescommit", "u_commit", "u_drain",
             "u_slotwait", "u_oldq", "p_direct", "p_enc", "p_cpu",
-            "p_di_ms", "p_en_ms", "p_cp_ms", "steps", "keepalive"]
+            "p_di_ms", "p_en_ms", "p_cp_ms", "steps", "keepalive",
+            "ka_kernels", "ka_gpu_ms", "ka_max_ms", "ka_stopped", "ka_stop_cb_max_ms"]
     width = [max(len(c), max(len(str(r[c])) for r in rows)) for c in cols]
     print("  ".join(c.ljust(w) for c, w in zip(cols, width)))
     for r in rows:

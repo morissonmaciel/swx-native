@@ -61,10 +61,12 @@ def classify(line):
 
 def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
-           "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0}
+           "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0,
+           "ka_kernels": 0, "ka_gpu_ms": 0.0, "ka_max_ms": 0.0,
+           "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            if "[swx-keepalive]" in line:
+            if "[swx-keepalive] on:" in line:
                 rep["keepalive"] = True
             if "DM_NVN_SYNC_LAG=1: newest-fence" in line:
                 rep["synclag"] = True
@@ -84,6 +86,12 @@ def report(path):
                 rep.setdefault("submit_pipeline_ms", []).append(float(m.group(1)))
             if "[longframe]" in line:
                 rep["longframes"].append(classify(line))
+            m = re.search(r"keep-alive up to frame \d+: (\d+) kernels, ([\d.]+) GPU ms, max ([\d.]+) ms, (\d+) stopped, stop-cb max ([\d.]+) ms", line)
+            if m:
+                rep["ka_kernels"] += int(m.group(1)); rep["ka_gpu_ms"] += float(m.group(2));
+                rep["ka_max_ms"] = max(rep["ka_max_ms"], float(m.group(3)));
+                rep["ka_stopped"] += int(m.group(4));
+                rep["ka_stop_cb_max_ms"] = max(rep["ka_stop_cb_max_ms"], float(m.group(5)))
             m = re.search(r"frame (\d+) \(", line)
             if m:
                 rep["frames"] = max(rep["frames"], int(m.group(1)))

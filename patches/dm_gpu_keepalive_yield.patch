@@ -1,0 +1,264 @@
+# SWX_GPU_KEEPALIVE_YIELD=1: stop the keep-alive spin kernel as soon as the game commits.
+# The spinner fills only real GPU idle: one short self-calibrated kernel on its own
+# queue while the game is submitting. Yield (default on) adds a shared stop word the
+# kernel polls every 1024 iterations (~25 us); swx_keepalive_game_commit() sets it
+# before each main command-buffer commit (normal path and sub_cut), and the last
+# completion signals a semaphore the spinner waits on instead of polling every 2 ms.
+# Stopped kernels never recalibrate the length. =0 keeps the old behavior (kernels
+# run to their end, 2 ms polling) for A/B. Start moved to the first mtl_sub_begin
+# (every submit stamps activity, monotonic CLOCK_UPTIME_RAW); the 100 ms idle stop
+# is unchanged. No yield message and no stop write with keepalive off (the stop
+# buffer doubles as the spinner-exists guard). Aggregate counters only (power-line
+# log: kernels, GPU ms, max ms, stopped, stop-callback max wall clock which includes
+# CPU scheduling and is not a kernel-exit proof; no per-kernel logging). Gate
+# approval uses kernels, GPU ms, max ms and stopped (MNG parity). A/B via
+# ab_test.py keepalive|yield.
+# verify: dm/gfx/nvn/swx_keepalive.m:swx_keepalive_game_commit
+# verify: dm/gfx/nvn/swx_keepalive.m:SWX_GPU_KEEPALIVE_YIELD
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_submit
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_game_commit
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_idle_signal
+# verify: dm/gfx/nvn/hle_nvn.c:keep-alive up to frame
+--- a/dm/gfx/nvn/swx_keepalive.m
++++ b/dm/gfx/nvn/swx_keepalive.m
+@@ -1,6 +1,6 @@
+ #import <Foundation/Foundation.h>
+ #import <Metal/Metal.h>
+-#import <sys/time.h>
++#import <time.h>
+ #import <unistd.h>
+ #import <stdatomic.h>
+ #import <TargetConditionals.h>
+@@ -20,23 +20,38 @@
+ // - Own device reference and command queue: never touches the game's queues,
+ //   encoders or fences, so game GPU-time accounting (per-fence GPUStart/End)
+ //   and the frame step are unaffected. Only reads one counter.
+-// - Starts on the first presented frame (called from mtl_ub_present), so
+-//   unit tests, the prebuild tool and headless captures never start it.
+-// - No early-exit stop word in v1: kernels are capped around 1 ms on a
+-//   separate queue, so a game submission never waits behind one.
++// - Starts on the first mtl_sub_begin (every submit stamps activity), not on
++//   the first present, so the spinner is already up when the first frame's
++//   gaps open.
++// - Yield (SWX_GPU_KEEPALIVE_YIELD=1, default on): the kernel polls a shared
++//   stop word every 1024 iterations (~25 us); swx_keepalive_game_commit()
++//   sets it immediately before each main command-buffer commit, so a game
++//   submission never waits behind a whole kernel. The spinner also waits on
++//   a semaphore the last completion signals instead of polling every 2 ms.
++//   =0 keeps the old behavior (kernels run to their end, 2 ms polling) for
++//   A/B. The stop-callback lag (stop write to completion, wall clock)
++//   includes CPU scheduling: observability only, not a kernel-exit proof.
++//   Stopped kernels never recalibrate the length.
+ // - Env: SWX_GPU_KEEPALIVE=0 turns it off (default on macOS, off on iOS
+ //   where the spinning heats the phone); SWX_GPU_KEEPALIVE_US=100..1000
+ //   sets the kernel target length (default 1000 us).
++// - Aggregate counters only (swx_keepalive_stats, power-line log); no
++//   per-kernel logging.
+ 
+ extern int swx_gpu_inflight(void);   // nvn_mtl.m: game submissions committed and not yet reported back
+ 
++void swx_keepalive_start(void);   // the spinner thread (idempotent)
++void swx_keepalive_submit(void);   // every submission stamps keepalive activity (the first one starts the spinner)
++
+ static _Atomic int g_started, g_dead;
+-static _Atomic uint64_t g_n, g_us, g_max_us;
++static _Atomic uint64_t g_n, g_us, g_max_us, g_stopped, g_stop_cb_max_ns, g_stop_ns, g_last_ns;
+ static _Atomic int g_target_us = 1000;
++static _Atomic int g_yield = -1;
++static id<MTLBuffer> g_stop;   // shared stop word, set before each spinner when yield is on
++static dispatch_semaphore_t g_idle;   // signalled when the game's inflight count drops to 0
+ 
+ static uint64_t now_ns(void) {
+-    struct timeval tv; gettimeofday(&tv, NULL);
+-    return (uint64_t)tv.tv_sec * 1000000000ull + (uint64_t)tv.tv_usec * 1000ull;
++    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   // monotonic: immune to system clock adjustments
+ }
+ 
+ static int keepalive_on(void) {
+@@ -48,6 +63,38 @@
+ #endif
+ }
+ 
++static int ka_yield_on(void) {
++    int v = atomic_load(&g_yield);
++    if (v < 0) { const char *e = getenv("SWX_GPU_KEEPALIVE_YIELD"); v = !(e && !atoi(e));
++        atomic_store(&g_yield, v);
++        if (!v) fprintf(stderr, "[swx-keepalive] SWX_GPU_KEEPALIVE_YIELD=0: spin kernels run to their end even when the game commits (A/B)\n"); }
++    return v;
++}
++
++void swx_keepalive_submit(void) {   // every submission stamps activity; the first one starts the spinner
++    swx_keepalive_start();
++    atomic_store(&g_last_ns, now_ns());
++}
++
++void swx_keepalive_game_commit(void) {   // before each main command-buffer commit: a running spinner leaves now
++    id<MTLBuffer> stop = g_stop;
++    if (!stop || !ka_yield_on()) return;   // no spinner exists with keepalive off: ignore the yield flag entirely
++    __atomic_store_n((uint32_t *)stop.contents, 1u, __ATOMIC_RELEASE);
++    atomic_store(&g_stop_ns, now_ns());
++}
++
++void swx_keepalive_idle_signal(void) {   // the game's inflight count dropped to 0
++    dispatch_semaphore_t idle = g_idle;
++    if (idle) dispatch_semaphore_signal(idle);
++}
++
++void swx_keepalive_stats(uint64_t *n, uint64_t *us, uint64_t *max_us, uint64_t *stopped, uint64_t *stop_cb_max_ns) {
++    if (n) *n = atomic_load(&g_n); if (us) *us = atomic_load(&g_us);
++    if (max_us) *max_us = atomic_exchange(&g_max_us, 0);
++    if (stopped) *stopped = atomic_load(&g_stopped);
++    if (stop_cb_max_ns) *stop_cb_max_ns = atomic_exchange(&g_stop_cb_max_ns, 0);
++}
++
+ void swx_keepalive_start(void) {
+     if (atomic_exchange(&g_started, 1)) return;
+     if (!keepalive_on()) return;
+@@ -57,34 +104,43 @@
+     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+         if (!dev) { atomic_store(&g_dead, 1); return; }
++        int yield = ka_yield_on();
+         NSError *err = nil;
+         id<MTLLibrary> lib = [dev newLibraryWithSource:
+             @"#include <metal_stdlib>\n"
+             "using namespace metal;\n"
+-            "kernel void swx_keep(device float *slot [[buffer(0)]], constant uint &iters [[buffer(1)]], uint i [[thread_position_in_grid]]) {"
++            "kernel void swx_keep(device float *slot [[buffer(0)]], constant uint &iters [[buffer(1)]], device atomic_uint *stop [[buffer(2)]], uint i [[thread_position_in_grid]]) {"
+             " float x = slot[i] + (float)i;"
+-            " for (uint n = 0; n < iters; ++n) { x = fma(x, 1.0000001f, 0.5f); }"
++            " for (uint n = 0; n < iters; ++n) { x = fma(x, 1.0000001f, 0.5f); if ((n & 1023u) == 1023u && atomic_load_explicit(stop, memory_order_relaxed)) break; }"
+             " slot[i] = x; }\n" options:nil error:&err];
+         id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"swx_keep"] : nil;
+         id<MTLComputePipelineState> ps = fn ? [dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+         id<MTLCommandQueue> q = ps ? [dev newCommandQueue] : nil;
+         id<MTLBuffer> buf = ps ? [dev newBufferWithLength:4096 options:MTLResourceStorageModePrivate] : nil;
+-        if (!ps || !q || !buf) {
++        id<MTLBuffer> stop = ps ? [dev newBufferWithLength:4096 options:MTLResourceStorageModeShared] : nil;
++        if (!ps || !q || !buf || !stop) {
+             fprintf(stderr, "[swx-keepalive] spinner unavailable: %s\n", err ? err.localizedDescription.UTF8String : "no pipeline/queue/buffer");
+             atomic_store(&g_dead, 1);
+             return;
+         }
+-        fprintf(stderr, "[swx-keepalive] on: short spin kernels (~%d us) on their own queue while the game submits (SWX_GPU_KEEPALIVE=0 turns it off)\n", atomic_load(&g_target_us));
++        memset(stop.contents, 0, 4096); g_stop = stop; g_idle = dispatch_semaphore_create(0);
++        fprintf(stderr, "[swx-keepalive] on: short spin kernels (~%d us) on their own queue while the game submits%s (SWX_GPU_KEEPALIVE=0 turns it off)\n",
++            atomic_load(&g_target_us), yield ? ", game commit stops them" : "");
+         dispatch_semaphore_t sem = dispatch_semaphore_create(1);
+         __block uint32_t iters = 40000;   // ~1 ms at full clock; self-calibrated below
+-        uint64_t last_busy = 0;
+         for (;;) @autoreleasepool {
+             if (atomic_load(&g_dead)) return;
+             uint64_t now = now_ns();
+-            if (swx_gpu_inflight() > 0) { last_busy = now; usleep(2000); continue; }
+-            if (!last_busy || now - last_busy > 100000000ull) { usleep(10000); continue; }   // the game is not rendering
++            uint64_t last = atomic_load(&g_last_ns);
++            if (!last || now - last > 100000000ull) { usleep(10000); continue; }   // the game is not rendering
++            if (swx_gpu_inflight() > 0) {
++                if (yield) dispatch_semaphore_wait(g_idle, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_MSEC));   // the game's own GPU work keeps the clock up
++                else usleep(2000);
++                continue;
++            }
+             dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+-            if (swx_gpu_inflight() > 0) { last_busy = now_ns(); dispatch_semaphore_signal(sem); usleep(2000); continue; }
++            if (yield) __atomic_store_n((uint32_t *)stop.contents, 0u, __ATOMIC_RELEASE);   // cleared before the in-flight check: a commit after this point stops the kernel
++            if (swx_gpu_inflight() > 0) { dispatch_semaphore_signal(sem); continue; }
+             int target_us = atomic_load(&g_target_us);
+             uint32_t n = iters;
+             id<MTLCommandBuffer> cb = [q commandBuffer];
+@@ -92,15 +148,23 @@
+             [ce setComputePipelineState:ps];
+             [ce setBuffer:buf offset:0 atIndex:0];
+             [ce setBytes:&n length:4 atIndex:1];
++            [ce setBuffer:stop offset:0 atIndex:2];
+             [ce dispatchThreads:MTLSizeMake(32, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+             [ce endEncoding];
+             [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+                 double ms = (c.GPUEndTime - c.GPUStartTime) * 1e3;
+-                if (ms > 0.01) {
+-                    atomic_fetch_add(&g_n, 1);
+-                    atomic_fetch_add(&g_us, (uint64_t)(ms * 1e3));
+-                    uint64_t mx = atomic_load(&g_max_us), us = (uint64_t)(ms * 1e3);
+-                    while (us > mx && !atomic_compare_exchange_weak(&g_max_us, &mx, us)) {}
++                int stopped = yield && __atomic_load_n((uint32_t *)stop.contents, __ATOMIC_ACQUIRE) != 0;   // the game committed while it ran
++                atomic_fetch_add(&g_n, 1);
++                if (stopped) {
++                    atomic_fetch_add(&g_stopped, 1);
++                    uint64_t lat = now_ns() - atomic_load(&g_stop_ns);   // stop write to kernel completion, wall clock: includes CPU scheduling, not a kernel-exit proof
++                    uint64_t mx = atomic_load(&g_stop_cb_max_ns);
++                    while (lat > mx && !atomic_compare_exchange_weak(&g_stop_cb_max_ns, &mx, lat)) {}
++                } else if (ms > 0.01) {
++                    uint64_t us = (uint64_t)(ms * 1e3);
++                    atomic_fetch_add(&g_us, us);
++                    uint64_t mx = atomic_load(&g_max_us), umx = us;
++                    while (umx > mx && !atomic_compare_exchange_weak(&g_max_us, &mx, umx)) {}
+                     double k = (target_us * 0.001) / ms;
+                     if (k > 2) k = 2; if (k < 0.5) k = 0.5;
+                     double m = n * k;
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -1611,11 +1611,13 @@
+ static void tu_tick(void);
+ static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+ static void treg_sparse_notes(void);
++void swx_keepalive_submit(void);   // swx_keepalive.m: every submission stamps keepalive activity (the first one starts the spinner)
+ static void pass_split_try(void);
+ static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
+ static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+ void mtl_sub_begin(void) {
+     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
++    swx_keepalive_submit();   // the first submission starts the spinner; every one stamps its activity
+     treg_sparse_notes();   // the mappings made before this submission
+     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
+     sub_cut_begin();
+@@ -2454,8 +2456,10 @@
+ static int g_ub_n = -1, g_ub_N = 180; static _Atomic int g_ub_cur = -1; static char g_ub_name[16][16], g_ub_keys[16][16][48]; static int g_ub_nk[16];
+ static _Atomic int g_ubp_on, g_ubp_c[4]; static _Atomic uint64_t g_ubp_sum_us;
+ void swx_keepalive_start(void);   // swx_keepalive.m: GPU keep-alive spinner on its own queue (no-op without Metal or when SWX_GPU_KEEPALIVE=0)
++void swx_keepalive_submit(void);   // every submission stamps keepalive activity (the first one starts the spinner)
++void swx_keepalive_game_commit(void);   // stop a running keepalive spinner before each main command-buffer commit (yield)
++void swx_keepalive_idle_signal(void);   // the game's inflight count dropped to 0
+ void mtl_ub_present(double iv) {   // Called once per frame by the present thread: actual present interval in ms (−1 = dropped, 0 = no reading)
+-    if (iv > 0) swx_keepalive_start();   // first presented frame starts the spinner; unit tests, the prebuild tool and dropped presents never start it
+     if (!atomic_load(&g_ubp_on) || iv == 0) return;
+     if (iv < 0) { atomic_fetch_add(&g_ubp_c[3], 1); return; }
+     atomic_fetch_add(&g_ubp_c[iv <= 20.8 ? 0 : iv <= 29.2 ? 1 : 2], 1); atomic_fetch_add(&g_ubp_sum_us, (uint64_t)(iv * 1000));
+@@ -2713,7 +2717,8 @@
+     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
+     DmCommitFB *o = [DmCommitFB new];
+     atomic_fetch_add(&g_seg_inflight, 1);
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
++    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; if (atomic_fetch_sub(&g_seg_inflight, 1) == 1) swx_keepalive_idle_signal(); for (dispatch_block_t block in commit_blocks) block(); }];
++    swx_keepalive_game_commit();   // a running spinner leaves now; the commit below must not wait behind a whole kernel
+     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
+     NSString *cctx = @(cctx_snap());
+     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
+@@ -16198,13 +16203,14 @@
+     DmCommitFB *o = [DmCommitFB new];
+     atomic_fetch_add(&g_seg_inflight, 1);
+     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+-        atomic_fetch_sub(&g_seg_inflight, 1);
++        if (atomic_fetch_sub(&g_seg_inflight, 1) == 1) swx_keepalive_idle_signal();
+         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
+         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
+         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
+         gpu_lost_check(cb.error, "segment");
+     }];
++    swx_keepalive_game_commit();   // a running spinner leaves now; the segment commit below must not wait behind a whole kernel
+     cb_commit(o, 0);
+     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
+     g_cb = rec_cb_new();
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2161,7 +2161,9 @@
+         if (gn != pgn) LOG("[nvn] GPU texture storage up to frame %llu: %llu regions, %.1f MB written into their storage on the GPU (%.2f regions, %.2f MB per frame)",
+             frame, (unsigned long long)(gn - pgn), (gb - pgb) / 1048576.0, (gn - pgn) / nf, (gb - pgb) / 1048576.0 / nf);
+         pgn = gn; pgb = gb;
+-
++        void swx_keepalive_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pkn, pku, pks; uint64_t kn, ku, kx, ks, kq; swx_keepalive_stats(&kn, &ku, &kx, &ks, &kq);
++        if (kn != pkn) LOG("[nvn] keep-alive up to frame %llu: %llu kernels, %.1f GPU ms, max %.2f ms, %llu stopped, stop-cb max %.3f ms", frame, (unsigned long long)(kn - pkn), (ku - pku) / 1e3, kx / 1e3, (unsigned long long)(ks - pks), kq / 1e6);
++        pkn = kn; pku = ku; pks = ks;
+ 
+         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
+         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }

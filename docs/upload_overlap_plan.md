@@ -59,8 +59,9 @@ Each dated 2026-11-16 with a one-line rationale:
   MNG's `SYNC_LAG` (Gate 3a recipe `=1` + `DM_PRESENT_SNAP=4`, ring 4 runs
   4724 frames with 0 RED/0 blinks) was not approved as default — subjective
   call, Gates 3a/3b mixed. Patch, env switch and dedicated doc deleted;
-  numbers preserved in `instrumentation/ab_results.md`. Current installs pin
-  the stock snapshot ring (`DM_PRESENT_SNAP=2`) for texture-hitch testing.
+  numbers preserved in `instrumentation/ab_results.md`. Installs no longer pin
+  the snapshot ring; the compiled default (stock ring) applies unless set
+  for A/B testing.
 
 ## 3. Slice 0 — bind-once state cache (env-gated, default off: `SWX_GPU_BIND_ONCE`)
 

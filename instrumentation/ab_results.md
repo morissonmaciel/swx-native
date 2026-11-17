@@ -84,3 +84,28 @@ Promoted: code default ON + install pins `DM_SAVE_ASYNC=1`
 (`=0` restores stock). Gate 2 left open: no save-attributed ≥20 ms spike
 occurred in either condition to compare (settings/manual writes showed
 only sub-detector ripples).
+
+## Gate — keep-alive yield (luneta): PASS, promoted to install default
+
+Slice: `patches/dm_gpu_keepalive_yield.patch` — shared stop word polled
+every 1024 iterations, set before each main commit (normal + `sub_cut`);
+idle semaphore replaces 2 ms polling; start moved to first `mtl_sub_begin`.
+Triple A/B, same luneta route, warm boots, VFR relaxed/auto, pool off:
+
+| Arm | Hot frame p95 | Hot GPU p95 |
+|---|---:|---:|
+| `keepalive=1,yield=1` | 16.73–16.89 ms | 9.95–15.17 ms, stable |
+| `keepalive=1,yield=0` | 17.41–20.48 ms | 15.27–18.66 ms, recurring hitches |
+| `keepalive=0` | 19.56–21.31 ms | 16.81–19.84 ms, worst (45 GPU-bound longframes) |
+
+e.g. frame 1500: yield=1 16.73/12.74 ms; yield=0 20.48/18.55 ms; off
+21.09/19.38 ms. Mechanism confirmed by counters: thousands of kernels per
+window while gameplay runs, hundreds stopped by arriving game work; early
+windows show calibration overshoot (max 5.0→2.4 ms cold) settling to the
+~1 ms target — gate reads the post-warmup max. Zero `[RED]`, no frame-step
+transitions, VFR debt 0.00 in all arms.
+
+Promoted: install pins `SWX_GPU_KEEPALIVE=1` + `SWX_GPU_KEEPALIVE_YIELD=1`
+(macOS; code defaults already on). `=0` on either restores stock for A/B.
+`log_report` marks keepalive only on the `on:` line; the stop-callback lag
+is wall clock (includes CPU scheduling), not a kernel-exit proof.

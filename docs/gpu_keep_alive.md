@@ -33,23 +33,39 @@ switch (`gpu-keepalive.txt` via `dm_gfx_keepalive_start`, live toggle via
 `dm_gfx_keepalive_set`). Off in play only sleeps the thread. Stats (kernels,
 summed/longest GPU time) surface in the overlay (`mtl_keepalive_stats`).
 
-## Adapted implementation (swx, `patches/swx_keepalive_gpu.patch`)
+## Adapted implementation (swx, `patches/dm_gpu_keepalive_yield.patch`)
 
-Status: patch written, applies cleanly, new file compiles standalone;
-gameplay A/B pending (requires an install, which rebuilds the host).
+Status: promoted to install default (macOS) after a triple A/B on the BOTW
+luneta route (VFR relaxed/auto, texture pool off): `keepalive=1,yield=1`
+frame p95 16.73–16.89 ms vs `yield=0` 17.41–20.48 ms vs `keepalive=0`
+19.56–21.31 ms, zero `[RED]`, no frame-step transitions. The spinner returns
+real budget to the game, and the immediate yield is what keeps the spinner
+itself from contending.
 
-- New file `dm/gfx/nvn/swx_keepalive.m` (picked up automatically — both
-  Makefiles glob `*.m`, no build-system change): own Metal device reference
-  and classic command queue, runtime-compiled spin kernel, thread on
-  `USER_INITIATED`, self-calibrating ~1 ms kernels, `SWX_GPU_KEEPALIVE=0`
-  to disable (default on macOS, off on iOS), `SWX_GPU_KEEPALIVE_US=100..1000`.
-- Two one-line hooks in `nvn_mtl.m` (no hot-path changes): `swx_gpu_inflight()`
-  reader next to `g_seg_inflight`, and start-on-first-presented-frame in
-  `mtl_ub_present` (`iv > 0`). Unit tests, the prebuild tool and dropped
-  presents never start it (they never present).
-- Divergences from the reference: no early-exit stop word in v1 (kernels are
-  capped ~1 ms on a separate queue; a game submission never waits behind
-  one) — add it with a commit hook only if measurements show interference.
+- `dm/gfx/nvn/swx_keepalive.m`: own Metal device reference and classic
+  command queue, runtime-compiled spin kernel, thread on `USER_INITIATED`,
+  self-calibrating ~1 ms kernels, `SWX_GPU_KEEPALIVE=0` to disable (default
+  on macOS, off on iOS), `SWX_GPU_KEEPALIVE_US=100..1000`.
+  `SWX_GPU_KEEPALIVE_YIELD=1` (default on; `=0` restores the old run-to-end
+  behavior for A/B): the kernel polls a shared stop word every 1024
+  iterations (~25 us); `swx_keepalive_game_commit()` sets it before each
+  main command-buffer commit (normal path and `sub_cut`), and the last
+  completion signals a semaphore the spinner waits on instead of polling.
+  Stopped kernels never recalibrate the length.
+- Hooks in `nvn_mtl.m`: `swx_gpu_inflight()` reader next to `g_seg_inflight`,
+  `swx_keepalive_submit()` (start + activity stamp) in `mtl_sub_begin`,
+  `swx_keepalive_game_commit()` before both main commits, idle signal in both
+  feedback handlers when inflight reaches 0. No hot-path changes.
+- Why it cannot disturb the frame step: the step's GPU cost comes from the
+  game's own per-fence `GPUStartTime/GPUEndTime` (`hle_nvn.c fstep_tick` via
+  `mtl_gpu_ms`); the spinner's command buffers have their own fences and
+  never touch those numbers. The spinner thread mostly sleeps, so the
+  process-level CPU share check is unaffected.
+- Metrics: `swx_keepalive_stats` (kernels, summed/longest GPU time, stopped,
+  stop-callback max) on the power line every 300 frames; no per-kernel
+  logging. The stop-callback lag is wall clock (includes CPU scheduling):
+  observability only, not a kernel-exit proof. Gate approval uses kernels,
+  GPU ms, max ms and stopped.
 - Why it cannot disturb the frame step: the step's GPU cost comes from the
   game's own per-fence `GPUStartTime/GPUEndTime` (`hle_nvn.c fstep_tick` via
   `mtl_gpu_ms`); the spinner's command buffers have their own fences and

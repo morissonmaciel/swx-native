@@ -21,7 +21,7 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
@@ -30,13 +30,15 @@ python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 visible as `launcher: env K=V` at boot); `off` writes `=0` (forces stock
 behavior, except `snap 2`); `clear` removes the line so the
 compiled default applies. Every install pins the steady-beat baseline
-(`SWX_VFR=relaxed` at auto Hz, `DM_PRESENT_SNAP=2` stock snapshot ring);
-`set vfr off` restores the legacy Switch-interval frame step for A/B
+(`SWX_VFR=relaxed` at auto Hz); the snapshot ring is not pinned, so the
+compiled default (stock ring) applies unless set for A/B
 (`ab_results.md` keeps the stock-baseline numbers for comparison).
 `snap 4` is an optional smoothness experiment
 (Gate 3a recipe, preserved in `ab_results.md`), not the default.
-Keep-alive on on macOS (the texture-upload count split was removed after its
+Keep-alive on on macOS (install default `SWX_GPU_KEEPALIVE=1` with
+`SWX_GPU_KEEPALIVE_YIELD=1`; the texture-upload count split was removed after its
 Gate 1 showed +13 ms; numbers preserved in `instrumentation/ab_results.md`).
+`set yield off` restores the old run-to-end spinner for A/B within keepalive=1.
 Do not combine relaxed with `DM_FPS_TARGET=0`: target 0 hands the interval
 back to the game's dynamic logic while the host ratio would still apply,
 so the host suspends the beat and runs legacy (logged) — keep the target

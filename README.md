@@ -60,8 +60,8 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   per frame, 1/15 s step cap, bounded debt) instead of the 1/2/3-vsync
   intervals — movies and VFR overrides suspend it back to legacy. See
   `docs/vfr_framepace.md`, `instrumentation/ab_results.md`.
-- `DM_PRESENT_SNAP=2` (stock snapshot ring, pinned by the installer for
-  current texture-hitch testing; `snap 4` is an optional smoothness
+- `DM_PRESENT_SNAP=2` (stock snapshot ring; the installer leaves the
+  compiled default unless set for A/B, `snap 4` is an optional smoothness
   experiment, not the default): the frame-ahead overlap (`DM_NVN_SYNC_LAG`)
   was removed (not approved as default — subjective call, Gates 3a/3b
   mixed); numbers preserved in `instrumentation/ab_results.md`.
