@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
@@ -43,6 +43,7 @@ KEYS = {
     "vfr": "SWX_VFR",
     "yield": "SWX_GPU_KEEPALIVE_YIELD",
     "residency-ub-ring": "SWX_RESIDENCY_UB_RING",
+    "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4", "vfr": "relaxed"}
@@ -94,7 +95,7 @@ def cmd_status(args):
 
 def cmd_set(args):
     if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring on|off|clear",
+        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear",
               file=sys.stderr)
         raise SystemExit(2)
     key, mode = KEYS[args[0]], args[1]
@@ -178,6 +179,14 @@ def one_line(path):
         "ubr_peak": rep.get("ubr_peak", 0),
         "ubr_fallback": rep.get("ubr_fallback", 0),
         "ubr_reused_kb": rep.get("ubr_reused_kb", 0.0),
+        "rth_new": rep.get("rth_new", 0),
+        "rth_hits": rep.get("rth_hits", 0),
+        "rth_full": rep.get("rth_full", 0),
+        "rth_fallback": rep.get("rth_fallback", 0),
+        "rth_backing_mb": rep.get("rth_backing_mb_max", 0),
+        "rth_req": rep.get("rth_req", 0),
+        "rth_stock_reused": rep.get("rth_stock_reused", 0),
+        "rth_stock_made": rep.get("rth_stock_made", 0),
     }
 
 
@@ -199,7 +208,9 @@ def cmd_compare(args):
             "u_slotwait", "u_oldq", "p_direct", "p_enc", "p_cpu",
             "p_di_ms", "p_en_ms", "p_cp_ms", "steps", "keepalive",
             "ka_kernels", "ka_gpu_ms", "ka_max_ms", "ka_stopped", "ka_stop_cb_max_ms",
-            "ubr_reuse", "ubr_new", "ubr_peak", "ubr_fallback", "ubr_reused_kb"]
+            "ubr_reuse", "ubr_new", "ubr_peak", "ubr_fallback", "ubr_reused_kb",
+            "rth_new", "rth_hits", "rth_full", "rth_fallback", "rth_backing_mb",
+            "rth_req", "rth_stock_reused", "rth_stock_made"]
     width = [max(len(c), max(len(str(r[c])) for r in rows)) for c in cols]
     print("  ".join(c.ljust(w) for c, w in zip(cols, width)))
     for r in rows:

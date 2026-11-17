@@ -65,7 +65,10 @@ def report(path):
            "ka_kernels": 0, "ka_gpu_ms": 0.0, "ka_max_ms": 0.0,
            "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0,
            "ubr_reuse": 0, "ubr_new": 0, "ubr_peak": 0,
-           "ubr_fallback": 0, "ubr_reused_kb": 0.0}
+           "ubr_fallback": 0, "ubr_reused_kb": 0.0,
+           "rth_new": 0, "rth_hits": 0, "rth_full": 0, "rth_evicted": 0,
+           "rth_fallback": 0, "rth_backing_mb_max": 0, "rth_req": 0,
+           "rth_stock_reused": 0, "rth_stock_made": 0, "rth_top": ""}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if "[swx-keepalive] on:" in line:
@@ -99,6 +102,17 @@ def report(path):
                 rep["ubr_reuse"] += int(m.group(1)); rep["ubr_new"] += int(m.group(2));
                 rep["ubr_peak"] = max(rep["ubr_peak"], int(m.group(3)));
                 rep["ubr_fallback"] += int(m.group(4)); rep["ubr_reused_kb"] += float(m.group(5))
+            m = re.search(r"rt-heap up to frame \d+: arenas new (\d+), hits (\d+), full (\d+), active \d+, idle \d+, live \d+ targets, backing (\d+) MB, fallback (\d+), evicted (\d+); eligible (\d+), stock reused (\d+), stock made (\d+)", line)
+            if m:
+                rep["rth_new"] += int(m.group(1)); rep["rth_hits"] += int(m.group(2));
+                rep["rth_full"] += int(m.group(3));
+                rep["rth_backing_mb_max"] = max(rep["rth_backing_mb_max"], int(m.group(4)));
+                rep["rth_fallback"] += int(m.group(5)); rep["rth_evicted"] += int(m.group(6));
+                rep["rth_req"] += int(m.group(7));
+                rep["rth_stock_reused"] += int(m.group(8)); rep["rth_stock_made"] += int(m.group(9))
+            m = re.search(r"rt-heap top up to frame \d+: (.*)", line)
+            if m:
+                rep["rth_top"] = m.group(1).strip()[:300]
             m = re.search(r"frame (\d+) \(", line)
             if m:
                 rep["frames"] = max(rep["frames"], int(m.group(1)))

@@ -1,0 +1,410 @@
+# SWX_RT_HEAP_RESERVE=1: heap arenas for transient render targets.
+# The stock recycled list serves any texture from any fitting heap, so a target
+# that grows by a Metal size step takes a new heap each time. H1 keeps automatic
+# MTLHeap arenas holding several live render targets each: Metal packs textures
+# and reuses freed space. Arenas are keyed only by heap compatibility
+# (storage/cache/hazard modes); format, dimensions, MSAA, levels and usage never
+# separate them. A compatible arena with room takes the target (arena hit);
+# when all are full a new arena opens at round_up(max(16 MB, 2 x need), 1 MB),
+# at most 64 MB per arena. Past 256 MB of backing (active and idle alike), or
+# when Metal makes nothing, the stock path runs and nothing is retained. The
+# reservation holds the budget while Metal works, and Metal's rounding is
+# validated before insert: a heap landing past the cap is rejected without
+# entering the array or the set. Fence
+# safety is explicit: every submit-thread tex_mtl_ return stamps the owner's
+# retire fence (g_fence + 1); the arena observes the max over live targets and
+# is evicted only with no live targets, fence completed, 3 s idle. A new arena
+# is inserted not-ready and becomes visible only after res_add, so no target
+# escapes without residency. An arena
+# enters the residency set exactly once and leaves exactly once on evict.
+# Only private RenderTarget descriptors qualify (ShaderWrite-only compute
+# intermediates stay stock); image families, storage pairs and snapshots keep
+# the stock path. Default off; aggregate counters only (power-line log: arenas
+# new, hits, full, active, idle, live targets, backing MB, fallback, evicted;
+# eligible, stock reused, stock made in both arms; top-3 shapes on new). A/B
+# via ab_test.py rt-heap-reserve (=0 restores the stock path).
+# verify: dm/gfx/nvn/nvn_mtl.m:SWX_RT_HEAP_RESERVE
+# verify: dm/gfx/nvn/nvn_mtl.m:NvRtArenaRef
+# verify: dm/gfx/nvn/nvn_mtl.m:RTH_MAX_ARENAS
+# verify: dm/gfx/nvn/nvn_mtl.m:void mtl_rth_stats
+# verify: dm/gfx/nvn/nvn_mtl.m:rth_place(MTLTextureDescriptor *d)
+# verify: dm/gfx/nvn/nvn_mtl.m:rth_use_note
+# verify: dm/gfx/nvn/nvn_mtl.m:rth_release
+# verify: dm/gfx/nvn/nvn_mtl.m:rth_trim();   // the arena reserve idles out on the same clock
+# verify: dm/gfx/nvn/hle_nvn.c:rt-heap up to frame
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -426,6 +426,307 @@
+ - (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+ @end
+ static char g_image_heap_owner_key, g_rh_owner_key;
++static void rth_release(id<MTLHeap> heap, uint64_t stamp);
++static void rth_slot_drop_locked(id<MTLHeap> heap);
++static int on_sub_thread(void);
++@interface NvRtArenaRef : NSObject { @public id<MTLHeap> heap; _Atomic uint64_t fence; } @end   // one live target's reference to its arena (rth_place); fence: retire fence stamped at use time
++@implementation NvRtArenaRef
++- (void)dealloc { uint64_t f = atomic_load(&fence); rth_release(heap, f); }
++@end
++static char g_rth_owner_key;
++// SWX_RT_HEAP_RESERVE=1: heap arenas for private transient render targets (default off).
++// The stock recycled list serves any texture from any fitting heap, so a target that grows by a Metal size
++// step takes a new heap each time. H1 instead keeps automatic MTLHeap arenas, each holding several live
++// render targets at once: Metal packs textures into the heap and reuses space freed by dead targets, so
++// reopening the same luneta reuses backing instead of creating it again. Arenas are keyed only by heap
++// compatibility (storage, cache and hazard modes); format, dimensions, MSAA, levels and usage never separate
++// them (they stay only in the diagnostic shape table). A compatible arena with room takes the target (arena
++// hit); when every compatible arena is full a new arena opens at round_up(max(16 MB, 2 x need), 1 MB),
++// at most 64 MB per arena. Past 256 MB of backing over all arenas (active and idle alike), or when Metal
++// makes nothing, the request falls back to the stock path and nothing is retained. The reservation holds
++// the budget while Metal works, and Metal's rounding is validated before insert: a heap landing past the
++// cap is rejected without entering the array or the residency set. Fence safety is explicit,
++// not inferred at dealloc: every submit-thread tex_mtl_ return stamps the owner's retire fence with the
++// submission being built (g_fence + 1, which is its fence once it commits), and the arena observes the
++// maximum over its live targets. A new arena is inserted not-ready and becomes visible to concurrent
++// placements only after res_add, so no target can escape without residency; the first texture failing to
++// materialize removes the still not-ready slot with no res_remove. An arena leaves the residency set only
++// fence completed, and 3 s idle; a heap is never freed and its memory never reused by hand before the fence.
++// Eligible render-target requests and their stock outcomes are counted in both arms (rth_req,
++// rth_stock_reused, rth_stock_made), so the gate compares measured arms instead of inferring a benefit from
++// counters that only exist with the flag on. Only private RenderTarget descriptors qualify: shared, managed,
++// staging, buffer, scanout, CPU-mapped, serial-held or ShaderWrite-only compute resources never enter
++// (anything else takes the stock path without counting as fallback).
++enum { RTH_MAX_ARENAS = 16 };
++enum { RTH_ARENA_MIN = 16u << 20, RTH_ARENA_CAP = 64u << 20, RTH_TOTAL_CAP = 256u << 20, RTH_QUANTUM = 1u << 20 };
++enum { RTH_IDLE_NS = 3000000000ull };
++typedef struct {
++    int used;
++    int ready;             // visible to concurrent placements and trim only after res_add
++    uint64_t sm, cm, hm;   // compatibility key: one heap's storage/cache/hazard modes serve any descriptor with the same three
++    void *heap;            // retained automatic MTLHeap, resident while used
++    uint64_t backing;      // heap.size; every used arena counts toward the 256 MB budget, active or idle
++    unsigned live;         // targets alive on this heap
++    uint64_t retire;       // last retire fence over the live targets (max of use stamps)
++    uint64_t idle_t;       // when live last hit 0 (CLOCK_MONOTONIC ns)
++} rth_arena;
++static rth_arena g_rth_a[RTH_MAX_ARENAS]; static unsigned g_rth_n;
++static uint64_t g_rth_total;   // backing of every used arena
++static os_unfair_lock g_rth_lk = OS_UNFAIR_LOCK_INIT;
++static _Atomic uint64_t g_rth_new, g_rth_hits, g_rth_full, g_rth_fallback, g_rth_evicted;
++static _Atomic uint64_t g_rth_req, g_rth_stock_reused, g_rth_stock_made;   // both arms: eligible requests and their stock outcomes
++typedef struct {   // diagnostic only: descriptor shapes by requested bytes; never keys the allocator
++    int used;
++    uint64_t pf, w, h, dep, arr, mip, samp, ttype, usage;
++    uint64_t n_req, bytes;
++} rth_shape;
++enum { RTH_MAX_SHAPES = 32 };
++static rth_shape g_rth_s[RTH_MAX_SHAPES]; static unsigned g_rth_sn, g_rth_s_over;
++static int rth_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("SWX_RT_HEAP_RESERVE"); v = e && atoi(e) != 0;
++        if (v) MLOG("SWX_RT_HEAP_RESERVE=1: heap arenas for transient render targets (automatic heaps, 16 MB minimum, 64 MB per arena, 256 MB total)"); }
++    return v;
++}
++// Whether this descriptor is a private transient render target: placement-eligible, with RenderTarget
++// usage, and never shared/managed/staging, a buffer, scanout, external or CPU-mapped. Anything else stays on
++// the stock path without counting as a fallback. H1 is RenderTarget-only: ShaderWrite-only compute
++// intermediates (image atomics, 3D LUT kernels) keep the stock path; they are a separate slice.
++// Scope proof (why storage pairs, resolution families and snapshots cannot land here): tex_mtl_ tries
++// pair_texture, then image_texture, and only then rh_texture, so a texture that needs storage aliasing or
++// family sharing is claimed before rh_place runs; reaching rh_place means those paths rejected it.
++// Snapshots (fb_snap_shape) build descriptors without RenderTarget usage, which this declines. What remains
++// is exactly the single-description transient render targets rh_texture serves (rh_fits: a GPU-only pool,
++// render or write usage, no display/video/linear/sparse/scanout flags).
++static int rth_fits(MTLTextureDescriptor *d) {
++    if (!d || d.storageMode != MTLStorageModePrivate) return 0;
++    if (d.textureType == MTLTextureTypeTextureBuffer) return 0;
++    if (!(d.usage & MTLTextureUsageRenderTarget)) return 0;
++    return 1;
++}
++static void rth_shape_note(MTLTextureDescriptor *d, uint64_t size) {   // g_rth_lk held
++    for (unsigned i = 0; i < g_rth_sn; i++) {
++        rth_shape *s = &g_rth_s[i];
++        if (s->pf == d.pixelFormat && s->w == d.width && s->h == d.height && s->dep == d.depth && s->arr == d.arrayLength &&
++            s->mip == d.mipmapLevelCount && s->samp == d.sampleCount && s->ttype == d.textureType && s->usage == (uint64_t)d.usage) {
++            s->n_req++; s->bytes += size; return;
++        }
++    }
++    if (g_rth_sn >= RTH_MAX_SHAPES) { g_rth_s_over++; return; }
++    rth_shape *s = &g_rth_s[g_rth_sn++];
++    memset(s, 0, sizeof *s); s->used = 1;
++    s->pf = d.pixelFormat; s->w = d.width; s->h = d.height; s->dep = d.depth; s->arr = d.arrayLength;
++    s->mip = d.mipmapLevelCount; s->samp = d.sampleCount; s->ttype = d.textureType; s->usage = (uint64_t)d.usage;
++    s->n_req = 1; s->bytes = size;
++}
++// Eligible render-target requests are counted in both arms: with the flag off the stock path serves them
++// (rth_req, with rth_stock_reused/rth_stock_made counted in rh_place), so the gate compares measured arms.
++static inline void rth_note_request(MTLTextureDescriptor *d) {
++    if (!rth_fits(d)) return;
++    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
++    if (!need.size) return;
++    atomic_fetch_add(&g_rth_req, 1);
++    os_unfair_lock_lock(&g_rth_lk);
++    rth_shape_note(d, need.size);
++    os_unfair_lock_unlock(&g_rth_lk);
++}
++// A texture of this descriptor from a compatible arena: Metal packs it into the automatic heap and reuses
++// space freed by dead targets, so several live render targets share one resident heap. nil with the switch
++// off, for a descriptor outside the scope, on any cap (budget-fallback: the stock path runs instead), or when
++// Metal makes nothing. Arenas are keyed only by heap compatibility (storage/cache/hazard modes); format,
++// dimensions, MSAA, levels and usage never separate them.
++static id<MTLTexture> rth_place(MTLTextureDescriptor *d) {
++    if (!rth_on() || !rth_fits(d)) return nil;
++    MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
++    if (!need.size) return nil;
++    if (need.size > RTH_ARENA_CAP) {   // one target bigger than an arena: stock, counted as fallback
++        atomic_fetch_add(&g_rth_fallback, 1); return nil;
++    }
++    os_unfair_lock_lock(&g_rth_lk);
++    for (unsigned i = 0; i < g_rth_n; i++) {   // a compatible ready arena with room takes it (arena hit)
++        rth_arena *a = &g_rth_a[i];
++        if (!a->used || !a->ready || !a->heap) continue;
++        if (a->sm != d.storageMode || a->cm != d.cpuCacheMode || a->hm != d.hazardTrackingMode) continue;
++        id<MTLHeap> h = (__bridge id<MTLHeap>)a->heap;
++        id<MTLTexture> mt = [h newTextureWithDescriptor:d];
++        if (!mt) continue;   // this arena is full: try the next compatible one
++        a->live++; a->idle_t = 0;
++        os_unfair_lock_unlock(&g_rth_lk);
++        atomic_fetch_add(&g_rth_hits, 1);
++        NvRtArenaRef *owner = [NvRtArenaRef new]; owner->heap = h;
++        objc_setAssociatedObject(mt, &g_rth_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++        return mt;
++    }
++    // Every compatible arena is full (or there is none yet): open a new one.
++    atomic_fetch_add(&g_rth_full, 1);
++    uint64_t want = 2 * need.size;
++    if (want < RTH_ARENA_MIN) want = RTH_ARENA_MIN;
++    want = (want + RTH_QUANTUM - 1) & ~((uint64_t)RTH_QUANTUM - 1);
++    if (want > RTH_ARENA_CAP) want = RTH_ARENA_CAP;   // need.size <= CAP above, so want still covers need
++    if (g_rth_n >= RTH_MAX_ARENAS || g_rth_total + want > RTH_TOTAL_CAP) {
++        atomic_fetch_add(&g_rth_fallback, 1);
++        os_unfair_lock_unlock(&g_rth_lk); return nil;
++    }
++    g_rth_total += want;   // reservation holds the budget while Metal makes the heap
++    os_unfair_lock_unlock(&g_rth_lk);
++    MTLHeapDescriptor *hd = [MTLHeapDescriptor new]; hd.type = MTLHeapTypeAutomatic; hd.size = (NSUInteger)want;
++    hd.storageMode = d.storageMode; hd.cpuCacheMode = d.cpuCacheMode; hd.hazardTrackingMode = d.hazardTrackingMode;
++    id<MTLHeap> heap = [g_dev newHeapWithDescriptor:hd];
++    if (!heap) {
++        os_unfair_lock_lock(&g_rth_lk);
++        g_rth_total -= want;
++        atomic_fetch_add(&g_rth_fallback, 1);
++        os_unfair_lock_unlock(&g_rth_lk); return nil;
++    }
++    uint64_t actual = heap.size;
++    os_unfair_lock_lock(&g_rth_lk);
++    if (g_rth_total - want + actual > RTH_TOTAL_CAP) {   // Metal rounded up past the budget: reject the arena
++        g_rth_total -= want;
++        atomic_fetch_add(&g_rth_fallback, 1);
++        os_unfair_lock_unlock(&g_rth_lk);
++        return nil;   // never inserted, never res_add'ed: nothing to undo, stock path
++    }
++    if (g_rth_n >= RTH_MAX_ARENAS) {   // lost the last slot while Metal worked: keep the budget exact
++        g_rth_total -= want;
++        atomic_fetch_add(&g_rth_fallback, 1);
++        os_unfair_lock_unlock(&g_rth_lk);
++        return nil;
++    }
++    rth_arena *a = &g_rth_a[g_rth_n++];
++    memset(a, 0, sizeof *a); a->used = 1;
++    a->sm = d.storageMode; a->cm = d.cpuCacheMode; a->hm = d.hazardTrackingMode;
++    a->heap = (void *)CFBridgingRetain(heap);
++    if (actual >= want) g_rth_total += actual - want;   // exact backing, not the reservation
++    else g_rth_total -= want - actual;
++    a->backing = actual; a->idle_t = clock_gettime_nsec_np(CLOCK_MONOTONIC);
++    id<MTLTexture> mt = [heap newTextureWithDescriptor:d];
++    if (!mt) {   // the descriptor does not fit its own arena: keep nothing, stock path
++        rth_slot_drop_locked(heap);   // removes the arena, returns its backing to the budget
++        atomic_fetch_add(&g_rth_fallback, 1);
++        os_unfair_lock_unlock(&g_rth_lk);
++        return nil;   // never res_add'ed: nothing to undo
++    }
++    a->live = 1;   // ready stays 0: concurrent placements and trim ignore the arena until res_add
++    atomic_fetch_add(&g_rth_new, 1);
++    os_unfair_lock_unlock(&g_rth_lk);
++    res_add(heap);   // exactly once per arena; every definitive evict pairs exactly one res_remove
++    os_unfair_lock_lock(&g_rth_lk);   // re-find by heap: another thread's trim may have moved slots meanwhile
++    for (unsigned i = 0; i < g_rth_n; i++) {
++        if (g_rth_a[i].used && g_rth_a[i].heap && (__bridge id<MTLHeap>)g_rth_a[i].heap == heap) {
++            g_rth_a[i].ready = 1; break;   // visible to concurrent allocations only after res_add
++        }
++    }
++    os_unfair_lock_unlock(&g_rth_lk);
++    NvRtArenaRef *owner = [NvRtArenaRef new]; owner->heap = heap;
++    objc_setAssociatedObject(mt, &g_rth_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++    return mt;
++}
++// Removes the arena owning heap and returns its backing to the budget. g_rth_lk held.
++static void rth_slot_drop_locked(id<MTLHeap> heap) {
++    for (unsigned i = 0; i < g_rth_n; i++) {
++        if (!g_rth_a[i].used || !g_rth_a[i].heap || (__bridge id<MTLHeap>)g_rth_a[i].heap != heap) continue;
++        void *h = g_rth_a[i].heap;
++        g_rth_total -= g_rth_a[i].backing;
++        g_rth_a[i] = g_rth_a[--g_rth_n];
++        memset(&g_rth_a[g_rth_n], 0, sizeof g_rth_a[g_rth_n]);
++        CFBridgingRelease(h);
++        return;
++    }
++}
++// A target's owner died: its arena loses one live target and observes the retire fence (max of the
++// texture's use stamps and the dealloc-time fence). Arenas are only evicted by rth_trim, never here, and a
++// heap's memory is never reused by hand before the fence: Metal packs the automatic heap itself.
++static void rth_release(id<MTLHeap> heap, uint64_t stamp) {
++    if (!heap) return;
++    uint64_t fence = atomic_load(&g_fence);
++    if (stamp > fence) fence = stamp;
++    os_unfair_lock_lock(&g_rth_lk);
++    for (unsigned i = 0; i < g_rth_n; i++) {
++        rth_arena *a = &g_rth_a[i];
++        if (!a->used || !a->heap || (__bridge id<MTLHeap>)a->heap != heap) continue;
++        if (a->live) { if (--a->live == 0) a->idle_t = clock_gettime_nsec_np(CLOCK_MONOTONIC); }
++        if (fence > a->retire) a->retire = fence;
++        break;
++    }
++    os_unfair_lock_unlock(&g_rth_lk);
++}
++// When a submission begins: arenas with no live targets whose retire fence completed and which idled past
++// RTH_IDLE_NS leave the residency set and are freed. The budget counts active and idle arenas alike.
++static void rth_trim(void) {
++    uint64_t done = atomic_load(&g_done), now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
++    void *drop[RTH_MAX_ARENAS]; unsigned nd = 0;
++    os_unfair_lock_lock(&g_rth_lk);
++    for (unsigned i = 0; i < g_rth_n;) {
++        rth_arena *a = &g_rth_a[i];
++        if (!a->used || !a->ready || !a->heap || a->live || a->retire > done || !a->idle_t || now - a->idle_t < RTH_IDLE_NS) { i++; continue; }
++        drop[nd++] = a->heap;
++        g_rth_total -= a->backing;
++        *a = g_rth_a[--g_rth_n];
++        memset(&g_rth_a[g_rth_n], 0, sizeof g_rth_a[g_rth_n]);
++    }
++    os_unfair_lock_unlock(&g_rth_lk);
++    for (unsigned k = 0; k < nd; k++) { id<MTLHeap> h = CFBridgingRelease(drop[k]); res_remove(h); }
++    if (nd) atomic_fetch_add(&g_rth_evicted, (uint64_t)nd);
++}
++void mtl_rth_stats(uint64_t *nw, uint64_t *hits, uint64_t *full, uint64_t *act, uint64_t *idle, uint64_t *live, uint64_t *back, uint64_t *fb, uint64_t *ev, uint64_t *req, uint64_t *sre, uint64_t *smd) {
++    if (nw) *nw = atomic_load(&g_rth_new); if (hits) *hits = atomic_load(&g_rth_hits);
++    if (full) *full = atomic_load(&g_rth_full); if (fb) *fb = atomic_load(&g_rth_fallback);
++    if (ev) *ev = atomic_load(&g_rth_evicted); if (req) *req = atomic_load(&g_rth_req);
++    if (sre) *sre = atomic_load(&g_rth_stock_reused); if (smd) *smd = atomic_load(&g_rth_stock_made);
++    os_unfair_lock_lock(&g_rth_lk);
++    if (act || idle || live || back) {
++        uint64_t na = 0, ni = 0, nl = 0;
++        for (unsigned i = 0; i < g_rth_n; i++) {
++            if (!g_rth_a[i].used || !g_rth_a[i].heap) continue;
++            if (g_rth_a[i].live) { na++; nl += g_rth_a[i].live; } else ni++;
++        }
++        if (act) *act = na; if (idle) *idle = ni; if (live) *live = nl; if (back) *back = g_rth_total;
++    }
++    os_unfair_lock_unlock(&g_rth_lk);
++}
++// The three descriptor shapes by requested bytes, for the window readout (only printed when a new arena
++// was created). Diagnostic only: shapes never key the allocator.
++void mtl_rth_top(char *out, size_t n) {
++    if (!out || !n) return; out[0] = 0;
++    os_unfair_lock_lock(&g_rth_lk);
++    unsigned top[3] = {0, 0, 0}; unsigned nt = 0;
++    for (unsigned i = 0; i < g_rth_sn; i++) {
++        if (!g_rth_s[i].n_req) continue;
++        unsigned k = nt < 3 ? nt++ : 3;
++        for (; k > 0 && g_rth_s[i].bytes > g_rth_s[top[k - 1]].bytes; k--) top[k > 2 ? 2 : k] = top[k - 1];
++        if (k < 3) top[k] = i;
++    }
++    size_t o = 0;
++    for (unsigned k = 0; k < nt && o < n; k++) {
++        rth_shape *s = &g_rth_s[top[k]];
++        o += snprintf(out + o, n - o, "%spf%llu %llux%llu a%llu s%llu t%llu u%#llx %llu req %.1fMB",
++            k ? "; " : "", (unsigned long long)s->pf, (unsigned long long)s->w, (unsigned long long)s->h,
++            (unsigned long long)s->arr, (unsigned long long)s->samp, (unsigned long long)s->ttype,
++            (unsigned long long)s->usage, (unsigned long long)s->n_req, s->bytes / 1048576.0);
++    }
++    os_unfair_lock_unlock(&g_rth_lk);
++}
++// Stamps the retire fence of an arena-resident target the running submission uses (its arena is evicted
++// only once that fence completed). Called on every submit-thread tex_mtl_ return that can hand out a reserve
++// texture: the fence stamped during the build (g_fence + 1) is that submission's own fence once it commits
++// (one submit thread; sub_cut segments share it), so no commit-time consolidation is needed. Views stamp
++// their parent. Off the submit thread nothing is stamped (no submission is being built there; the present
++// path holds its own references). Stamps only move forward, so a texture created and used within one
++// submission carries exactly that submission's fence.
++static inline void rth_use_note(id mt0) {
++    if (!mt0 || !rth_on() || !on_sub_thread()) return;
++    id mt = mt0;
++    for (int hop = 0; hop < 2 && mt; hop++) {
++        id o = objc_getAssociatedObject(mt, &g_rth_owner_key);
++        if (o && [o isKindOfClass:[NvRtArenaRef class]]) {
++            uint64_t f = atomic_load(&g_fence) + 1;
++            NvRtArenaRef *rh = o;
++            if (f > atomic_load(&rh->fence)) atomic_store(&rh->fence, f);
++            return;
++        }
++        mt = [mt respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)mt).parentTexture : nil;
++    }
++}
+ // A placement heap of at least `size` bytes: the smallest waiting one up to half as large again, or a new one an eighth larger (its exact size with the switch off). nil if Metal
+ // makes none
+ static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm, MTLHazardTrackingMode hm, int *reused) {
+@@ -456,11 +757,14 @@
+ // A texture of this descriptor in recycled memory, at the start of its heap. nil when the switch is off or the descriptor cannot be placed. A heap taken from the list that the texture
+ // does not go into waits again; a new one goes
+ static id<MTLTexture> rh_place(MTLTextureDescriptor *d) {
++    rth_note_request(d);   // eligible render-target requests are counted in both arms, before either serves them
++    { id<MTLTexture> rt = rth_place(d); if (rt) return rt; }   // arena reserve first; nil falls through to stock
+     if (!sw_on(rh_mode()) || d.storageMode != MTLStorageModePrivate || d.textureType == MTLTextureTypeTextureBuffer) return nil;
+     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
+     int reused = 0; id<MTLHeap> heap = rh_heap(need.size, d.storageMode, d.cpuCacheMode, d.hazardTrackingMode, &reused);
+     id<MTLTexture> mt = heap ? [heap newTextureWithDescriptor:d offset:0] : nil;
+     if (!mt) { if (heap && reused) rh_wait(heap); return nil; }
++    if (rth_fits(d)) { if (reused) atomic_fetch_add(&g_rth_stock_reused, 1); else atomic_fetch_add(&g_rth_stock_made, 1); }
+     NvRecycledHeap *owner = [NvRecycledHeap new]; owner->heap = heap;
+     objc_setAssociatedObject(mt, &g_rh_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+     return mt;
+@@ -506,6 +810,7 @@
+ }
+ // When a submission begins: heaps that waited RH_IDLE_NS, and the oldest past RH_CAP bytes, leave the residency set and are freed
+ static void rh_trim(void) {
++    if (rth_on()) rth_trim();   // the arena reserve idles out on the same clock
+     if (!g_rh_n) return;
+     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC); void *drop[64]; unsigned nd = 0;
+     os_unfair_lock_lock(&g_rh_lk);
+@@ -5205,10 +5510,10 @@
+         static int nstale; if (nstale++ < 4) MLOG("stale sRGB / linear view dropped ser=%llu format %lu (%d so far)", (unsigned long long)t->serial, (unsigned long)((id<MTLTexture>)have).pixelFormat, nstale);
+         have = nil;
+     }
+-    if (have) { if (!off && t->pool && nvn_sparse_pool(t->pool)) sparse_gpu_look(t, have); if (!g_pool_walk) tu_stamp(have, 0); return have; }   // its mappings are synced on the submit thread (sparse_sync)
++    if (have) { if (!off && t->pool && nvn_sparse_pool(t->pool)) sparse_gpu_look(t, have); if (!g_pool_walk) tu_stamp(have, 0); rth_use_note(have); return have; }   // its mappings are synced on the submit thread (sparse_sync)
+     alias_key ak = tex_alias_key(t);
+     id shared = own_alias_take(t->serial, &ak);   // found and published in one hold (nvn_owner.m)
+-    if (shared) { if (!g_pool_walk) tu_stamp(shared, 0); return shared; }
++    if (shared) { if (!g_pool_walk) tu_stamp(shared, 0); rth_use_note(shared); return shared; }
+     // A buffer texture's view is shared by storage as every other texture is: NVN texture objects over the same range with the same description are one view, kept by the sharing
+     // table. Made per object, Unreal's transient buffer textures, built again every frame over the same ranges, added a view to the residency set each time: FINAL FANTASY
+     // RESONANCE added and removed about 79,000 every 300 frames on an iPhone (0.8 ms of residency commits a frame), and their finalized objects (about 175 a frame) wrapped the
+@@ -5239,7 +5544,7 @@
+             // checks that k still names b, and marks k looked up, in the same hold of g_smu as the entry), and the next format of the pair or a texture of the twin's own is tried
+             if (!own_view_put(t->serial, &k, v)) { v = nil; continue; }
+         }
+-        if (v) { if (!g_pool_walk) tu_stamp(v, 0); return v; }
++        if (v) { if (!g_pool_walk) tu_stamp(v, 0); rth_use_note(v); return v; }
+     }
+     // A texture no thread has resolved, read off the submit thread: its storage holds its content (the GPU has written none, or it would be resolved), as the console reads it.
+     // Made here, its host texture would be filled from neither (tex_init_fill and tex_zero_fill are the submit thread's), and it would keep it: its first use on the submit thread,
+@@ -5268,6 +5573,7 @@
+     id<MTLTexture> got = own_alias_publish(t->serial, &ak, mt);
+     if (got != mt) { static int nrace; if (nrace++ < 4) MLOG("texture ser=%llu made twice over one storage: the first one registered is shared (%d so far)", (unsigned long long)t->serial, nrace); defer_obj_release(mt); }
+     else if (tu) tu_register(mt, t->serial);
++    rth_use_note(got);
+     return got;
+ }
+ // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2167,6 +2167,10 @@
+         void mtl_ubr_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pru, prw, prf, prb; uint64_t ru, rw, ri, rp, rf, rb; mtl_ubr_stats(&ru, &rw, &ri, &rp, &rf, &rb);
+         if (ru != pru || rw != prw || rf != prf) LOG("[nvn] ub-ring up to frame %llu: %llu reuse, %llu new, %llu inflight (peak %llu), %llu fallback, %.0f KB reused", frame, (unsigned long long)(ru - pru), (unsigned long long)(rw - prw), (unsigned long long)ri, (unsigned long long)rp, (unsigned long long)(rf - prf), (rb - prb) / 1024.0);
+         pru = ru; prw = rw; prf = rf; prb = rb;
++        void mtl_rth_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t prth_nw, prth_hi, prth_fu, prth_fb, prth_ev, prth_rq, prth_sr, prth_sm; uint64_t rth_nw, rth_hi, rth_fu, rth_ac, rth_id, rth_li, rth_bk, rth_fb, rth_ev, rth_rq, rth_sr, rth_sm; mtl_rth_stats(&rth_nw, &rth_hi, &rth_fu, &rth_ac, &rth_id, &rth_li, &rth_bk, &rth_fb, &rth_ev, &rth_rq, &rth_sr, &rth_sm);
++        if (rth_nw != prth_nw || rth_hi != prth_hi || rth_fu != prth_fu || rth_fb != prth_fb || rth_ev != prth_ev || rth_rq != prth_rq || rth_sr != prth_sr || rth_sm != prth_sm) LOG("[nvn] rt-heap up to frame %llu: arenas new %llu, hits %llu, full %llu, active %llu, idle %llu, live %llu targets, backing %llu MB, fallback %llu, evicted %llu; eligible %llu, stock reused %llu, stock made %llu", frame, (unsigned long long)(rth_nw - prth_nw), (unsigned long long)(rth_hi - prth_hi), (unsigned long long)(rth_fu - prth_fu), (unsigned long long)rth_ac, (unsigned long long)rth_id, (unsigned long long)rth_li, (unsigned long long)(rth_bk >> 20), (unsigned long long)(rth_fb - prth_fb), (unsigned long long)(rth_ev - prth_ev), (unsigned long long)(rth_rq - prth_rq), (unsigned long long)(rth_sr - prth_sr), (unsigned long long)(rth_sm - prth_sm));
++        if (rth_nw != prth_nw) { void mtl_rth_top(char *, size_t); char rtop[512]; mtl_rth_top(rtop, sizeof rtop); if (rtop[0]) LOG("[nvn] rt-heap top up to frame %llu: %s", frame, rtop); }
++        prth_nw = rth_nw; prth_hi = rth_hi; prth_fu = rth_fu; prth_fb = rth_fb; prth_ev = rth_ev; prth_rq = rth_rq; prth_sr = rth_sr; prth_sm = rth_sm;
+ 
+         char tc[400]; dm_thread_cpu(tc, sizeof tc, s);
+         LOG("[nvn] threads up to frame %llu: CPU %s", frame, tc); }

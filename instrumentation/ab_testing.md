@@ -21,7 +21,7 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
@@ -58,6 +58,25 @@ and encoder recreation invalidate the cache. Compare three cold runs and
 three enter-leave-enter runs against `bind_once off`. Promotion requires zero
 `[RED]`, no new frame-step transition, a median upload-frame p95 submit
 improvement of at least 1 ms, and no individual regression above 1 ms.
+
+## RT heap-arena gate H1 (experimental, default off)
+
+`rt-heap-reserve on` sets `SWX_RT_HEAP_RESERVE=1`. It keeps automatic-MTLHeap
+arenas for private transient render targets: Metal packs several live targets
+into each resident heap and reuses freed space. Arenas are keyed only by heap
+compatibility (storage/cache/hazard modes, 16 MB minimum, 64 MB per arena,
+256 MB total over active and idle arenas); past either cap the stock path runs
+(`fallback`). Eligible requests and their stock outcomes (`eligible, stock
+reused, stock made`) are counted in both arms, so the gate compares measured
+sides. Two boots per side with ring UB + yield active and texture pool off.
+Each boot: load, 10 s luneta with pan, close 5 s, reopen the same luneta
+10 s, shrine, teleport, dense area, save/load. Passes iff zero `[RED]`/
+flicker/step change, backing ≤256 MB stable after warm-up, second luneta with
+arena `hits` > 0 and arenas `new` down ≥70% vs the first, and equivalent stock
+creations and/or residency-commit/submit cost in the repeated stretch down
+≥20% with no individual regression >1 ms. The expected win is no backing-heap
+creation/growth on re-entry and transitions, not the luneta's continuous GPU
+cost.
 
 ## Run order (phases 0–2, no rebuilds needed)
 

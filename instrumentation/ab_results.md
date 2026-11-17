@@ -136,3 +136,23 @@ Details in `docs/residency_ub_ring.md`.
 
 Promoted: install pins `SWX_RESIDENCY_UB_RING=1`. `=0` restores the legacy
 path for A/B.
+
+## Gate — rt-heap arenas H1 (luneta): mechanism PASS, merged to main, default off
+
+Slice: `patches/dm_rt_heap_reserve.patch` (`SWX_RT_HEAP_RESERVE`, default off)
+— automatic-MTLHeap arenas holding several live transient render targets
+each; keyed only by heap compatibility (storage/cache/hazard modes); explicit
+retire-fence stamps per submit-thread use; rigid 256 MB budget over active
+and idle arenas; both-arm eligible/stock counters. Replaces the failed
+one-heap-per-texture class design under the same flag (32-class table and
+per-texture high-water removed).
+
+Verdict: correctness + mechanism pass — zero `[RED]`, VFR intact (debt 0),
+136 MB effective backing (< 256 MB), zero fallback in both on-runs, real reuse
+eliminating 87–100% of stock RT creations after warm-up (hot: 8 arenas,
+~178 live targets, 136 MB backing; Metal packs several targets per heap).
+Slot cap raised 8 → 16 during the gate (budget unchanged). Not a fix for the
+luneta's continuous GPU cost; the ≥20% residency-commit perf gate is not
+formally closed and an anomalous off-run is not used as quantitative proof,
+so the flag stays default off. Extra margin before flicker observed, not
+claimed as a flicker cure.
