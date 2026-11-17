@@ -481,10 +481,11 @@ def redirect_saves(cfg, master, phase_log):
             kept = [ln for ln in f.read().splitlines()
                     if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=", "DM_PSO_PAIRS=",
                                                  "DM_NVN_SYNC_LAG=", "DM_PRESENT_SNAP=", "DM_SAVE_ASYNC=", "DM_PSO_USER_ASYNC="))]
-    # Decided defaults, pinned every install (Gate 3a-pass with SNAP=4;
-    # save-async Gate 1 pass): DM_NVN_SYNC_LAG=1 (one submission ahead;
-    # host default is strict), DM_PRESENT_SNAP=4 (snapshot ring fits CPU
-    # ahead + screen-ahead), DM_SAVE_ASYNC=1 (swapped-out save deleted on
+    # Strict stock measurement baseline, pinned every install: DM_NVN_SYNC_LAG=0
+    # (strict newest-fence wait; =1 would let the CPU run one submission
+    # ahead), DM_PRESENT_SNAP=2 (stock snapshot ring; =4 is an optional
+    # smoothness experiment that can conceal the visible hitch).
+    # DM_SAVE_ASYNC=1 (swapped-out save deleted on
     # a background thread; clone+swap stay synchronous). SWX switches
     # default in code (keep-alive on on macOS; upload split opt-in);
     # DM tuning the user set by hand (MAX_TEX, KEEPALIVE_US, …) passes
@@ -504,13 +505,13 @@ def redirect_saves(cfg, master, phase_log):
         f.write(f"DM_PSO_ARCHIVE={pso_archive}\n")
         if os.path.isfile(pso_pairs):
             f.write(f"DM_PSO_PAIRS={pso_pairs}\n")
-        f.write("DM_NVN_SYNC_LAG=1\n")
-        f.write("DM_PRESENT_SNAP=4\n")
+        f.write("DM_NVN_SYNC_LAG=0\n")
+        f.write("DM_PRESENT_SNAP=2\n")
         f.write("DM_SAVE_ASYNC=1\n")
         f.write("DM_PSO_USER_ASYNC=1\n")
     log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE"
                      f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''}, "
-                     f"DM_NVN_SYNC_LAG=1, DM_PRESENT_SNAP=4, DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1 to {env_path}")
+                     f"DM_NVN_SYNC_LAG=0, DM_PRESENT_SNAP=2, DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1 to {env_path}")
 
     moved, kept_back = [], []
     old_save = os.path.join(as_dir, "save")

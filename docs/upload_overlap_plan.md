@@ -55,12 +55,25 @@ Each dated 2026-11-16 with a one-line rationale:
   appends under one leaf lock, flushes every 64 rows on a UTILITY serial
   queue — crash loses only unflushed rows, re-learned next run
   (`patches/dm_pso_user_async.patch`, `docs/async_writes_evaluation.md` §6).
-- Lag + `SNAP=4` install defaults with ring-4 requirement: ring 2 blinks
+- Lag + `SNAP=4` historical Gate 3a recipe (now an optional smoothness
+  experiment, not the install default): ring 2 blinks
   (2 frames of latency in a 2-slot ring), ring 4 (`DM_PRESENT_SNAP=4`)
   runs 4724 frames with 0 RED/0 blinks — `instrumentation/ab_results.md`
-  Gate 3a, pinned by `wrapper/main.py` / player `env.txt`.
+  Gate 3a. Current installs pin the strict stock baseline
+  (`DM_NVN_SYNC_LAG=0` + `DM_PRESENT_SNAP=2`) for texture-hitch testing.
 
-## 3. Slice 1 — pooled resident staging (env-gated, default off: `SWX_TEXTURE_POOL`)
+## 3. Slice 0 — bind-once state cache (env-gated, default off: `SWX_GPU_BIND_ONCE`)
+
+`patches/dm_gpu_bind_once.patch` suppresses repeated argument-table and
+pipeline binds only for consecutive deswizzle dispatches on the same upload
+encoder. It invalidates the cache before sparse gather and whenever the
+upload encoder ends or is recreated; `setAddress` stays per slice. This is
+not an MNG parity claim: its reference deswizzle path also binds per slice.
+Gate it with cold and enter-leave-enter A/B runs: zero `[RED]`, no new
+frame-step transition, median p95 submit reduction of at least 1 ms, and no
+individual regression above 1 ms.
+
+## 4. Slice 1 — pooled resident staging (env-gated, default off: `SWX_GPU_TEXTURE_POOL`)
 
 Shape (MNG mirror, NX-sized): keep a small pool of private + shared staging
 blocks resident across submissions — cf. MNG 6x32 MB private + 4x8 MB shared,
@@ -127,7 +140,7 @@ Gate 2 (numbers) — same fixed route, `collect`/`compare`:
 - Promote to default only with a second corpus (different area, longer
   session), same rule as `docs/async_writes_evaluation.md` §5 Gate 2.
 
-## 4. Parked follow-ups: slice 2 (pre-reserve offsets) and slice 3 (helper copies + GPU decompress)
+## 5. Parked follow-ups: slice 2 (pre-reserve offsets) and slice 3 (helper copies + GPU decompress)
 
 Slice 2 — pre-reserve offsets, only if slice 1 is insufficient. MNG shape:
 `up_reserve` / `up_pair_alloc` atomic reservation of
@@ -151,7 +164,7 @@ addition: wrong-picture abort condition — any helper/GPU-decompress mismatch
 must fail loudly (`[RED]`) and fall back to the synchronous path, never
 ship a wrong texel. Parked until slices 1–2 numbers demand it.
 
-## 5. Standing rules
+## 6. Standing rules
 
 - Measurement entries are permanent infrastructure: the four
   `../instrumentation/swx_upload_*_diag.patch` entries in `patches/series`

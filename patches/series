@@ -7,4 +7,5 @@ dm_pso_user_async.patch
 ../instrumentation/swx_upload_times_diag.patch
 ../instrumentation/swx_upload_paths_diag.patch
 ../instrumentation/swx_upload_pertexture_diag.patch
-dm_texture_pool.patch
+dm_gpu_texture_pool.patch
+dm_gpu_bind_once.patch

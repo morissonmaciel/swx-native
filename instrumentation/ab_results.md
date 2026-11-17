@@ -48,8 +48,10 @@ stays ON (macOS default). The user's felt benefit is quantified.
   = 2 frames of latency in a 2-slot ring → slot overwrite on spikes.
 - Ring 4 (`DM_PRESENT_SNAP=4`): 4724 frames, 0 RED, 0 blinks, 0 gameplay
   holds (startup 12→42 only). Cost: +1 frame display latency.
-Recipe adopted as install defaults: `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4`
-pinned by `wrapper/main.py`; `=0` / `snap 2` restores stock for A/B.
+Recipe (historical Gate 3a pass, now an optional smoothness experiment, not
+the install default): `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4`
+pinned by `wrapper/main.py` at the time; stock baseline (`=0` / `snap 2`)
+is pinned for current texture-hitch testing.
 
 ## Gate 3b — sync-lag numbers: MIXED
 
@@ -62,8 +64,9 @@ pinned by `wrapper/main.py`; `=0` / `snap 2` restores stock for A/B.
   libraries, whole 156.9 ms) — first in all runs; rows self-healed into
   `pso_user.tsv`. Follow-up: prewarm coverage gap (fatia 3 territory).
 Win confirmed: flatness (no plateaus), not faster bursts — half the MNG
-promise. The prototype stays env-gated, default-pinned, not promoted to a
-profile key.
+promise. The prototype stays env-gated (lag=1/snap=4 available as an
+optional smoothness experiment), stock baseline pinned for current testing,
+not promoted to a profile key.
 
 ## Gate 1 (save-async S2) — PASS, promoted to default ON
 

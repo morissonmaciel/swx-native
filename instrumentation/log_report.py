@@ -22,6 +22,7 @@ def classify(line):
     m_up = re.search(r"texture uploads (\d+) first", line)
     m_mb = re.search(r"([\d.]+) MB", line)
     m_ms = re.search(r"whole frame ([\d.]+) ms", line)
+    m_submit = re.search(r"submit\+present ([\d.]+) ms", line)
     m_hy = re.search(r"draws with a hybrid pipeline (\d+)", line)
     m_gpu = re.search(r"GPU ([\d.]+) ms", line)
     m_fr = re.search(r"frame (\d+)", line)
@@ -33,6 +34,7 @@ def classify(line):
     return {
         "frame": int(m_fr.group(1)) if m_fr else -1,
         "ms": float(m_ms.group(1)) if m_ms else 0.0,
+        "submit_ms": float(m_submit.group(1)) if m_submit else 0.0,
         "new_pipelines": np_,
         "first_uploads": up,
         "upload_mb": float(m_mb.group(1)) if (m_mb and up) else 0.0,
@@ -99,6 +101,12 @@ def report(path):
     for k, v in by_cause.items():
         rep[f"lf_{k}"] = len(v)
         rep[f"lf_{k}_worst_ms"] = max([x["ms"] for x in v], default=0.0)
+    upload_submit = sorted(x["submit_ms"] for x in by_cause["uploads"])
+    if upload_submit:
+        # Nearest-rank p95: stable and interpretable for the small A/B corpus.
+        rep["lf_upload_submit_p95_ms"] = upload_submit[(95 * len(upload_submit) - 1) // 100]
+    else:
+        rep["lf_upload_submit_p95_ms"] = 0.0
     rep["new_pipelines_total"] = sum(l["new_pipelines"] for l in lfs)
     rep["first_uploads_total"] = sum(l["first_uploads"] for l in lfs)
     rep["first_uploads_mb"] = round(sum(l["upload_mb"] for l in lfs), 1)
@@ -137,6 +145,7 @@ def main(argv=None):
     print(f"longframes: {rep['longframe_count']} (worst {rep['worst_ms']:.1f} ms)")
     print(f"  with new pipelines : {rep['lf_pipelines']} (worst {rep['lf_pipelines_worst_ms']:.1f} ms)")
     print(f"  upload-only          : {rep['lf_uploads']} (worst {rep['lf_uploads_worst_ms']:.1f} ms)")
+    print(f"  upload submit p95    : {rep['lf_upload_submit_p95_ms']:.1f} ms")
     print(f"  gpu-bound/other      : {rep['lf_gpu_other']} (worst {rep['lf_gpu_other_worst_ms']:.1f} ms)")
     print(f"new pipelines total: {rep['new_pipelines_total']}, "
           f"first uploads: {rep['first_uploads_total']} ({rep['first_uploads_mb']} MB), "

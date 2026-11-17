@@ -54,8 +54,10 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 
 ## On Tests (experimental, installed by default)
 
-- `DM_PRESENT_SNAP=4` + `DM_NVN_SYNC_LAG=1` (pinned by the installer;
-  `=0` / `snap 2` restores stock for A/B): flat frametime in the heavy
+- `DM_PRESENT_SNAP=2` + `DM_NVN_SYNC_LAG=0` (strict stock measurement
+  baseline, pinned by the installer for current texture-hitch testing;
+  `=1` / `snap 4` is an optional smoothness experiment, not the default):
+  historical Gate 3a finding with lag=1/snap=4 was flat frametime in the heavy
   area-entry region, zero 30 fps holds over thousands of frames, zero
   repeated present blinks (ring 2 blinked under lag; ring 4 does not).
   See `docs/sync_lag_evaluation.md`, `instrumentation/ab_results.md`.
@@ -77,7 +79,7 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   count adds commit overhead without moving encode off the submit thread.
   Pools/overlap are future work, not this split.
 - Frame-ahead + snapshot ring: `DM_NVN_SYNC_LAG=1` needs `DM_PRESENT_SNAP=4`
-  (both pinned by the installer); ring 2 blinks under lag.
+  (optional smoothness experiment, not installer-pinned); ring 2 blinks under lag.
 - Single white-frame display drops happen rarely in stock too; ring 4
   absorbs them.
 - Autosave commits are background-cleaned by default (`DM_SAVE_ASYNC=1`):

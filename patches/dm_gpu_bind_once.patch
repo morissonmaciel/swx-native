@@ -1,0 +1,132 @@
+# SWX_GPU_BIND_ONCE=1: suppress repeated Metal 4 deswizzle bindings only while
+# the upload encoder's state is known. Every external pipeline/table mutation
+# invalidates the cache first; default off for A/B. Counters expose attempted,
+# emitted, skipped and invalidated bindings. Per-slice addresses remain writes.
+# verify: dm/gfx/tex/nvn_deswizzle_gpu.m:nvn_deswz_gpu_m4_invalidate
+# verify: dm/gfx/tex/nvn_deswizzle_gpu.m:SWX_GPU_BIND_ONCE=1
+--- a/dm/gfx/tex/nvn_deswizzle_gpu.h
++++ b/dm/gfx/tex/nvn_deswizzle_gpu.h
+@@ -5,6 +5,11 @@
+ #include "nvn_deswizzle.h"
+ 
+ int nvn_deswz_gpu_init(id<MTLDevice> dev);
++// Metal 4 upload encoders are shared with non-deswizzle kernels. Every
++// external state change must invalidate this optional bind cache first.
++void nvn_deswz_gpu_m4_invalidate(id<MTL4ComputeCommandEncoder> enc);
++void nvn_deswz_gpu_m4_stats(uint64_t *attempted, uint64_t *emitted,
++                             uint64_t *skipped, uint64_t *invalidated);
+ // Small RGBA16F arrays: write raw component bits through an integer texture
+ // view, across all layers in one dispatch per mip (no per-face staging/copies).
+ int nvn_deswz_gpu_direct_supported(const nvn_texdesc *d);
+--- a/dm/gfx/tex/nvn_deswizzle_gpu.m
++++ b/dm/gfx/tex/nvn_deswizzle_gpu.m
+@@ -1,10 +1,38 @@
+ #import "nvn_deswizzle_gpu.h"
+ #import "../nvn/host_msl.h"
++#include <stdatomic.h>
++#include "../../host/dm.h"
+ 
+ static id<MTLComputePipelineState> g_nvn_deswz_pipeline, g_nvn_deswz_direct;
+ 
++// SWX_GPU_BIND_ONCE=1 suppresses only repeated deswizzle bindings on an
++// unchanged upload encoder. Its owner invalidates the cache before every
++// external table/pipeline mutation; per-slice setAddress writes stay intact.
+ // The kernels deswz and deswz_direct: dm/gfx/msl/deswz.metal
+ 
++static __weak id g_m4_enc; static int g_m4_which; static __weak id g_m4_table;
++static _Atomic uint64_t g_m4_attempted, g_m4_emitted, g_m4_skipped, g_m4_invalidated;
++static int m4_bind_once_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("SWX_GPU_BIND_ONCE"); v = e && atoi(e) != 0;
++        if (v) LOG("[nvn-deswz] SWX_GPU_BIND_ONCE=1: suppressing repeated upload deswizzle bindings"); }
++    return v;
++}
++void nvn_deswz_gpu_m4_invalidate(id<MTL4ComputeCommandEncoder> enc) {
++    if (!enc || enc == g_m4_enc) { g_m4_enc = nil; g_m4_table = nil; g_m4_which = 0; atomic_fetch_add(&g_m4_invalidated, 1); }
++}
++void nvn_deswz_gpu_m4_stats(uint64_t *attempted, uint64_t *emitted, uint64_t *skipped, uint64_t *invalidated) {
++    *attempted = atomic_load(&g_m4_attempted); *emitted = atomic_load(&g_m4_emitted);
++    *skipped = atomic_load(&g_m4_skipped); *invalidated = atomic_load(&g_m4_invalidated);
++}
++static void bind_m4(id enc, id table, int which, id pso) {
++    atomic_fetch_add(&g_m4_attempted, 1);
++    if (m4_bind_once_on() && enc == g_m4_enc && which == g_m4_which && table == g_m4_table) { atomic_fetch_add(&g_m4_skipped, 1); return; }
++    [enc setArgumentTable:table]; [enc setComputePipelineState:pso];
++    atomic_fetch_add(&g_m4_emitted, 1);
++    g_m4_enc = enc; g_m4_which = which; g_m4_table = table;
++}
++
+ int nvn_deswz_gpu_init(id<MTLDevice> dev) {
+     if (g_nvn_deswz_pipeline) return 0;
+     if (!dev) return -1;
+@@ -38,7 +66,7 @@
+     struct {uint64_t src_off,base,layer_stride;uint32_t width,height,layers,level,th,gobs_x,gob2;} p = {
+         src_off,base,layout.layer_size,MAX(d->width>>level,1u),MAX(d->height>>level,1u),layout.layers,level,th,MAX(nvn_tex_level_gobs(d,level),(row+63u)/64u),(uint32_t)nvn_gob_switch2};
+     memcpy((uint8_t*)params.contents+params_off,&p,sizeof p);
+-    [enc setArgumentTable:table];[enc setComputePipelineState:g_nvn_deswz_direct];
++    bind_m4(enc, table, 1, g_nvn_deswz_direct);
+     [table setAddress:src.gpuAddress atIndex:0];[table setAddress:params.gpuAddress+params_off atIndex:2];[table setTexture:view.gpuResourceID atIndex:0];
+     [enc dispatchThreadgroups:MTLSizeMake((p.width+7)/8,(p.height+3)/4,p.layers) threadsPerThreadgroup:MTLSizeMake(8,4,1)];
+     return 0;
+@@ -78,8 +106,7 @@
+         src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_switch2   // GOB columns as laid out (nvn_tex_level_gobs)
+     };
+     memcpy((uint8_t *)params.contents + params_off, &p, sizeof p);
+-    [enc setArgumentTable:table];
+-    [enc setComputePipelineState:g_nvn_deswz_pipeline];
++    bind_m4(enc, table, 2, g_nvn_deswz_pipeline);
+     [table setAddress:src.gpuAddress atIndex:0];
+     [table setAddress:dst.gpuAddress atIndex:1];
+     [table setAddress:params.gpuAddress + params_off atIndex:2];
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3375,6 +3375,7 @@
+     if (!g_up_cb) return;
+     if (g_up_batch_tex > 0 || g_nup_blits > 0) atomic_fetch_add(&g_swx_up_batches, 1);
+     if (g_up_ce) {
++        nvn_deswz_gpu_m4_invalidate(g_up_ce);
+         m4_end(g_up_ce); g_up_ce = nil;
+     }
+     id<MTL4ComputeCommandEncoder> b = g_nup_blits ? g_up_ce = [g_up_cb computeCommandEncoder] : nil;
+@@ -3387,7 +3388,7 @@
+         if (x->tsrc != from) { from = x->tsrc; [b barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice]; }
+         enc_b_copy_texture(b, x->tsrc, x->slice, x->level, MTLOriginMake(0, 0, 0), x->size, x->dst, x->slice, x->level, MTLOriginMake(0, 0, 0));
+     }
+-    if (b) { m4_end(b); g_up_ce = nil; }
++    if (b) { nvn_deswz_gpu_m4_invalidate(b); m4_end(b); g_up_ce = nil; }
+     id<MTL4CommandBuffer> cb = g_up_cb;
+     unsigned slot = (g_up_seq - 1) % 3;
+     // Only this upload batch uses its overflow staging. Retire it on upload
+@@ -3455,6 +3456,7 @@
+     g_up_cb = [g_dev newCommandBuffer];
+     [g_up_cb beginCommandBufferWithAllocator:g_up_alloc4[slot]];
+     g_up_ce = [g_up_cb computeCommandEncoder];
++    nvn_deswz_gpu_m4_invalidate(g_up_ce);
+     [g_up_ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+     [g_up_ce setArgumentTable:g_up_ct];
+     if (!g_up_texs) g_up_texs = [NSMutableArray array];
+@@ -3669,6 +3671,7 @@
+     size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);
+     uint64_t va = (uint64_t)(uintptr_t)t->mem, n = (t->L.size + 15) & ~15ull;
+     struct { uint64_t va, pt_pg, n; } p = {va, va >> 12, n}; memcpy((uint8_t *)params.contents + poff, &p, sizeof p);
++    nvn_deswz_gpu_m4_invalidate(g_up_ce);
+     [g_up_ce setArgumentTable:g_up_ct]; [g_up_ce setComputePipelineState:sp_gather_pso()];
+     at_addr(g_up_ct, dst.gpuAddress + off, 0, "sparse gather table slot", 1); at_addr(g_up_ct, tb.gpuAddress, 1, "sparse gather table slot", 1); at_addr(g_up_ct, params.gpuAddress + poff, 2, "sparse gather table slot", 1);
+     [g_up_ce dispatchThreadgroups:MTLSizeMake((NSUInteger)((n >> 4) + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+@@ -4302,7 +4305,7 @@
+     }
+     if (depth || stencil || multisample) {
+         up_begin();
+-        if (g_up_ce) { m4_end(g_up_ce); g_up_ce = nil; }
++        if (g_up_ce) { nvn_deswz_gpu_m4_invalidate(g_up_ce); m4_end(g_up_ce); g_up_ce = nil; }
+         NSUInteger slices = mt.arrayLength * (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1);
+         for (NSUInteger l = 0; l < mt.mipmapLevelCount; l++) for (NSUInteger y = 0; y < slices; y++) {
+             MTL4RenderPassDescriptor *pd = [MTL4RenderPassDescriptor new];
+@@ -4316,6 +4319,7 @@
+             [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; m4_end(e);
+         }
+         g_up_ce = [g_up_cb computeCommandEncoder];
++        nvn_deswz_gpu_m4_invalidate(g_up_ce);
+         [g_up_ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+         [g_up_ce setArgumentTable:g_up_ct]; [g_up_texs addObject:mt];
+         if (!g_cb) up_flush();

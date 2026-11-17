@@ -21,23 +21,35 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set split|keepalive|lag|snap on|off|clear
+python3 instrumentation/ab_test.py set split|keepalive|lag|snap|save|pso|pool|bind_once on|off|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
 
 `on` writes an explicit `=1` (visible as `launcher: env K=1` at boot);
 `off` writes `=0` (forces stock behavior); `clear` removes the line so the
-compiled default applies. Defaults in code: keep-alive on on macOS, upload
-split OFF unless `SWX_UPLOAD_SPLIT=1` (Gate 1, 2026-11-16), sync-lag OFF
-unless `DM_NVN_SYNC_LAG=1` (prototype, Phase 3). `lag` arms the host
-switch; verify it took effect via `sync-lag: True` in the report.
+compiled default applies. Strict stock measurement baseline is pinned by
+every install (`DM_NVN_SYNC_LAG=0`, `DM_PRESENT_SNAP=2`) for current
+texture-hitch testing; `=1` / `snap 4` is an optional smoothness experiment
+(Gate 3a recipe, preserved in `ab_results.md`), not the default.
+Keep-alive on on macOS, upload split OFF unless `SWX_UPLOAD_SPLIT=1`
+(Gate 1, 2026-11-16). `lag` arms the host switch; verify it took effect
+via `sync-lag: True` in the report.
 
 `collect` snapshots the finished run's game log (default: the current
 log; `--log` for the rotated `.prev.log`), the `env.txt` state, and the
 `log_report.py` JSON into `<I>/.swx-history/ab-<label>/`.
 `compare` prints both runs side by side: longframes, worst frame,
 upload-only vs gpu-bound splits, `uploads/batch`, step transitions.
+
+## Bind-once gate (experimental, default off)
+
+`bind_once on` sets `SWX_GPU_BIND_ONCE=1`. It suppresses only redundant
+Metal 4 deswizzle binds while upload-encoder state is known; sparse gather
+and encoder recreation invalidate the cache. Compare three cold runs and
+three enter-leave-enter runs against `bind_once off`. Promotion requires zero
+`[RED]`, no new frame-step transition, a median upload-frame p95 submit
+improvement of at least 1 ms, and no individual regression above 1 ms.
 
 ## Run order (phases 0–2, no rebuilds needed)
 
@@ -49,8 +61,11 @@ upload-only vs gpu-bound splits, `uploads/batch`, step transitions.
 3. `set keepalive off`, same route → `collect keepalive-off` →
    `compare split-on-baseline keepalive-off` (Gate 2). Then
    `set keepalive clear`.
-4. Phase 3 (done — `patches/dm_nvn_sync_lag.patch`, default ON in code):
-   install pins `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4` in player `env.txt`
-   (Gate 3a-pass recipe). A/B against stock: `set lag off` (plus
+4. Phase 3 (done — `patches/dm_nvn_sync_lag.patch`, default ON in code when
+   env is absent): the historical Gate 3a-pass recipe was
+   `DM_NVN_SYNC_LAG=1` + `DM_PRESENT_SNAP=4` in player `env.txt`.
+   Current installs pin the strict stock baseline (`DM_NVN_SYNC_LAG=0` +
+   `DM_PRESENT_SNAP=2`); use `set lag on` / `set snap on` for the optional
+   smoothness experiment. A/B against stock: `set lag off` (plus
    `set snap 2` for the pure-stock ring) vs defaults, `collect`, compare.
    Gate 3a (correctness) before Gate 3b (numbers).
