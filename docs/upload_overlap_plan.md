@@ -166,10 +166,13 @@ ship a wrong texel. Parked until slices 1–2 numbers demand it.
 
 ## 6. Standing rules
 
-- Measurement entries are permanent infrastructure: the four
-  `../instrumentation/swx_upload_*_diag.patch` entries in `patches/series`
-  plus `instrumentation/ab_test.py` and `instrumentation/log_report.py`
-  are never removed with slices.
+- Measurement entries served their gates and were removed: the
+  `../instrumentation/swx_*_diag.patch` entries (batches, times, paths,
+  per-texture, vconv) plus the unlisted residual diag were reverted and
+  deleted once every open question they instrumented was decided
+  (2026-11-16 final commit). `instrumentation/ab_test.py` and
+  `instrumentation/log_report.py` keep parsing the enriched lines
+  (backward compatible: absent suffixes read as zero).
 - One concern per patch (`docs/nxnative_patches.md`): each slice is its own
   single-file patch with a why-header.
 - Verify-before-marker: every patch declares `# verify:` sentinel headers

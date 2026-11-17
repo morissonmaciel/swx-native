@@ -11,7 +11,7 @@
 # proves nothing (found 2026-11-16 while stacking a third patch). Each patch
 # file declares its sentinels in `# verify:` header lines:
 #   # verify: <relpath>:<literal>  — grep -F must find <literal> in the file
-#   # verify: <relpath>             — the file itself must exist
+#   # verify: <relpath>             — the file itself must exist and be non-empty
 # A patch counts as applied only when every sentinel holds. Sentinels prove
 # applied-ness, not applied-version: after a patch file's *content* changes,
 # only a revert with the old version (e.g. `git show HEAD:patches/<p>`)
@@ -27,6 +27,11 @@
 # - a marker is a *verified* claim: it is only written after every sentinel
 #   of every patch holds on the just-patched tree, and an existing marker is
 #   only trusted (same hash) after the same check passes.
+# - reverses never run blind: Apple's patch(1) forward-applies on non-matching
+#   content with exit 0 under --batch (proven 2026-11-16), so -R runs only
+#   when the sentinels hold, and a revert that leaves them holding is a hard
+#   stop (duplicate/partial application needs exact-string surgery, never
+#   another -R).
 # - --batch everywhere and exactly one stdin redirect (the patch file).
 #   NEVER add a second stdin redirect (e.g. </dev/null after the file):
 #   the last redirect wins, patch reads empty stdin, exits 0 doing nothing,
@@ -35,8 +40,8 @@
 # - -V none: no .orig/.rej litter on success paths.
 # - quiet no-op when series is missing or empty.
 # Usage: patch_nxnative.sh <core dir> [--force]
-# --force normalizes first (best-effort revert in reverse order, then
-# a normal run): the way out of half-applied trees.
+# --force additionally drops stray files at patch-owned new-file paths, then
+# runs the same revert-if-applied + check-then-apply as a normal run.
 set -eu
 
 CORE=""; FORCE=0
@@ -84,7 +89,7 @@ is_applied() {   # $1 = patch file name: every # verify: sentinel holds
                 grep -qF "$lit" "$CORE/$f" 2>/dev/null || rc=1
                 ;;
             *)
-                [ -e "$CORE/$spec" ] || rc=1
+                [ -s "$CORE/$spec" ] || rc=1
                 ;;
         esac
     done < "$tmp"
@@ -99,6 +104,40 @@ stack_verified() {   # every patch's sentinels hold
     return 0
 }
 
+newfile_targets() {   # $1 = patch file name: relpaths the patch creates (--- /dev/null -> +++ b/<path>)
+    grep -A1 '^--- /dev/null' "$HERE/$1" 2>/dev/null | grep '^+++ b/' | sed 's|^+++ b/||; s/[[:space:]].*$//'
+}
+
+drop_empty_newfiles() {   # remove 0-byte leftovers for add-file hunks so patch(1) can recreate them
+    for p in $PATCHES; do
+        newfile_targets "$p" | while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if [ -e "$CORE/$f" ] && [ ! -s "$CORE/$f" ]; then
+                rm -f "$CORE/$f"
+                echo "patches: removed empty new-file leftover $f ($p)"
+            fi
+        done
+    done
+}
+
+drop_stale_newfiles() {   # --force only: remove add-file targets of unapplied patches (any size)
+    # Forward patch(1) over an existing file truncates it to 0 bytes with
+    # exit 0 (proven 2026-11-16: swx_keepalive.m), so a stray file at a
+    # patch-owned path blocks re-creation. Only paths this series creates,
+    # only when their patch is not applied (never broad deletion).
+    for p in $PATCHES; do
+        if ! is_applied "$p"; then
+            newfile_targets "$p" | while IFS= read -r f; do
+                [ -n "$f" ] || continue
+                if [ -e "$CORE/$f" ]; then
+                    rm -f "$CORE/$f"
+                    echo "patches: removed stale new-file $f ($p)"
+                fi
+            done
+        fi
+    done
+}
+
 WANT="$(hash_state)"
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then
     if stack_verified; then
@@ -110,12 +149,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; t
 fi
 
 # 0. normalize first when the tree is not the verified marked state:
-# revert whatever is applied, in reverse order (a later patch's context
-# depends on the earlier ones, so forward-order revert fails), each revert
-# independently best-effort, then drop any stale marker. --force asks for
-# this explicitly; otherwise it happens automatically whenever sentinels
-# show applied state outside the fast path above. This is what recovers
-# half-applied trees and stale adoptions instead of failing on them.
+# revert whatever the sentinels show as applied, in reverse order (a later
+# patch's context depends on the earlier ones, so forward-order revert
+# fails), then drop any stale marker. --force asks for this explicitly;
+# otherwise it happens automatically whenever sentinels show applied state
+# outside the fast path above. Reverts never run on sentinels-absent
+# patches (see the -R warning above); a duplicate/partial application that
+# a single revert does not clear stops loudly instead of being reverted
+# again and again.
 any_applied() {
     for p in $PATCHES; do
         is_applied "$p" && return 0
@@ -129,17 +170,37 @@ if { [ "$FORCE" -eq 1 ] || any_applied; } then
         echo "patches: tree shows applied state outside the marked stack; normalizing"
     fi
     for p in $(echo "$PATCHES" | tac 2>/dev/null || echo "$PATCHES" | tail -r); do
+        # NEVER reverse unless the sentinels hold: Apple's patch(1) answers
+        # its own "assume -R?" with yes under --batch, so -R on non-matching
+        # content forward-applies with exit 0 (proven 2026-11-16: tripled
+        # split hunks, phantom singles). A revert that does not clear the
+        # sentinels is a hard stop, never a warning to run past.
         if is_applied "$p"; then
             patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$p" >/dev/null 2>&1 || true
             if is_applied "$p"; then
-                echo "warning: revert did not clear sentinels (content changed?): $p" >&2
-            else
-                echo "patches: reverted $p"
+                echo "[ERROR] revert did not clear sentinels (duplicate or partial application?): $p" >&2
+                echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+                exit 1
             fi
+            echo "patches: reverted $p"
         fi
     done
+    # Apple's patch(1) reverse of an add-file hunk truncates instead of
+    # deleting, leaving a 0-byte file that blocks re-creation (found
+    # 2026-11-16: swx_keepalive.m). Drop those empties; only empty
+    # new-file targets, never broad deletion.
+    drop_empty_newfiles
+    # A stray full file at a patch-owned new-file path truncates to 0 on
+    # forward apply (exit 0), so --force drops those too; a plain run only
+    # drops empties and fails loudly otherwise (never delete real content
+    # unasked).
+    if [ "$FORCE" -eq 1 ]; then drop_stale_newfiles; fi
     rm -f "$MARKER"
 fi
+
+# A 0-byte new-file leftover also blocks a plain (non-force) re-run's
+# dry-run/apply, so sweep them before the check-then-apply loop too.
+drop_empty_newfiles
 
 # 1-2. check-then-apply in series order on a clean tree: each patch dry-runs
 # just before it applies, so a dependent patch sees the tree its context
@@ -160,7 +221,8 @@ for p in $PATCHES; do
     fi
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$p" >/dev/null || { echo "[ERROR] failed applying: $p" >&2; exit 1; }
     if ! is_applied "$p"; then
-        echo "[ERROR] patch applied but its sentinels are missing (silent skip?): $p" >&2
+        echo "[ERROR] patch applied but its sentinels are missing (silent skip or truncated new file?): $p" >&2
+        echo "        a stray file at one of its add-file paths truncates on apply; remove it or re-run with --force." >&2
         exit 1
     fi
     echo "patches: applied $p"
