@@ -114,7 +114,7 @@
          } else {
              g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
 -            g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
-+            { g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate]; g_up_block_pooled = 0;
++            g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate]; g_up_block_pooled = 0;
              res_add(g_up_block); g_up_blocks_new++;
          }
          if (!g_up_block) MDIE("failed to create the swizzled-upload staging block %#zx", g_up_block_size);
