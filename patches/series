@@ -3,3 +3,4 @@ dm_save_async.patch
 dm_pso_user_async.patch
 dm_gpu_texture_pool.patch
 dm_gpu_bind_once.patch
+dm_relaxed_framepace.patch
