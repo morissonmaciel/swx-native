@@ -1,24 +1,24 @@
-# SWX_FRAMEPACE=relaxed: steady-beat frame pace for BOTW 1.9.0 (experimental opt-in, default off).
+# SWX_VFR=relaxed: steady-beat frame pace for BOTW 1.9.0 (experimental opt-in, default off).
 # The game clock follows a host beat at the display rate instead of the Switch 1/2/3-vsync intervals:
 # hle_nvn.c paces nvnWindowAcquireTexture on an nvn_pace beat after the previous texture ticket is released
 # (ticket, snapshot-ring and fence waits still run; no sync-lag), publishes a 5-sample-averaged, 1/15 s-capped
-# real-time ratio with bounded debt to state +0xA0 (64-bit atomic pair, MNG shape) and reports every 300 presents;
+# real-time VFR ratio with bounded debt to state +0xA0 (64-bit atomic pair, MNG shape) and reports every 300 presents;
 # the BOTW profile forces setWaitVsyncInterval to 1 and loads the published ratio at the fcmp site in
-# VFR::updateInterval (entry stubs unchanged), gated by the RELAXED_FRAMEPACE capability the loader reads from
-# fixups.tsv; loader.c seeds the relaxed words and hle.h/dm.h carry the capability. Pure logic lives in
-# nvn_relaxed_pace.h (unit test t_relaxed_pace.c); stub semantics are emulated in test_relaxed_stub.py.
+# VFR::updateInterval (entry stubs unchanged), gated by the VFR_FRAMEPACE capability the loader reads from
+# fixups.tsv; loader.c seeds the vfr words and hle.h/dm.h carry the capability. Pure logic lives in
+# nvn_vfr_pace.h (unit test t_vfr_pace.c); stub semantics are emulated in test_vfr_stub.py.
 # State offsets stay clear of the duo_anchor params (+0x80..+0x98): ratio+seconds +0xA0, mode +0xA8, flags +0xAC, steps +0xB0.
-# verify: dm/gfx/nvn/nvn_relaxed_pace.h
-# verify: dm/gfx/nvn/hle_nvn.c:swx_relaxed_poll
-# verify: dm/gfx/nvn/hle_nvn.c:SWX_RELAXED_MODE_OFF
-# verify: dm/games/01007EF00011E000/patches.py:RELAXED_FRAMEPACE
-# verify: dm/host/loader.c:dm_relaxed_capable = 1;
-# verify: dm/host/dm.h:uint32_t relaxed_framepace;
-# verify: dm/host/hle.h:extern int dm_relaxed_capable;
-# verify: dm/gfx/tests/t_relaxed_pace.c
-# verify: dm/gfx/tests/Makefile:t_relaxed_pace: t_relaxed_pace.c
-# verify: dm/tools/tests/test_relaxed_stub.py
-# verify: docs/env_switches.tsv:SWX_FRAMEPACE_HZ
+# verify: dm/gfx/nvn/nvn_vfr_pace.h
+# verify: dm/gfx/nvn/hle_nvn.c:swx_vfr_poll
+# verify: dm/gfx/nvn/hle_nvn.c:SWX_VFR_MODE_OFF
+# verify: dm/games/01007EF00011E000/patches.py:VFR_FRAMEPACE
+# verify: dm/host/loader.c:dm_vfr_capable = 1;
+# verify: dm/host/dm.h:uint32_t vfr_framepace;
+# verify: dm/host/hle.h:extern int dm_vfr_capable;
+# verify: dm/gfx/tests/t_vfr_pace.c
+# verify: dm/gfx/tests/Makefile:t_vfr_pace: t_vfr_pace.c
+# verify: dm/tools/tests/test_vfr_stub.py
+# verify: docs/env_switches.tsv:SWX_VFR_HZ
 --- a/dm/games/01007EF00011E000/patches.py
 +++ b/dm/games/01007EF00011E000/patches.py
 @@ -33,28 +33,38 @@
@@ -27,12 +27,12 @@
  # a stub there publishes it at state +0x24 so the host holds frames that long, and the setter stub leaves the framework's interval to the game while it is set. x16 / x17 are free
 -# at both entries
 +# at both entries.
-+# Relaxed frame pace (SWX_FRAMEPACE=relaxed, experimental opt-in): the setter stub hands a steady interval 1 while relaxed mode is set (state +0xA8), unless the VFR override
++# VFR frame pace (SWX_VFR=relaxed, experimental opt-in): the setter stub hands a steady interval 1 while vfr mode is set (state +0xA8), unless the VFR override
 +# is set (the original path then, as above); a mid-function stub at the ratio compare (main+0x151d484, fcmp s1,s0) loads the host's real-time ratio from state +0xA0 instead of the
 +# framework's candidate, after the same override check and a bit-range validity check (0 < bits <= 2.0, i.e. at most a 1/15 s step; anything else runs the original fcmp).
 +# x16 / x17 are free in the whole VFR body (verified: no use between main+0x151d3d0 and its ret), s2 is dead after main+0x151d470, and x19 still holds the VFR at the site.
-+# The relaxed words live above the duo_anchor params (state +0x80..+0x98, st[0..6]): +0xA0 u64 ratio+seconds (MNG-style 64-bit atomic pair, low float ratio = seconds x 30),
-+# +0xA8 u32 relaxed_mode, +0xAC u32 flags, +0xB0 u32 real-time steps. The profile declares the RELAXED_FRAMEPACE capability for the host.
++# The vfr words live above the duo_anchor params (state +0x80..+0x98, st[0..6]): +0xA0 u64 ratio+seconds (MNG-style 64-bit atomic pair, low float ratio = seconds x 30),
++# +0xA8 u32 vfr_mode, +0xAC u32 flags, +0xB0 u32 real-time steps. The profile declares the VFR_FRAMEPACE capability for the host.
  def frame_step(ctx):
      here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
      fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
@@ -49,14 +49,14 @@
 -              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs
 -              0x340000b1,   # cbz w17,orig (+5)      not decided yet
 +              0x35000171,   # cbnz w17,orig          the framework keeps the game's interval
-+              0xb940aa11,   # ldr w17,[x16,#0xa8]    relaxed mode (SWX_FRAMEPACE=relaxed, host-set)
-+              0x350000b1,   # cbnz w17,relaxed
++              0xb940aa11,   # ldr w17,[x16,#0xa8]    vfr mode (SWX_VFR=relaxed, host-set)
++              0x350000b1,   # cbnz w17,vfr
 +              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs (legacy path)
 +              0x340000f1,   # cbz w17,orig          not decided yet
                0x2a1103e1,   # mov w1,w17
 -              0xf9401a11,   # ldr x17,[x16,#0x30]
 +              0x14000002,   # b join
-+              0x52800021,   # relaxed: mov w1,#1    steady interval 1
++              0x52800021,   # vfr: mov w1,#1    steady interval 1
 +              0xf9401a11,   # join: ldr x17,[x16,#0x30]
                0x8b214231,   # add x17,x17,w1,uxtw
                0xf9001a11,   # str x17,[x16,#0x30]    vsyncs stepped
@@ -64,7 +64,7 @@
          emit(w)
      emit(B(here(), 0x11269bc))
 -    fs_put(0x11269b8, [B(0x11269b8, start)], 'setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval)')
-+    fs_put(0x11269b8, [B(0x11269b8, start)], 'setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode')
++    fs_put(0x11269b8, [B(0x11269b8, start)], 'setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in vfr mode')
      start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
      for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
                0x340000b1,   # cbz w17,orig (+5)
@@ -72,12 +72,12 @@
          emit(w)
      emit(B(here(), 0x151d3d4))
      fs_put(0x151d3d0, [B(0x151d3d0, start)], 'VFR::updateInterval: its own override published for the host (state page target fps; 0 = original)')
-+    # Relaxed ratio: the fcmp at main+0x151d484 compares the framework's candidate (s1) with the current ratio (s0) and publishes s1 at +0x3c when they differ.
-+    # In relaxed mode the host's real-time ratio (state +0xa0) is loaded instead, after the same override check as the entry stubs (x19 is still the VFR here)
++    # VFR ratio: the fcmp at main+0x151d484 compares the framework's candidate (s1) with the current ratio (s0) and publishes s1 at +0x3c when they differ.
++    # In vfr mode the host's real-time ratio (state +0xa0) is loaded instead, after the same override check as the entry stubs (x19 is still the VFR here)
 +    # and a validity check with no float temporary: s2 is dead past main+0x151d470, and the bits must satisfy 0 < bits <= 0x40000000 (at most a 1/15 s step, the host's cap).
 +    fs_site(0x151d484, '2020201e')
 +    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
-+    for w in (0xb940aa11,   # ldr w17,[x16,#0xa8]   relaxed mode
++    for w in (0xb940aa11,   # ldr w17,[x16,#0xa8]   vfr mode
 +              0x34000191,   # cbz w17,orig
 +              0x3940a671,   # ldrb w17,[x19,#0x29]   the VFR's override
 +              0x35000151,   # cbnz w17,orig
@@ -91,9 +91,9 @@
 +              0x1e204041):   # fmov s1,s2 (falls through to the B below)
 +        emit(w)
 +    emit(B(here(), 0x151d488)); emit(0x1e202020); emit(B(here(), 0x151d488))
-+    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval ratio: the host real-time ratio in relaxed mode (valid range only; original compare otherwise)')
-+    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval ratio: the host real-time ratio in relaxed mode (valid range only; original compare otherwise)')
-+    ctx.capabilities.add('RELAXED_FRAMEPACE')
++    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval ratio: the host real-time ratio in vfr mode (valid range only; original compare otherwise)')
++    fs_put(0x151d484, [B(0x151d484, start)], 'VFR::updateInterval ratio: the host real-time ratio in vfr mode (valid range only; original compare otherwise)')
++    ctx.capabilities.add('VFR_FRAMEPACE')
      # Held buttons: sead::ControllerBase::updateDerivativeParams_ (main+0xeb0ef0) adds s8 to each held button's count, a constant 1.0 (main+0xeb0f78..88), and raises the repeat bit
      # when fmod(count - delay, pulse) < s8: delays and pulses are counted in frames, so at 60 fps menus repeated twice as fast as at 30 (MacNativeGames 866beb9). s8 is now the VFR's
      # ratio (+0x3c: interval / base interval 2), 0.5 at a one-vsync step, 1.0 at two as shipped; the constant stays when there is no VFR yet or the ratio is not positive.
@@ -110,7 +110,7 @@
  #include "../tex/nvn_deswizzle.h"
  #include "nvn_mtl.h"
  #include "nvn_pace.h"
-+#include "nvn_relaxed_pace.h"
++#include "nvn_vfr_pace.h"
  #include "nvn_fstep.h"
  #include "nvn_rt.h"
  #include "nvn_timestamp.h"
@@ -118,68 +118,68 @@
  uint64_t dm_nvn_frame_count(void) { return g_frame; }
  extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
  uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
-+// ---- relaxed frame pace (SWX_FRAMEPACE=relaxed, experimental opt-in, default off) ----
++// ---- VFR frame pace (SWX_VFR=relaxed, experimental opt-in, default off) ----
 +// The game's clock follows a steady host beat at the display rate instead of the Switch's 1/2/3-vsync intervals. Active only when the profile
-+// declared RELAXED_FRAMEPACE (dm_relaxed_capable, set by the loader from the fixups table), the state page exists, DETCLOCK is off, and neither a
++// declared VFR_FRAMEPACE (dm_vfr_capable, set by the loader from the fixups table), the state page exists, DETCLOCK is off, and neither a
 +// movie nor the game's own VFR override is in force. The ticket, snapshot-ring and fence waits below still run: the beat never frees a texture the
 +// GPU or the display has not let go of (no sync-lag: waits still settle for the fence the game asked for).
-+__attribute__((weak)) int dm_relaxed_capable;   // loader.c install_fps_state; graphics unit tests have no loader
-+static swx_relaxed_pace g_relaxed;   // the beat + the published game time (acquire hands the slots, present reports them)
-+static uint64_t g_relaxed_slot;      // the last slot handed to the game (present schedules avail from it)
-+static int g_relaxed_on;             // the stubs route through the host's ratio (state +0xA8)
-+static uint64_t g_relaxed_snap_ns, g_relaxed_pq_ns;   // this metrics window's ring/ticket waits
-+static double g_relaxed_last_raw_ms, g_relaxed_last_applied_ms;   // the last delivered frame, for the long-frame line
-+static int swx_relaxed_want(void) {
++__attribute__((weak)) int dm_vfr_capable;   // loader.c install_fps_state; graphics unit tests have no loader
++static swx_vfr_pace g_vfr;   // the beat + the published game time (acquire hands the slots, present reports them)
++static uint64_t g_vfr_slot;      // the last slot handed to the game (present schedules avail from it)
++static int g_vfr_on;             // the stubs route through the host's ratio (state +0xA8)
++static uint64_t g_vfr_snap_ns, g_vfr_pq_ns;   // this metrics window's ring/ticket waits
++static double g_vfr_last_raw_ms, g_vfr_last_applied_ms;   // the last delivered frame, for the long-frame line
++static int swx_vfr_want(void) {
 +    static int v = -2;
 +    if (v == -2) {
-+        const char *e = getenv("SWX_FRAMEPACE");
++        const char *e = getenv("SWX_VFR");
 +        v = e && !strcmp(e, "relaxed");
-+        if (e && *e && strcmp(e, "0") && strcmp(e, "relaxed")) LOG("[RED] SWX_FRAMEPACE=%s: 0 or relaxed; relaxed frame pace off", e);
++        if (e && *e && strcmp(e, "0") && strcmp(e, "relaxed")) LOG("[RED] SWX_VFR=%s: 0 or relaxed; vfr frame pace off", e);
 +    }
 +    return v;
 +}
-+static int swx_relaxed_hz(void) {
++static int swx_vfr_hz(void) {
 +    static int hz = -2;
 +    if (hz == -2) {
-+        const char *e = getenv("SWX_FRAMEPACE_HZ"); hz = 0;
++        const char *e = getenv("SWX_VFR_HZ"); hz = 0;
 +        if (!e || !strcmp(e, "auto")) { int scr = mtl_display_hz(); hz = scr <= 0 ? 60 : scr > 120 ? 120 : scr; }
-+        else { int h = atoi(e); hz = h >= 30 && h <= 120 ? h : 0; if (!hz) LOG("[RED] SWX_FRAMEPACE_HZ=%s: auto or 30..120; relaxed frame pace off", e); }
-+        if (swx_relaxed_want() && hz) LOG("[nvn] relaxed frame pace: %d Hz target (%s)", hz, e && strcmp(e, "auto") ? "SWX_FRAMEPACE_HZ" : "auto");
++        else { int h = atoi(e); hz = h >= 30 && h <= 120 ? h : 0; if (!hz) LOG("[RED] SWX_VFR_HZ=%s: auto or 30..120; vfr frame pace off", e); }
++        if (swx_vfr_want() && hz) LOG("[nvn] vfr frame pace: %d Hz target (%s)", hz, e && strcmp(e, "auto") ? "SWX_VFR_HZ" : "auto");
 +    }
 +    return hz;
 +}
-+static int swx_relaxed_suspended(void) {
++static int swx_vfr_suspended(void) {
 +    if (!dm_fps_state || dm_detclock_enabled()) return 1;
 +    if (__atomic_load_n((uint32_t *)(dm_fps_state + 4), __ATOMIC_RELAXED)) return 1;        // a movie: its player steps by pictures
 +    if (__atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED)) return 1;    // the VFR override: the game fixed its step
 +    return 0;
 +}
-+static int swx_relaxed_armed(void) { return swx_relaxed_want() && dm_relaxed_capable && dm_fps_state && swx_relaxed_hz() > 0 && !swx_relaxed_suspended(); }
++static int swx_vfr_armed(void) { return swx_vfr_want() && dm_vfr_capable && dm_fps_state && swx_vfr_hz() > 0 && !swx_vfr_suspended(); }
 +// Route or unroute the stubs around the waits: acquire runs every frame, so one poll here follows movies, overrides and the env.
-+static void swx_relaxed_poll(void) {
-+    int armed = swx_relaxed_armed();
-+    if (armed && !g_relaxed_on) {
-+        g_relaxed_on = 1;
-+        __atomic_store_n((uint32_t *)(dm_fps_state + SWX_RELAXED_MODE_OFF), 1u, __ATOMIC_RELEASE);
-+        static int once; if (!once++) LOG("[nvn] relaxed frame pace on: game time from the host beat at %d Hz", swx_relaxed_hz());
-+    } else if (!armed && g_relaxed_on) {
-+        g_relaxed_on = 0;
-+        __atomic_store_n((uint32_t *)(dm_fps_state + SWX_RELAXED_MODE_OFF), 0u, __ATOMIC_RELAXED);
-+        swx_relaxed_reset(&g_relaxed);
-+        static int n; if (n++ < 8) LOG("[nvn] relaxed frame pace off (movie, VFR override, DETCLOCK, env or capability)");
++static void swx_vfr_poll(void) {
++    int armed = swx_vfr_armed();
++    if (armed && !g_vfr_on) {
++        g_vfr_on = 1;
++        __atomic_store_n((uint32_t *)(dm_fps_state + SWX_VFR_MODE_OFF), 1u, __ATOMIC_RELEASE);
++        static int once; if (!once++) LOG("[nvn] vfr frame pace on: game time from the host beat at %d Hz", swx_vfr_hz());
++    } else if (!armed && g_vfr_on) {
++        g_vfr_on = 0;
++        __atomic_store_n((uint32_t *)(dm_fps_state + SWX_VFR_MODE_OFF), 0u, __ATOMIC_RELAXED);
++        swx_vfr_reset(&g_vfr);
++        static int n; if (n++ < 8) LOG("[nvn] vfr frame pace off (movie, VFR override, DETCLOCK, env or capability)");
 +    }
 +}
  NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
      win_t *o = (win_t *)w;
      int n = window_active(o);
      *idx = n ? o->next++ % n : 0;
-+    swx_relaxed_poll();
-+    int relaxed = g_relaxed_on;   // the beat paces instead of the legacy slot waits (the barriers below still run)
++    swx_vfr_poll();
++    int vfr = g_vfr_on;   // the beat paces instead of the legacy slot waits (the barriers below still run)
      // Vsync blocks here (real-device NVN: when all textures in the swapchain are waiting for display, wait for the next one to be released), not in present -- the game often calls present while holding a lock
      uint64_t at = *idx < 4 ? o->avail[*idx] : 0, now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
      if (!dm_detclock_enabled()) {   // Register the acquire thread as a time-constraint thread (no longer registered only when it "arrived early": it must also declare itself when it is constantly behind in the hot state)
          uint64_t period = present_period(o); rt_acquire(rt_period_ns(o, period));
-+        if (!relaxed) {
++        if (!vfr) {
          uint64_t p0 = now_ns(); int snap = mtl_snap_on();
          o->follow = 1;   // the beat paces this frame only where the branches below wait for the slot time (nvn_pace_follow)
          if (present_unpaced(o)) {}   // present interval 0: no vsync wait (below); only the free texture the ticket wait below gives
@@ -187,7 +187,7 @@
          if (!present_unpaced(o) && mtl_present_screen_wait(period / 1e9)) atomic_store(&g_screen_at, now_ns());   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
          drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
          pace_ns = now_ns() - p0;
-+        }   // relaxed: no link/screen/slot wait (the beat paces after the ticket release); the ring and fence waits below still run
++        }   // vfr: no link/screen/slot wait (the beat paces after the ticket release); the ring and fence waits below still run
      } else {   // DM_DETCLOCK_PACE=1 (used by the screenshot gate): while the guest clock advances per frame, each frame's wall clock is no shorter than one step -- frame count and in-game time are deterministic, and the background loading thread has at least one step of wall clock available per frame;
                 // When the machine is fully loaded frames only get slower and the background only gets more wall clock, so the picture captured at "the Nth frame after the message" is independent of load
          static int pace = -1; static uint64_t step, last;
@@ -195,23 +195,23 @@
          if (pace) { if (last && now_ns() < last + step) sleep_until_ns(last + step); last = now_ns(); }
      }
 -    pace_ns += mtl_snap_acquire_wait();   // ring capacity is waited for at acquire, where the game does not hold its present lock
-+    if (relaxed) wait = 0;   // the beat below paces, not the legacy slot time
-+    { uint64_t sw = mtl_snap_acquire_wait(); pace_ns += sw; if (relaxed) g_relaxed_snap_ns += sw; }   // ring capacity is waited for at acquire, where the game does not hold its present lock
++    if (vfr) wait = 0;   // the beat below paces, not the legacy slot time
++    { uint64_t sw = mtl_snap_acquire_wait(); pace_ns += sw; if (vfr) g_vfr_snap_ns += sw; }   // ring capacity is waited for at acquire, where the game does not hold its present lock
      g_acq_wait_ns += wait; trow(g_frame, "@late_ms", wait ? (now_ns() - at) / 1e6 : 0);
      // The previous present of this texture has not yet been processed by the present thread (display cannot keep up, a whole swapchain round behind): wait for it to be returned, then hand it to the game to draw
      uint64_t tk = *idx < 4 ? o->ticket[*idx] : 0;
 -    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; g_pq_wait_ns += now_ns() - w0; }
-+    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; uint64_t dw = now_ns() - w0; g_pq_wait_ns += dw; if (relaxed) g_relaxed_pq_ns += dw; }
-+    if (relaxed) {   // the steady beat, after the previous texture's ticket was released and before the texture goes back to the game
-+        uint64_t period = 1000000000ull / (uint64_t)swx_relaxed_hz(), rn = now_ns();
-+        uint64_t slot = rn + nvn_pace(&g_relaxed.pace, rn, period);
++    if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); o->ticket[*idx]=0; uint64_t dw = now_ns() - w0; g_pq_wait_ns += dw; if (vfr) g_vfr_pq_ns += dw; }
++    if (vfr) {   // the steady beat, after the previous texture's ticket was released and before the texture goes back to the game
++        uint64_t period = 1000000000ull / (uint64_t)swx_vfr_hz(), rn = now_ns();
++        uint64_t slot = rn + nvn_pace(&g_vfr.pace, rn, period);
 +        if (slot > rn) sleep_until_ns(slot);
-+        g_relaxed_slot = slot;
-+        uint64_t bits = 0, prev = g_relaxed.prev_slot; double step = swx_relaxed_step(&g_relaxed, slot, &bits);
-+        g_relaxed_last_raw_ms = prev ? (double)(slot - prev) / 1e6 : 0.0; g_relaxed_last_applied_ms = step > 0.0 ? step * 1e3 : 0.0;
++        g_vfr_slot = slot;
++        uint64_t bits = 0, prev = g_vfr.prev_slot; double step = swx_vfr_step(&g_vfr, slot, &bits);
++        g_vfr_last_raw_ms = prev ? (double)(slot - prev) / 1e6 : 0.0; g_vfr_last_applied_ms = step > 0.0 ? step * 1e3 : 0.0;
 +        if (step > 0.0) {
-+            __atomic_store_n((uint64_t *)(dm_fps_state + SWX_RELAXED_RATIO_OFF), bits, __ATOMIC_RELEASE);
-+            __atomic_store_n((uint32_t *)(dm_fps_state + SWX_RELAXED_STEPS_OFF), (uint32_t)g_relaxed.steps, __ATOMIC_RELAXED);
++            __atomic_store_n((uint64_t *)(dm_fps_state + SWX_VFR_RATIO_OFF), bits, __ATOMIC_RELEASE);
++            __atomic_store_n((uint32_t *)(dm_fps_state + SWX_VFR_STEPS_OFF), (uint32_t)g_vfr.steps, __ATOMIC_RELAXED);
 +        }
 +    }
      if (s) { nvn_sync_release((sync_t *)s); ((sync_t *)s)->fenced = 2; ((sync_t *)s)->fence = mtl_last_fence(); }   // The swapchain texture becomes available once the commits before this point have completed (fenced 2: an acquire sync, for the wait ledger)
@@ -222,7 +222,7 @@
          m ? "DM_PRESENT_INTERVAL" : "game profile present_interval", o->interval, scr > 0 ? "window" : "no window");
  }
 -static int present_itv(const win_t *o) { int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
-+static int present_itv(const win_t *o) { if (g_relaxed_on) return 1; int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
++static int present_itv(const win_t *o) { if (g_vfr_on) return 1; int c = fps_present_cap(), k = atomic_load(&g_fs_k); return c ? (k && fstep_on() ? k : fstep_hz() / c) : g_display_mode ? 1 : o->interval > 0 ? o->interval : 1; }   // vsyncs per frame that presentation follows
  // Present interval 0 swaps without waiting for a vsync on Horizon: the window's acquire waits only for a texture the display has let go of, the display shows the newest frame at each
  // vsync, and the game paces itself (or runs as fast as it can; the Switch's unlocked-frame-rate mods set interval 0 to go past 60). The acquire took it as 1 and waited a display
  // tick each frame. Ori and the Blind Forest: Definitive Edition sets Unity's vSyncCount to 0 only for its shader prewarm behind the first loading screen and back to 1 after it: the
@@ -230,7 +230,7 @@
  }
  static uint64_t present_period(const win_t *o) {
      present_cfg(o);
-+    if (g_relaxed_on) { int hz = swx_relaxed_hz(); return hz > 0 ? 1000000000ull / (uint64_t)hz : 0; }   // the beat's period, not the hold's
++    if (g_vfr_on) { int hz = swx_vfr_hz(); return hz > 0 ? 1000000000ull / (uint64_t)hz : 0; }   // the beat's period, not the hold's
      int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
      if (want != was) {
          atomic_store(&g_game_itv, want);
@@ -239,7 +239,7 @@
      if (dm_fps_state) { static int was; if (c != was) { char why[48] = ""; if (movie) snprintf(why, sizeof why, " (a movie of %d pictures a second)", movie); else if (c == 30 && was == 60 && thermal_capped()) snprintf(why, sizeof why, " (thermal state serious)");
          LOG("[nvn] frame step cap %d → %d fps at present %llu%s", was, c, (unsigned long long)o->presents, why); was = c; } }
 -    if (c) fstep_tick(o, c);
-+    if (c && !g_relaxed_on) fstep_tick(o, c);
++    if (c && !g_vfr_on) fstep_tick(o, c);
      dm_fps_lock_tick();   // after the frame step: at 120 fps the target follows the hold just decided
      static uint64_t prev_in, prev_out, prev_pass, prev_draw;
      present_cfg(o);
@@ -247,27 +247,27 @@
                snprintf(b, sizeof b, "frame %llu (%.2f s) whole frame %.1f ms, submit+present %.1f ms, GPU %.1f ms; new pipelines %u + shader libraries %u, %.1f ms in all; texture uploads %u first + %u re-uploads, %.1f MB / %.1f ms; draws with a hybrid pipeline %u",
                         (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
                // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
-+              if (g_relaxed_on && strlen(b) + 96 < sizeof b) snprintf(b + strlen(b), sizeof b - strlen(b), " relaxed dt %.2f applied %.2f debt %.2f", g_relaxed_last_raw_ms, g_relaxed_last_applied_ms, g_relaxed.debt_s * 1e3);
++              if (g_vfr_on && strlen(b) + 96 < sizeof b) snprintf(b + strlen(b), sizeof b - strlen(b), " vfr dt %.2f applied %.2f debt %.2f", g_vfr_last_raw_ms, g_vfr_last_applied_ms, g_vfr.debt_s * 1e3);
                dm_longframe_note(b); } }
          uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
      prev_in = t0; prev_pass = ps; prev_draw = dr;
      dump_frame();
      { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
      if (g_frame % TWIN == 0) tsummary(g_frame);
-+    if (g_relaxed_on && o->presents % 300 == 0 && o->presents > 0) {   // compact relaxed line: target/effective Hz, raw and applied dt, debt, VFR ratio, waits, queue depth, dropped frames, override
++    if (g_vfr_on && o->presents % 300 == 0 && o->presents > 0) {   // compact vfr line: target/effective Hz, raw and applied dt, debt, VFR ratio, waits, queue depth, dropped frames, override
 +        uint32_t fixed = 0; float ratio = 0, secs = 0;
 +        if (dm_fps_state) {
-+            uint64_t b = __atomic_load_n((uint64_t *)(dm_fps_state + SWX_RELAXED_RATIO_OFF), __ATOMIC_RELAXED);
++            uint64_t b = __atomic_load_n((uint64_t *)(dm_fps_state + SWX_VFR_RATIO_OFF), __ATOMIC_RELAXED);
 +            uint32_t lo = (uint32_t)b, hi = (uint32_t)(b >> 32); memcpy(&ratio, &lo, 4); memcpy(&secs, &hi, 4);
 +            fixed = __atomic_load_n((uint32_t *)(dm_fps_state + 0x24), __ATOMIC_RELAXED);
 +        }
 +        unsigned depth = 0; for (int i = 0; i < 4; i++) if (o->ticket[i]) depth++;
 +        unsigned dropped = 0; for (unsigned i = 0; i < TWIN; i++) if (g_pres_iv[i] < 0) dropped++;
-+        LOG("[nvn] relaxed frame pace: %d Hz target, raw %.2f / applied %.2f ms a frame, debt %.2f ms, VFR ratio %.3f (%u steps), snap waits %.1f / ticket waits %.1f ms, present queue depth %u, %u of the last %d presents dropped by the screen, game-fixed step %u%s",
-+            swx_relaxed_hz(), g_relaxed.n ? g_relaxed.raw_sum_s / g_relaxed.n * 1e3 : 0, g_relaxed.n ? g_relaxed.applied_sum_s / g_relaxed.n * 1e3 : 0,
-+            g_relaxed.debt_s * 1e3, ratio, (unsigned)g_relaxed.steps, g_relaxed_snap_ns / 1e6, g_relaxed_pq_ns / 1e6,
++        LOG("[nvn] vfr frame pace: %d Hz target, raw %.2f / applied %.2f ms a frame, debt %.2f ms, VFR ratio %.3f (%u steps), snap waits %.1f / ticket waits %.1f ms, present queue depth %u, %u of the last %d presents dropped by the screen, game-fixed step %u%s",
++            swx_vfr_hz(), g_vfr.n ? g_vfr.raw_sum_s / g_vfr.n * 1e3 : 0, g_vfr.n ? g_vfr.applied_sum_s / g_vfr.n * 1e3 : 0,
++            g_vfr.debt_s * 1e3, ratio, (unsigned)g_vfr.steps, g_vfr_snap_ns / 1e6, g_vfr_pq_ns / 1e6,
 +            depth, dropped, TWIN, fixed, fixed ? " (suspended next acquire)" : "");
-+        g_relaxed.n = 0; g_relaxed.raw_sum_s = g_relaxed.applied_sum_s = 0; g_relaxed_snap_ns = g_relaxed_pq_ns = 0;
++        g_vfr.n = 0; g_vfr.raw_sum_s = g_vfr.applied_sum_s = 0; g_vfr_snap_ns = g_vfr_pq_ns = 0;
 +    }
      // GPU replay carries the submitted frame, even when a later CPU frame is already queued.
      // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
@@ -282,7 +282,7 @@
 -    if (o->follow) nvn_pace_follow(&pc, now); else slot += nvn_pace(&pc, now, period);
 -    o->pace = pc.target;
 +    uint64_t slot;
-+    if (g_relaxed_on) slot = g_relaxed_slot ? g_relaxed_slot : now;   // the acquire's beat: the texture is acquirable again a period after it was handed out
++    if (g_vfr_on) slot = g_vfr_slot ? g_vfr_slot : now;   // the acquire's beat: the texture is acquirable again a period after it was handed out
 +    else {
 +        nvn_pacer pc = {o->pace};
 +        // The screen wait released this frame's acquire (g_screen_at): the frame's phase is the screen's, so the pacer starts from the release, not from its own earlier slot.
@@ -302,8 +302,8 @@
  	clang -O1 -Wall -o $@ t_hmap.c
  t_pace: t_pace.c ../nvn/nvn_pace.h
  	clang -O1 -Wall -o $@ t_pace.c
-+t_relaxed_pace: t_relaxed_pace.c ../nvn/nvn_relaxed_pace.h
-+	clang -O1 -Wall -o $@ t_relaxed_pace.c
++t_vfr_pace: t_vfr_pace.c ../nvn/nvn_vfr_pace.h
++	clang -O1 -Wall -o $@ t_vfr_pace.c
  t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
  	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -o $@ $<
  t_counter_clock: t_counter_clock.m ../../host/hle_os.c ../../host/dm.h $(MTL_T_DEP)
@@ -313,7 +313,7 @@
          else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
          else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
          else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
-+        else if (!strcmp(key, "RELAXED_FRAMEPACE")) m->relaxed_framepace = (uint32_t)v;
++        else if (!strcmp(key, "VFR_FRAMEPACE")) m->vfr_framepace = (uint32_t)v;
          else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
          else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
          else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -321,20 +321,20 @@
  // (hle_nvn.c fstep_tick)
  uint8_t *dm_fps_state;
  int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
-+int dm_relaxed_capable;   // a loaded module's frame step stubs declared RELAXED_FRAMEPACE and its state page fits the relaxed words (install_fps_state): the host may route the game through the steady beat
++int dm_vfr_capable;   // a loaded module's frame step stubs declared VFR_FRAMEPACE and its state page fits the vfr words (install_fps_state): the host may route the game through the steady beat
  static const char *g_fps_mod;   // the module holding the state page (for the log)
  static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
  static void install_fps_state(module_t *m) {
      if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
      dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
      if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
-+    if (m->relaxed_framepace) {   // the stubs route through the host's real-time ratio (state +0xA0..+0xB0, nvn_relaxed_pace.h) when the host sets relaxed mode
-+        if (m->fps_state_off + 0xB4 > m->size) die("%s: frame step state page too small for the relaxed words", m->name);
++    if (m->vfr_framepace) {   // the stubs route through the host's real-time ratio (state +0xA0..+0xB0, nvn_vfr_pace.h) when the host sets vfr mode
++        if (m->fps_state_off + 0xB4 > m->size) die("%s: frame step state page too small for the vfr words", m->name);
 +        float r = 1.0f, s = 1.0f / 30.0f; uint32_t lo, hi; memcpy(&lo, &r, 4); memcpy(&hi, &s, 4);
 +        uint64_t bits = (uint64_t)lo | ((uint64_t)hi << 32);
 +        memcpy(dm_fps_state + 0xA0, &bits, 8);
-+        memset(dm_fps_state + 0xA8, 0, 12);   // relaxed_mode, flags, steps: off until the beat routes
-+        dm_relaxed_capable = 1;
++        memset(dm_fps_state + 0xA8, 0, 12);   // vfr_mode, flags, steps: off until the beat routes
++        dm_vfr_capable = 1;
 +    }
  }
  // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
@@ -345,7 +345,7 @@
      uint32_t unity_qs_idx, unity_qs_arr, unity_qs_size, unity_qs_vsync;   // [obj + arr] + (int32)[obj + idx] * size + vsync; 0 = none
      uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
      uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX
-+    uint32_t relaxed_framepace;  // the frame step stubs declared RELAXED_FRAMEPACE (the fixups table's RELAXED_FRAMEPACE); 0 = none
++    uint32_t vfr_framepace;  // the frame step stubs declared VFR_FRAMEPACE (the fixups table's VFR_FRAMEPACE); 0 = none
      uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
      int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
      uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
@@ -356,9 +356,9 @@
  #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
  // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
 -extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
-+extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; +0xA0 u64 relaxed ratio+seconds, +0xA8 u32 relaxed mode, +0xAC u32 relaxed flags, +0xB0 u32 relaxed steps (SWX_FRAMEPACE=relaxed); NULL when the build has none
++extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
  extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
-+extern int dm_relaxed_capable;   // loader.c install_fps_state: a loaded profile declared RELAXED_FRAMEPACE and its state page fits the relaxed words
++extern int dm_vfr_capable;   // loader.c install_fps_state: a loaded profile declared VFR_FRAMEPACE and its state page fits the vfr words
  int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
  void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
  void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now
@@ -368,14 +368,14 @@
  DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
  DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
  DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
-+SWX_FRAMEPACE	switch	`=relaxed` (experimental opt-in, default off): a supported game's clock follows the host's steady beat at the display rate instead of the Switch's 1/2/3-vsync intervals (BOTW 1.9.0: RELAXED_FRAMEPACE stubs read the host's real-time ratio from the frame state page); anything else runs the legacy frame step
-+SWX_FRAMEPACE_HZ	switch	`=auto` (the default) or `=30..120`: the relaxed frame pace's beat; auto is the window's refresh rate up to 120 Hz (60 with no window). Outside 30..120 the mode stays off with a red line
++SWX_VFR	switch	`=relaxed` (experimental opt-in, default off): a supported game's clock follows the host's steady beat at the display rate instead of the Switch's 1/2/3-vsync intervals (BOTW 1.9.0: VFR_FRAMEPACE stubs read the host's real-time ratio from the frame state page); anything else runs the legacy frame step
++SWX_VFR_HZ	switch	`=auto` (the default) or `=30..120`: the vfr frame pace's beat; auto is the window's refresh rate up to 120 Hz (60 with no window). Outside 30..120 the mode stays off with a red line
 --- /dev/null
-+++ b/dm/gfx/nvn/nvn_relaxed_pace.h
++++ b/dm/gfx/nvn/nvn_vfr_pace.h
 @@ -0,0 +1,90 @@
-+// Relaxed frame pace (SWX_FRAMEPACE=relaxed, experimental opt-in): the game's
++// VFR frame pace (SWX_VFR=relaxed, experimental opt-in): the game's
 +// clock follows a steady host beat instead of the Switch's 1/2/3-vsync
-+// intervals. Pure logic, shared by Mac / iOS; unit test tests/t_relaxed_pace.c.
++// intervals. Pure logic, shared by Mac / iOS; unit test tests/t_vfr_pace.c.
 +// The caller (hle_nvn.c) owns the environment, the display rate, the window
 +// slot from nvn_pace and the state page; this header owns the per-frame time:
 +// a 5-sample moving average of the delivered acquire slots (MNG's shape),
@@ -386,7 +386,7 @@
 +// State page words (guest stubs + host share this layout; above the BOTW
 +// duo_anchor params at +0x80..+0x98, and below its FOV history at +0xfc):
 +// +0xA0 u64 atomic pair low float ratio (game seconds x 30) high float seconds
-+// +0xA8 u32 relaxed_mode (1 = the stubs route through the host's ratio)
++// +0xA8 u32 vfr_mode (1 = the stubs route through the host's ratio)
 +// +0xAC u32 flags, reserved, 0
 +// +0xB0 u32 real-time steps published
 +#pragma once
@@ -395,30 +395,30 @@
 +
 +#include "nvn_pace.h"
 +
-+#define SWX_RELAXED_RATIO_OFF 0xA0
-+#define SWX_RELAXED_MODE_OFF 0xA8
-+#define SWX_RELAXED_FLAGS_OFF 0xAC
-+#define SWX_RELAXED_STEPS_OFF 0xB0
-+#define SWX_RELAXED_NSAMPLES 5
-+#define SWX_RELAXED_STEP_MAX_S (1.0 / 15.0)   // a step is never more than 1/15 s
-+#define SWX_RELAXED_DEBT_MAX_S 0.25            // owed past a stall is dropped, not replayed (nothing owed for a load)
-+#define SWX_RELAXED_DT_MIN_S 0.001             // below: not a frame (duplicate/torn slot)
-+#define SWX_RELAXED_DT_MAX_S 0.25              // above: a discontinuity (load, hitch), not owed
++#define SWX_VFR_RATIO_OFF 0xA0
++#define SWX_VFR_MODE_OFF 0xA8
++#define SWX_VFR_FLAGS_OFF 0xAC
++#define SWX_VFR_STEPS_OFF 0xB0
++#define SWX_VFR_NSAMPLES 5
++#define SWX_VFR_STEP_MAX_S (1.0 / 15.0)   // a step is never more than 1/15 s
++#define SWX_VFR_DEBT_MAX_S 0.25            // owed past a stall is dropped, not replayed (nothing owed for a load)
++#define SWX_VFR_DT_MIN_S 0.001             // below: not a frame (duplicate/torn slot)
++#define SWX_VFR_DT_MAX_S 0.25              // above: a discontinuity (load, hitch), not owed
 +
 +typedef struct {
 +    nvn_pacer pace;                 // the steady beat (nvn_pace semantics: early waits, sub-period keeps phase, a full period behind restarts)
 +    uint64_t prev_slot;             // last acquire slot handed to the game (0 = none yet)
-+    double samples[SWX_RELAXED_NSAMPLES];
++    double samples[SWX_VFR_NSAMPLES];
 +    unsigned count, next;           // valid samples, next write index
 +    double debt_s;                  // game time owed but not yet delivered (>= 0)
 +    uint64_t steps;                 // real-time steps published
 +    uint64_t n;                     // measured frames this window (caller resets per report)
 +    double raw_sum_s, applied_sum_s;
-+} swx_relaxed_pace;
++} swx_vfr_pace;
 +
 +// Ratio+seconds publish word (MNG's shape): low float ratio = seconds x 30,
 +// high float seconds, one 64-bit atomic store.
-+static inline uint64_t swx_relaxed_bits(float seconds) {
++static inline uint64_t swx_vfr_bits(float seconds) {
 +    float ratio = seconds * 30.0f;
 +    uint32_t lo, hi;
 +    memcpy(&lo, &ratio, 4); memcpy(&hi, &seconds, 4);
@@ -428,47 +428,47 @@
 +// Feed one delivered acquire slot (monotonic ns). Returns the applied step in
 +// seconds and writes the publish word, or 0 with no write on the first slot
 +// and on discontinuities (the game keeps its last ratio then).
-+static inline double swx_relaxed_step(swx_relaxed_pace *p, uint64_t slot_ns, uint64_t *bits) {
++static inline double swx_vfr_step(swx_vfr_pace *p, uint64_t slot_ns, uint64_t *bits) {
 +    if (!p->prev_slot) { p->prev_slot = slot_ns; return 0.0; }
 +    double dt = (double)(slot_ns - p->prev_slot) * 1e-9;
 +    p->prev_slot = slot_ns;
-+    if (dt < SWX_RELAXED_DT_MIN_S || dt > SWX_RELAXED_DT_MAX_S) {
++    if (dt < SWX_VFR_DT_MIN_S || dt > SWX_VFR_DT_MAX_S) {
 +        p->count = p->next = 0; p->debt_s = 0.0;   // a load or a torn slot: start the average over, owe nothing
 +        return 0.0;
 +    }
-+    p->samples[p->next++ % SWX_RELAXED_NSAMPLES] = dt;
-+    if (p->count < SWX_RELAXED_NSAMPLES) p->count++;
++    p->samples[p->next++ % SWX_VFR_NSAMPLES] = dt;
++    if (p->count < SWX_VFR_NSAMPLES) p->count++;
 +    double sum = 0.0;
 +    for (unsigned i = 0; i < p->count; i++) sum += p->samples[i];
 +    double avg = sum / p->count;
 +    double applied = avg;
-+    if (avg > SWX_RELAXED_STEP_MAX_S) {   // too slow to catch up: deliver the cap, owe the rest (bounded)
-+        p->debt_s += avg - SWX_RELAXED_STEP_MAX_S;
-+        applied = SWX_RELAXED_STEP_MAX_S;
-+        if (p->debt_s > SWX_RELAXED_DEBT_MAX_S) p->debt_s = SWX_RELAXED_DEBT_MAX_S;
++    if (avg > SWX_VFR_STEP_MAX_S) {   // too slow to catch up: deliver the cap, owe the rest (bounded)
++        p->debt_s += avg - SWX_VFR_STEP_MAX_S;
++        applied = SWX_VFR_STEP_MAX_S;
++        if (p->debt_s > SWX_VFR_DEBT_MAX_S) p->debt_s = SWX_VFR_DEBT_MAX_S;
 +    } else if (p->debt_s > 0.0) {         // headroom: pay back half of it, still capped
-+        double repay = p->debt_s < (SWX_RELAXED_STEP_MAX_S - avg) * 0.5 ? p->debt_s : (SWX_RELAXED_STEP_MAX_S - avg) * 0.5;
++        double repay = p->debt_s < (SWX_VFR_STEP_MAX_S - avg) * 0.5 ? p->debt_s : (SWX_VFR_STEP_MAX_S - avg) * 0.5;
 +        applied += repay; p->debt_s -= repay;
 +    }
 +    p->n++; p->raw_sum_s += dt; p->applied_sum_s += applied;
 +    p->steps++;
-+    *bits = swx_relaxed_bits((float)applied);
++    *bits = swx_vfr_bits((float)applied);
 +    return applied;
 +}
 +
 +// Suspend: forget the beat, the average and the debt, so the next acquire
 +// restarts the phase instead of paying back a stall in one jump.
-+static inline void swx_relaxed_reset(swx_relaxed_pace *p) {
++static inline void swx_vfr_reset(swx_vfr_pace *p) {
 +    p->pace.target = 0; p->prev_slot = 0;
 +    p->count = p->next = 0; p->debt_s = 0.0;
 +    p->n = 0; p->raw_sum_s = p->applied_sum_s = 0.0;
 +}
 --- /dev/null
-+++ b/dm/gfx/tests/t_relaxed_pace.c
++++ b/dm/gfx/tests/t_vfr_pace.c
 @@ -0,0 +1,101 @@
-+// Relaxed pace unit tests: given slot sequences, the applied steps, debt and
++// VFR pace unit tests: given slot sequences, the applied steps, debt and
 +// publish words are hand-calculated. Periods: P60 = 16666667 ns, P90, P120.
-+#include "../nvn/nvn_relaxed_pace.h"
++#include "../nvn/nvn_vfr_pace.h"
 +#include <stdio.h>
 +
 +static int fail = 0, n = 0;
@@ -483,10 +483,10 @@
 +
 +    // Steady 60 fps: the average is the period, no debt, ratio 1.0
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
-+        uint64_t t = 1000 * MS; double s = swx_relaxed_step(&p, t, &bits);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
++        uint64_t t = 1000 * MS; double s = swx_vfr_step(&p, t, &bits);
 +        CHECKF(s, 0.0, "first slot: no publish yet");
-+        for (int i = 1; i <= 6; i++) { t += P60; s = swx_relaxed_step(&p, t, &bits); }
++        for (int i = 1; i <= 6; i++) { t += P60; s = swx_vfr_step(&p, t, &bits); }
 +        CHECKF(s, P60 / 1e9, "steady 60 fps: applied = one period");
 +        CHECKF(p.debt_s, 0.0, "steady 60 fps: no debt");
 +        float ratio, secs; uint32_t lo = bits & 0xffffffffu, hi = bits >> 32;
@@ -497,58 +497,58 @@
 +    }
 +    // Steady 120 fps: ratio 0.5
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 2000 * MS, bits = 0; double s = 0;
-+        for (int i = 0; i <= 6; i++) { s = swx_relaxed_step(&p, t, &bits); t += P120; }
++        for (int i = 0; i <= 6; i++) { s = swx_vfr_step(&p, t, &bits); t += P120; }
 +        CHECKF(s, P120 / 1e9, "steady 120 fps: applied = one period");
 +        float ratio; uint32_t lo = bits & 0xffffffffu; memcpy(&ratio, &lo, 4);
 +        CHECKF(ratio, (float)(P120 / 1e9 * 30.0), "publish: ratio 0.5 at 120 fps");
 +    }
 +    // Discontinuities: < 1 ms and > 250 ms reset the average, owe nothing
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 3000 * MS, bits = 0;
-+        swx_relaxed_step(&p, t, &bits); t += P60; swx_relaxed_step(&p, t, &bits);
-+        double s = swx_relaxed_step(&p, t + 500, &bits);   // 0.5 us later: torn slot
++        swx_vfr_step(&p, t, &bits); t += P60; swx_vfr_step(&p, t, &bits);
++        double s = swx_vfr_step(&p, t + 500, &bits);   // 0.5 us later: torn slot
 +        CHECKF(s, 0.0, "< 1 ms: rejected, no publish");
 +        CHECK(p.count, 0, "< 1 ms: average restarted");
-+        s = swx_relaxed_step(&p, t + 300 * MS, &bits);     // 300 ms later: a load
++        s = swx_vfr_step(&p, t + 300 * MS, &bits);     // 300 ms later: a load
 +        CHECKF(s, 0.0, "> 250 ms: rejected, no publish");
 +        CHECKF(p.debt_s, 0.0, "> 250 ms: nothing owed for a load");
 +    }
 +    // A hitch inside the window is spread over the next frames, capped at 1/15 s
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 4000 * MS, bits = 0; double s = 0;
-+        s = swx_relaxed_step(&p, t, &bits);
-+        for (int i = 0; i < 5; i++) { t += P60; s = swx_relaxed_step(&p, t, &bits); }
-+        t += 100 * MS; s = swx_relaxed_step(&p, t, &bits);   // hitches: three slow samples in a row
-+        t += 100 * MS; s = swx_relaxed_step(&p, t, &bits);
-+        t += 100 * MS; s = swx_relaxed_step(&p, t, &bits);
++        s = swx_vfr_step(&p, t, &bits);
++        for (int i = 0; i < 5; i++) { t += P60; s = swx_vfr_step(&p, t, &bits); }
++        t += 100 * MS; s = swx_vfr_step(&p, t, &bits);   // hitches: three slow samples in a row
++        t += 100 * MS; s = swx_vfr_step(&p, t, &bits);
++        t += 100 * MS; s = swx_vfr_step(&p, t, &bits);
 +        CHECKT(s <= 1.0 / 15.0 + 1e-9, "hitch: applied step never over 1/15 s");
 +        CHECKT(p.debt_s > 0.0, "hitch: the capped-away time is owed");
 +        double debt0 = p.debt_s;
-+        for (int i = 0; i < 40; i++) { t += P60; s = swx_relaxed_step(&p, t, &bits); }   // game time converges
++        for (int i = 0; i < 40; i++) { t += P60; s = swx_vfr_step(&p, t, &bits); }   // game time converges
 +        CHECKT(p.debt_s < debt0, "headroom: the debt drains, never bursts");
 +        CHECKT(s <= 1.0 / 15.0 + 1e-9, "payback: still never over 1/15 s");
 +    }
 +    // Sustained overload: capped steps, debt bounded, game slows instead of jumping
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 5000 * MS, bits = 0; double s = 0, worst = 0;
-+        s = swx_relaxed_step(&p, t, &bits);
-+        for (int i = 0; i < 60; i++) { t += 100 * MS; s = swx_relaxed_step(&p, t, &bits); if (s > worst) worst = s; }
++        s = swx_vfr_step(&p, t, &bits);
++        for (int i = 0; i < 60; i++) { t += 100 * MS; s = swx_vfr_step(&p, t, &bits); if (s > worst) worst = s; }
 +        CHECKT(worst <= 1.0 / 15.0 + 1e-9, "overload: no step over 1/15 s, ever");
 +        CHECKT(p.debt_s <= 0.25 + 1e-9, "overload: debt bounded at 0.25 s");
 +    }
 +    // End to end at header level: nvn_pace beats 60 and 120 Hz, game time tracks wall clock
 +    for (int hi = 0; hi < 2; hi++) {
 +        uint64_t P = hi ? P120 : P60;
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 9000 * MS, slot = 0; double game = 0; uint64_t bits = 0;
 +        for (int k = 0; k < 600; k++) {   // acquire waits its slot, 1 ms of work, present hands it back
 +            uint64_t w = nvn_pace(&p.pace, t, P); t += w; slot = t; t += MS;
-+            double s = swx_relaxed_step(&p, slot, &bits); game += s > 0 ? s : P / 1e9;
++            double s = swx_vfr_step(&p, slot, &bits); game += s > 0 ? s : P / 1e9;
 +        }
 +        double wall = (t - 9000 * MS) / 1e9, err = game / wall;
 +        n++; int ok = err > 0.99 && err < 1.01;
@@ -557,25 +557,25 @@
 +    }
 +    // Suspend forgets everything: the next slot restarts, nothing is paid back
 +    {
-+        swx_relaxed_pace p; memset(&p, 0, sizeof p);
++        swx_vfr_pace p; memset(&p, 0, sizeof p);
 +        uint64_t t = 6000 * MS, bits = 0;
-+        swx_relaxed_step(&p, t, &bits); t += P60; swx_relaxed_step(&p, t, &bits);
-+        swx_relaxed_reset(&p);
++        swx_vfr_step(&p, t, &bits); t += P60; swx_vfr_step(&p, t, &bits);
++        swx_vfr_reset(&p);
 +        CHECK(p.prev_slot, 0, "reset: no previous slot");
-+        CHECKF(swx_relaxed_step(&p, t + 500 * MS, &bits), 0.0, "reset: a late return starts over, no payback");
++        CHECKF(swx_vfr_step(&p, t + 500 * MS, &bits), 0.0, "reset: a late return starts over, no payback");
 +    }
 +    printf("%d checks, %d failures\n", n, fail);
 +    return fail != 0;
 +}
 --- /dev/null
-+++ b/dm/tools/tests/test_relaxed_stub.py
-@@ -0,0 +1,349 @@
-+"""Relaxed frame-pace stub emulation (BOTW 1.9.0, SWX_FRAMEPACE=relaxed).
++++ b/dm/tools/tests/test_vfr_stub.py
+@@ -0,0 +1,350 @@
++"""VFR frame-pace stub emulation (BOTW 1.9.0, SWX_VFR=relaxed).
 +
 +Runs the profile's frame_step() with a recording context, then emulates the
-+two relaxed stubs' exact emitted words: the setWaitVsyncInterval prologue and
++two vfr stubs' exact emitted words: the setWaitVsyncInterval prologue and
 +the VFR ratio compare. Covers: mode off preserves the game's interval/VFR
-+flow; relaxed mode hands a steady interval 1 and consumes the published
++flow; vfr mode hands a steady interval 1 and consumes the published
 +ratio; the VFR override restores the original flow; an invalid ratio never
 +reaches s1. A capstone cross-check pins the emitted mnemonics structurally
 +(capstone is a test dependency upstream; skipped when absent).
@@ -604,7 +604,7 @@
 +
 +def load_profile():
 +    path = os.path.join(REPO, 'dm', 'games', '01007EF00011E000', 'patches.py')
-+    spec = importlib.util.spec_from_file_location('botw_relaxed_patches', path)
++    spec = importlib.util.spec_from_file_location('botw_vfr_patches', path)
 +    mod = importlib.util.module_from_spec(spec)
 +    spec.loader.exec_module(mod)
 +    return mod
@@ -783,7 +783,7 @@
 +    return struct.unpack('<I', struct.pack('<f', x))[0]
 +
 +
-+class RelaxedStub(unittest.TestCase):
++class VfrStub(unittest.TestCase):
 +    @classmethod
 +    def setUpClass(cls):
 +        mod = load_profile()
@@ -791,11 +791,6 @@
 +        mod.frame_step(ctx)
 +        cls.ctx = ctx
 +        cls.code = ctx.code
-+        # entry of each single-branch stub: decode its B(site, start)
-+        cls.starts = {}
-+        for off, words, why, _ in ctx.puts:
-+            if len(words) == 1 and words[0] & 0xFC000000 == 0x14000000:
-+                cls.starts[why] = (off, b_target(off, words[0]))
 +        # tell the ADRP+LDRX pairs where the VFR lives
 +        cls._vfr_slot_hits = []
 +        for i, w in enumerate(ctx.code):
@@ -824,43 +819,49 @@
 +        cpu.set_w(1, 3)   # the game's interval on entry
 +        return cpu
 +
++    def setter_start(self):
++        for off, words, why, _ in self.ctx.puts:
++            if off == 0x11269b8 and len(words) == 1:
++                return b_target(off, words[0])
++        raise AssertionError('setter stub not emitted')
++
 +    def test_capability_declared(self):
-+        self.assertIn('RELAXED_FRAMEPACE', self.ctx.capabilities)
++        self.assertIn('VFR_FRAMEPACE', self.ctx.capabilities)
 +        self.assertIn(0x151d484, self.ctx.sites)
 +        self.assertEqual(self.ctx.sites[0x151d484], '2020201e')
 +
 +    def test_setter_off_preserves_game_interval(self):
-+        _, start = self.starts['setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode']
++        start = self.setter_start()
 +        cpu = self.machine(mode=0)
 +        cpu.run(start)
 +        self.assertEqual(cpu.w(1), 2)   # the host's step, not the game's 3
 +        self.assertEqual(cpu.rd64(STATE_BASE + 0x30), 102)
 +
-+    def test_setter_relaxed_forces_interval_1(self):
-+        _, start = self.starts['setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode']
++    def test_setter_vfr_forces_interval_1(self):
++        start = self.setter_start()
 +        cpu = self.machine(mode=1)
 +        cpu.run(start)
 +        self.assertEqual(cpu.w(1), 1)
 +        self.assertEqual(cpu.rd64(STATE_BASE + 0x30), 101)
 +
 +    def test_setter_override_restores_original(self):
-+        _, start = self.starts['setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode']
++        start = self.setter_start()
 +        cpu = self.machine(mode=1, override=1)
 +        cpu.run(start)
 +        self.assertEqual(cpu.w(1), 3)   # the game's interval, untouched
 +        self.assertEqual(cpu.rd64(STATE_BASE + 0x30), 100)
 +
 +    def test_setter_no_vfr_restores_original(self):
-+        _, start = self.starts['setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode']
++        start = self.setter_start()
 +        cpu = self.machine(mode=1, vfr=False)
 +        cpu.run(start)
 +        self.assertEqual(cpu.w(1), 3)
 +
 +    def ratio_start(self):
 +        for off, words, why, _ in self.ctx.puts:
-+            if 'ratio' in why:
++            if off == 0x151d484 and len(words) == 1:
 +                return b_target(off, words[0])
-+        raise AssertionError('relaxed ratio stub not emitted')
++        raise AssertionError('vfr ratio stub not emitted')
 +
 +    def test_ratio_off_runs_original_compare(self):
 +        cpu = self.machine(mode=0)
@@ -869,7 +870,7 @@
 +        cpu.run(self.ratio_start())
 +        self.assertEqual(cpu.s[1], bits(f32(1.0)))   # candidate untouched
 +
-+    def test_ratio_relaxed_consumes_published(self):
++    def test_ratio_vfr_consumes_published(self):
 +        cpu = self.machine(mode=1, ratio=f32(0.5))
 +        cpu.s[0] = bits(f32(1.0))
 +        cpu.s[1] = bits(f32(2.0))
@@ -905,7 +906,7 @@
 +    def test_emitted_mnemonics(self):
 +        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 +        md.detail = False
-+        _, start = self.starts['setWaitVsyncInterval: the host\'s step unless the VFR override is set (state page target fps; 0 = the game\'s interval); steady 1 in relaxed mode']
++        start = self.setter_start()
 +        idx = (start - CODE_BASE) // 4
 +        got = [ins.mnemonic for ins in md.disasm(bytes(bytearray(struct.pack('<%dI' % 19, *self.code[idx:idx + 19]))), start)]
 +        self.assertEqual(got, ['adrp', 'ldr', 'cbz', 'adrp', 'ldr', 'cbz', 'ldrb', 'cbnz', 'ldr', 'cbnz',
