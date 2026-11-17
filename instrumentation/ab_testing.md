@@ -26,8 +26,9 @@ python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH
 python3 instrumentation/ab_test.py compare <labelA> <labelB> [--install-dir I]
 ```
 
-`on` writes an explicit `=1` (visible as `launcher: env K=1` at boot);
-`off` writes `=0` (forces stock behavior); `clear` removes the line so the
+`on` writes an explicit value (`=1`, except `snap 4` and `vfr relaxed`,
+visible as `launcher: env K=V` at boot); `off` writes `=0` (forces stock
+behavior, except `snap 2`); `clear` removes the line so the
 compiled default applies. Every install pins the steady-beat baseline
 (`SWX_VFR=relaxed` at auto Hz, `DM_PRESENT_SNAP=2` stock snapshot ring);
 `set vfr off` restores the legacy Switch-interval frame step for A/B
