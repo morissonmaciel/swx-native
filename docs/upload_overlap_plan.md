@@ -3,6 +3,12 @@
 Approved multi-slice plan for cutting area-entry texture-upload cost.
 Branch: `feat/async_writes`. Docs only — no code, no builds.
 
+Status update (2026-11-18): the repaired staging pool is now enabled in the
+managed BOTW installation environment. This is an install configuration
+decision based on two clean pool-only gameplay runs, not a change to the
+vendored core's compiled default or a claim of proven frame-time improvement.
+`SWX_GPU_BIND_ONCE` remains experimental and off in the managed environment.
+
 ## 1. Objective and non-goal
 
 Objective: cut the per-texture submit-thread upload cost of area-entry
@@ -63,7 +69,7 @@ Each dated 2026-11-16 with a one-line rationale:
   the snapshot ring; the compiled default (stock ring) applies unless set
   for A/B testing.
 
-## 3. Slice 0 — bind-once state cache (env-gated, default off: `SWX_GPU_BIND_ONCE`)
+## 3. Slice 0 — bind-once state cache (experimental, default off: `SWX_GPU_BIND_ONCE`)
 
 `patches/dm_gpu_bind_once.patch` suppresses repeated argument-table and
 pipeline binds only for consecutive deswizzle dispatches on the same upload
@@ -74,10 +80,10 @@ Gate it with cold and enter-leave-enter A/B runs: zero `[RED]`, no new
 frame-step transition, median p95 submit reduction of at least 1 ms, and no
 individual regression above 1 ms.
 
-## 4. Slice 1 — pooled resident staging (env-gated, default off: `SWX_GPU_TEXTURE_POOL`)
+## 4. Slice 1 — pooled resident staging (`SWX_GPU_TEXTURE_POOL`; enabled in managed BOTW env)
 
-Shape (MNG mirror, NX-sized): keep a small pool of private + shared staging
-blocks resident across submissions — cf. MNG 6x32 MB private + 4x8 MB shared,
+Shape (NX-sized private pool): keep a small pool of private staging
+blocks resident across submissions — MNG separately has 6x32 MB private + 4x8 MB shared,
 `res_add` once (`docs/io_paths_nxnative_vs_mng.md` §2; literal anchors
 `up_pool_take` / `up_reserve` / `up_pair_alloc` / `up_cpu_reserve`,
 `bcd`/`bc1astc`/`bctc` dispatches, `retire_idle_kick`, `q4_commit` with no
@@ -138,8 +144,10 @@ Gate 2 (numbers) — same fixed route, `collect`/`compare`:
 - Success = alloc + rescommit + commit frame-attributed cost shrinks toward
   zero while encode-ms is untouched (encode moves in later slices, not this
   one) — a pooling win, not an fps number.
-- Promote to default only with a second corpus (different area, longer
-  session), same rule as `docs/async_writes_evaluation.md` §5 Gate 2.
+- The pool is install-enabled by the user's decision after two pool-only
+  runs. Treat that as a scoped BOTW environment choice; the compiled default
+  remains off. A second corpus is still needed before claiming a repeatable
+  performance benefit or expanding the rollout.
 
 ## 5. Parked follow-ups: slice 2 (pre-reserve offsets) and slice 3 (helper copies + GPU decompress)
 
@@ -172,8 +180,8 @@ ship a wrong texel. Parked until slices 1–2 numbers demand it.
   per-texture, vconv) plus the unlisted residual diag were reverted and
   deleted once every open question they instrumented was decided
   (2026-11-16 final commit). `instrumentation/ab_test.py` and
-  `instrumentation/log_report.py` keep parsing the enriched lines
-  (backward compatible: absent suffixes read as zero).
+  `instrumentation/log_report.py` keep parsing enriched historical lines;
+  absent upload timing/path suffixes are unavailable, not zero.
 - One concern per patch (`docs/nxnative_patches.md`): each slice is its own
   single-file patch with a why-header.
 - Verify-before-marker: every patch declares `# verify:` sentinel headers

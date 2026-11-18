@@ -7,7 +7,7 @@ first-upload bursts vs GPU-bound/other), totals (new pipelines, first-upload
 count and MB, hybrid draws, draws that waited), frame-step transitions,
 prewarm/prebuild lines, keep-alive presence, and [RED] lines.
 
-Usage: log_report.py [log path] [--json]
+Usage: log_report.py [log path] [--tsv timing.tsv] [--json]
 """
 import json
 import os
@@ -27,8 +27,9 @@ def classify(line):
     m_gpu = re.search(r"GPU ([\d.]+) ms", line)
     m_fr = re.search(r"frame (\d+)", line)
     m_ba = re.search(r"in (\d+) batches \((\d+) split\)", line)
-    m_tm = re.search(r"\[upload alloc ([\d.]+) ms \((\d+) bufs\) \+ rescommit ([\d.]+) ms \+ commit ([\d.]+) ms \+ drain ([\d.]+) ms \((\d+)\) \+ slotwait ([\d.]+) ms \+ oldq ([\d.]+) ms\]", line)
-    m_pa = re.search(r"\+ path (\d+)/(\d+)/(\d+) \(([\d.]+)/([\d.]+)/([\d.]+) ms\)\]", line)
+    # `+ path ...` may be appended inside the upload bracket, after oldq.
+    m_tm = re.search(r"\[upload alloc ([\d.]+) ms \((\d+) bufs\) \+ rescommit ([\d.]+) ms \+ commit ([\d.]+) ms \+ drain ([\d.]+) ms \((\d+)\) \+ slotwait ([\d.]+) ms \+ oldq ([\d.]+) ms(?: \+ path \d+/\d+/\d+(?: \([\d.]+/[\d.]+/[\d.]+ ms\))?)?\]", line)
+    m_pa = re.search(r"\+ path (\d+)/(\d+)/(\d+)(?: \(([\d.]+)/([\d.]+)/([\d.]+) ms\))?", line)
     np_ = int(m_np.group(1)) if m_np else 0
     up = int(m_up.group(1)) if m_up else 0
     return {
@@ -42,20 +43,20 @@ def classify(line):
         "gpu_ms": float(m_gpu.group(1)) if m_gpu else 0.0,
         "batches": int(m_ba.group(1)) if m_ba else 0,
         "split_batches": int(m_ba.group(2)) if m_ba else 0,
-        "up_alloc_ms": float(m_tm.group(1)) if m_tm else 0.0,
-        "up_alloc_n": int(m_tm.group(2)) if m_tm else 0,
-        "up_rescommit_ms": float(m_tm.group(3)) if m_tm else 0.0,
-        "up_cbend_ms": float(m_tm.group(4)) if m_tm else 0.0,
-        "up_drain_ms": float(m_tm.group(5)) if m_tm else 0.0,
-        "up_drain_n": int(m_tm.group(6)) if m_tm else 0,
-        "up_slotwait_ms": float(m_tm.group(7)) if m_tm else 0.0,
-        "up_oldq_ms": float(m_tm.group(8)) if m_tm else 0.0,
-        "up_direct": int(m_pa.group(1)) if m_pa else 0,
-        "up_enc": int(m_pa.group(2)) if m_pa else 0,
-        "up_cpu": int(m_pa.group(3)) if m_pa else 0,
-        "up_pdi_ms": float(m_pa.group(4)) if m_pa else 0.0,
-        "up_pen_ms": float(m_pa.group(5)) if m_pa else 0.0,
-        "up_pcp_ms": float(m_pa.group(6)) if m_pa else 0.0,
+        "up_alloc_ms": float(m_tm.group(1)) if m_tm else None,
+        "up_alloc_n": int(m_tm.group(2)) if m_tm else None,
+        "up_rescommit_ms": float(m_tm.group(3)) if m_tm else None,
+        "up_cbend_ms": float(m_tm.group(4)) if m_tm else None,
+        "up_drain_ms": float(m_tm.group(5)) if m_tm else None,
+        "up_drain_n": int(m_tm.group(6)) if m_tm else None,
+        "up_slotwait_ms": float(m_tm.group(7)) if m_tm else None,
+        "up_oldq_ms": float(m_tm.group(8)) if m_tm else None,
+        "up_direct": int(m_pa.group(1)) if m_pa else None,
+        "up_enc": int(m_pa.group(2)) if m_pa else None,
+        "up_cpu": int(m_pa.group(3)) if m_pa else None,
+        "up_pdi_ms": float(m_pa.group(4)) if m_pa and m_pa.group(4) else None,
+        "up_pen_ms": float(m_pa.group(5)) if m_pa and m_pa.group(5) else None,
+        "up_pcp_ms": float(m_pa.group(6)) if m_pa and m_pa.group(6) else None,
     }
 
 
@@ -135,11 +136,140 @@ def _parse_present_queue_window(line):
     return out
 
 
-def report(path):
+def _parse_texture_pool_line(line):
+    """Parse cumulative low-frequency staging-pool counters when present."""
+    m = re.search(
+        r"texture staging pool(?: up to frame\s+(\d+))?:\s*reuse\s+(\d+)\s*/\s*cold\s+(\d+)\s*/\s*miss\s+(\d+);\s*"
+        r"reserved\s+(\d+)\s+bytes;\s*resident\s+(\d+)\s+bytes", line, re.I)
+    if not m:
+        return None
+    return {
+        "frame": int(m.group(1)) if m.group(1) else None,
+        "reuse": int(m.group(2)), "cold": int(m.group(3)),
+        "miss": int(m.group(4)), "reserved_bytes": int(m.group(5)),
+        "resident_bytes": int(m.group(6)),
+    }
+
+
+_TEXTURE_BURST_INT_FIELDS = {
+    "schema", "batch", "frame", "submission", "textures", "mips",
+    "layers", "dispatches", "blits", "bytes", "slot_waits", "dropped",
+}
+# These fields are intervals/durations from the host schema. complete_ns is
+# deliberately excluded: it is an absolute monotonic timestamp, not a cost.
+_TEXTURE_BURST_DURATION_FIELDS = {
+    "dst_wall_ns", "protect_wall_ns", "origin_wall_ns", "deswizzle_wall_ns",
+    "flush_wall_ns", "commit_wall_ns", "wait_wall_ns", "queue_ns", "gpu_ns",
+}
+
+
+def _parse_texture_burst_line(line):
+    """Parse one structured texture-burst event without inventing joins.
+
+    Unknown keys remain strings so schema extensions survive collection.
+    Missing IDs and measurements remain absent; in particular, nearby log
+    lines are never used to fill frame/submission/batch fields.
+    """
+    marker = "[texture-burst] "
+    start = line.find(marker)
+    if start < 0:
+        return None
+    fields = {}
+    for token in line[start + len(marker):].strip().split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if not key or not value:
+            continue
+        if key in _TEXTURE_BURST_INT_FIELDS:
+            try:
+                fields[key] = int(value, 10)
+            except ValueError:
+                fields[key] = value
+        elif key.endswith("_ns"):
+            try:
+                fields[key] = int(value, 10)
+            except ValueError:
+                fields[key] = value
+        else:
+            fields[key] = value
+    if fields.get("schema") != 1 or not isinstance(fields.get("event"), str):
+        return None
+    fields["raw"] = line.strip()
+    return fields
+
+
+def _texture_burst_summary(events):
+    """Summarize durations separately and join only identical full IDs."""
+    by_event = {}
+    by_batch = {}
+    by_full_id = {}
+    for item in events:
+        kind = item["event"]
+        bucket = by_event.setdefault(kind, {"count": 0, "duration_ns": {}})
+        bucket["count"] += 1
+        for key, value in item.items():
+            if key in _TEXTURE_BURST_DURATION_FIELDS and isinstance(value, int):
+                samples = bucket["duration_ns"].setdefault(key, [])
+                samples.append(value)
+        batch = item.get("batch")
+        if isinstance(batch, int):
+            # Exact producer-supplied batch IDs are safe joins. Do not fill
+            # missing frame/submission metadata from another event.
+            by_batch.setdefault(str(batch), []).append(item)
+        if all(isinstance(item.get(key), int)
+               for key in ("batch", "frame", "submission")):
+            by_full_id.setdefault((item["batch"], item["frame"],
+                                   item["submission"]), []).append(item)
+    for bucket in by_event.values():
+        for key, values in bucket["duration_ns"].items():
+            ordered = sorted(values)
+            bucket["duration_ns"][key] = {
+                "samples": len(ordered), "sum": sum(ordered),
+                "p50": ordered[(len(ordered) - 1) // 2],
+                "p95": ordered[(95 * len(ordered) - 1) // 100],
+            }
+    joins = []
+    counts = {"encode_publish_pairs": 0, "encode_gpu_pairs": 0,
+              "publish_without_encode": 0, "gpu_without_encode": 0,
+              "encode_without_publish": 0, "encode_without_gpu": 0,
+              "missing_join_id": 0, "slot_waits_total": 0,
+              "overflow_dropped_total": 0}
+    counts["slot_waits_total"] = sum(
+        item.get("slot_waits", 0) for item in events
+        if item.get("event") == "encode" and isinstance(item.get("slot_waits", 0), int))
+    counts["overflow_dropped_total"] = sum(
+        item.get("dropped", 0) for item in events
+        if item.get("event") == "overflow" and isinstance(item.get("dropped", 0), int))
+    for key, group in sorted(by_full_id.items()):
+        kinds = {kind: sum(item.get("event") == kind for item in group)
+                 for kind in ("encode", "publish", "gpu")}
+        missing = [kind for kind, count in kinds.items() if count == 0]
+        counts["encode_publish_pairs"] += bool(kinds["encode"] and kinds["publish"])
+        counts["encode_gpu_pairs"] += bool(kinds["encode"] and kinds["gpu"])
+        counts["publish_without_encode"] += bool(kinds["publish"] and not kinds["encode"])
+        counts["gpu_without_encode"] += bool(kinds["gpu"] and not kinds["encode"])
+        counts["encode_without_publish"] += bool(kinds["encode"] and not kinds["publish"])
+        counts["encode_without_gpu"] += bool(kinds["encode"] and not kinds["gpu"])
+        joins.append({"batch": key[0], "frame": key[1], "submission": key[2],
+                      "events": kinds, "missing": missing,
+                      "status": "complete" if not missing else "partial"})
+    missing_ids = [item for item in events if not all(
+        isinstance(item.get(key), int) for key in ("batch", "frame", "submission"))]
+    counts["missing_join_id"] = len(missing_ids)
+    return {
+        "by_event": by_event, "by_batch": by_batch,
+        "joins": counts, "by_full_id": joins,
+        "unmatched_missing_id": missing_ids,
+    }
+
+
+def report(path, tsv_path=None):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
            "display_windows": [], "display_link": {}, "vfr_windows": [],
            "vfr_queue_windows": [], "timing_windows": [],
-           "present_windows": [],
+           "present_windows": [], "texture_pool_windows": [],
+           "texture_burst_events": [], "texture_burst_tsv": tsv_path,
            # Optional queue metrics. None means absent from this log, not 0.
            "ready_depth": None, "drop_oldest": None,
            "credit": None, "promote_ms": None,
@@ -153,6 +283,15 @@ def report(path):
            "rth_stock_reused": 0, "rth_stock_made": 0, "rth_top": ""}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
+            burst = _parse_texture_burst_line(line)
+            if burst:
+                rep["texture_burst_events"].append(burst)
+            pool = _parse_texture_pool_line(line)
+            if pool:
+                previous = rep["texture_pool_windows"][-1] if rep["texture_pool_windows"] else None
+                for key in ("reuse", "cold", "miss", "reserved_bytes"):
+                    pool[f"delta_{key}"] = (pool[key] - previous[key]) if previous and pool[key] >= previous[key] else None
+                rep["texture_pool_windows"].append(pool)
             if "[swx-keepalive] on:" in line:
                 rep["keepalive"] = True
             if "DM_NVN_SYNC_LAG=1: newest-fence" in line:
@@ -268,6 +407,14 @@ def report(path):
             m = re.search(r"frame (\d+) \(", line)
             if m:
                 rep["frames"] = max(rep["frames"], int(m.group(1)))
+    # The host writes texture-burst records to DM_NVN_TSV, never game.log.
+    # Parse only structured markers; ignore TSV headers and unrelated rows.
+    if tsv_path and os.path.abspath(tsv_path) != os.path.abspath(path):
+        with open(tsv_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                burst = _parse_texture_burst_line(line)
+                if burst:
+                    rep["texture_burst_events"].append(burst)
     lfs = rep.pop("longframes")
     by_cause = {"pipelines": [], "uploads": [], "gpu_other": []}
     for lf in lfs:
@@ -297,26 +444,37 @@ def report(path):
     up_lfs = [l for l in lfs if l["first_uploads"] > 0 and l["batches"] > 0]
     rep["upload_frames_with_batches"] = len(up_lfs)
     rep["upload_batch_rate"] = round(sum(l["first_uploads"] for l in up_lfs) / max(sum(l["batches"] for l in up_lfs), 1), 1) if up_lfs else 0.0
-    for k in ("up_alloc_ms", "up_rescommit_ms", "up_cbend_ms", "up_drain_ms", "up_slotwait_ms", "up_oldq_ms"):
-        rep[f"{k}_total"] = round(sum(l[k] for l in lfs), 1)
-    rep["up_alloc_n_total"] = sum(l["up_alloc_n"] for l in lfs)
-    rep["up_drain_n_total"] = sum(l["up_drain_n"] for l in lfs)
-    rep["up_direct_total"] = sum(l["up_direct"] for l in lfs)
-    rep["up_enc_total"] = sum(l["up_enc"] for l in lfs)
-    rep["up_cpu_total"] = sum(l["up_cpu"] for l in lfs)
-    for k in ("up_pdi_ms", "up_pen_ms", "up_pcp_ms"):
-        rep[k + "_total"] = round(sum(l[k] for l in lfs), 1)
+    for k in ("up_alloc_ms", "up_rescommit_ms", "up_cbend_ms", "up_drain_ms", "up_slotwait_ms", "up_oldq_ms",
+              "up_alloc_n", "up_drain_n", "up_direct", "up_enc", "up_cpu",
+              "up_pdi_ms", "up_pen_ms", "up_pcp_ms"):
+        samples = [l[k] for l in lfs if l[k] is not None]
+        total = sum(samples)
+        rep[f"{k}_total"] = (round(total, 1) if k.endswith("_ms") else total) if samples else None
+        rep[f"{k}_samples"] = len(samples)
+    rep["texture_burst"] = _texture_burst_summary(rep["texture_burst_events"])
     return rep
 
 
 def main(argv=None):
-    args = [a for a in (argv or sys.argv[1:]) if not a.startswith("-")]
-    as_json = "--json" in (argv or sys.argv[1:])
+    argv = list(sys.argv[1:] if argv is None else argv)
+    as_json = "--json" in argv
+    tsv_path = None
+    if "--tsv" in argv:
+        i = argv.index("--tsv")
+        if i + 1 >= len(argv):
+            print("error: --tsv requires a path", file=sys.stderr)
+            return 2
+        tsv_path = argv[i + 1]
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("-")]
     path = args[0] if args else DEFAULT_LOG
     if not os.path.isfile(path):
         print(f"error: log not found: {path}", file=sys.stderr)
         return 2
-    rep = report(path)
+    if tsv_path and not os.path.isfile(tsv_path):
+        print(f"error: TSV not found: {tsv_path}", file=sys.stderr)
+        return 2
+    rep = report(path, tsv_path)
     if as_json:
         print(json.dumps(rep, indent=2))
         return 0
@@ -334,12 +492,13 @@ def main(argv=None):
     print(f"upload batches: {rep['batches_total']} total ({rep['split_batches_total']} by count-split) "
           f"over {rep['upload_frames_with_batches']} frames with batch data, "
           f"{rep['upload_batch_rate']} uploads/batch")
-    print(f"upload cost split: alloc {rep.get('up_alloc_ms_total', 0.0):.1f} ms ({rep.get('up_alloc_n_total', 0)} bufs) + "
-          f"rescommit {rep.get('up_rescommit_ms_total', 0.0):.1f} ms + commit {rep.get('up_cbend_ms_total', 0.0):.1f} ms + "
-          f"drain {rep.get('up_drain_ms_total', 0.0):.1f} ms ({rep.get('up_drain_n_total', 0)} waits) + "
-          f"slotwait {rep.get('up_slotwait_ms_total', 0.0):.1f} ms + oldq {rep.get('up_oldq_ms_total', 0.0):.1f} ms")
-    print(f"upload paths: {rep.get('up_direct_total', 0)} direct + {rep.get('up_enc_total', 0)} GPU-encode + {rep.get('up_cpu_total', 0)} CPU")
-    print(f"upload path ms: direct {rep.get('up_pdi_ms_total', 0.0):.1f} + enc {rep.get('up_pen_ms_total', 0.0):.1f} + cpu {rep.get('up_pcp_ms_total', 0.0):.1f}")
+    fmt = lambda value, places=1: "n/a" if value is None else f"{value:.{places}f}"
+    print(f"upload cost split: alloc {fmt(rep.get('up_alloc_ms_total'))} ms ({fmt(rep.get('up_alloc_n_total'), 0)} bufs) + "
+          f"rescommit {fmt(rep.get('up_rescommit_ms_total'))} ms + commit {fmt(rep.get('up_cbend_ms_total'))} ms + "
+          f"drain {fmt(rep.get('up_drain_ms_total'))} ms ({fmt(rep.get('up_drain_n_total'), 0)} waits) + "
+          f"slotwait {fmt(rep.get('up_slotwait_ms_total'))} ms + oldq {fmt(rep.get('up_oldq_ms_total'))} ms")
+    print(f"upload paths: {fmt(rep.get('up_direct_total'), 0)} direct + {fmt(rep.get('up_enc_total'), 0)} GPU-encode + {fmt(rep.get('up_cpu_total'), 0)} CPU")
+    print(f"upload path ms: direct {fmt(rep.get('up_pdi_ms_total'))} + enc {fmt(rep.get('up_pen_ms_total'))} + cpu {fmt(rep.get('up_pcp_ms_total'))}")
     if windows := rep["display_windows"]:
         print(f"screen: {sum(w['shown'] for w in windows)} shown, "
               f"{sum(w['late'] for w in windows)} late, "
@@ -384,6 +543,20 @@ def main(argv=None):
               f"drop_oldest={rep.get('drop_oldest') if rep.get('drop_oldest') is not None else 'n/a'}, "
               f"credit={rep.get('credit') if rep.get('credit') is not None else 'n/a'}, "
               f"promote_ms={rep.get('promote_ms') if rep.get('promote_ms') is not None else 'n/a'}")
+    if burst_events := rep.get("texture_burst_events"):
+        burst = rep["texture_burst"]
+        kinds = ", ".join(f"{kind}={info['count']}" for kind, info in sorted(burst["by_event"].items()))
+        joins = burst["joins"]
+        print(f"texture-burst schema 1: {kinds}; encode/publish joined={joins['encode_publish_pairs']}, "
+              f"encode/GPU joined={joins['encode_gpu_pairs']}, missing full IDs={joins['missing_join_id']}, "
+              f"slot waits={joins['slot_waits_total']}, overflow dropped={joins['overflow_dropped_total']}")
+        for kind, info in sorted(burst["by_event"].items()):
+            costs = info["duration_ns"]
+            if costs:
+                dominant = max(costs, key=lambda key: costs[key]["p50"])
+                value = costs[dominant]
+                print(f"  {kind} highest p50 field: {dominant} p50={value['p50']} ns "
+                      f"p95={value['p95']} ns (n={value['samples']}); fields remain separate")
     print(f"frame-step transitions: {', '.join(rep['steps']) if rep['steps'] else 'none'}")
     for r in rep["red"][:10]:
         print(f"RED: {r}")

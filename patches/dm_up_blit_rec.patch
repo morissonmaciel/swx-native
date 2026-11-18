@@ -1,0 +1,203 @@
+# verify: dm/gfx/nvn/nvn_mtl.m:up_ubatch_replay(uint64_t o, uint64_t cb, uint64_t tag, uint64_t up);
+# verify: dm/gfx/nvn/nvn_rec.h:RO_COMMIT_UBATCH
+# verify: dm/gfx/nvn/nvn_rec.h:case RO_COMMIT_UBATCH:
+# verify: dm/gfx/nvn/nvn_rec.h:rec_commit_ubatch
+# verify: dm/gfx/nvn/nvn_mtl.m:SWX_NVN_UP_BLIT_REC
+# verify: dm/gfx/nvn/nvn_mtl.m:up_ub_rec_eligible()
+# Upload batch blit prototype: SWX_NVN_UP_BLIT_REC=1 defers a whole buffer->texture batch to the encode thread (one RO_COMMIT_UBATCH).
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -178,6 +178,8 @@
+     while (d > m && !atomic_compare_exchange_weak(&g_res_name_max, &m, d)) {}
+ }
+ static void cb_end(id cb, id<MTLResidencySet> also);   // every Metal 4 command buffer ends here (after nvn_rec.h)
++// SWX_NVN_UP_BLIT_REC prototype: a whole upload batch's buffer->texture blits, encoded on the encode thread (defined beside up_flush, after nvn_rec.h).
++static void up_ubatch_replay(uint64_t o, uint64_t cb, uint64_t tag, uint64_t up);
+ static id<MTLSharedEvent> g_ev;
+ static _Atomic uint64_t g_fence;                // Highest committed fence value (incremented exclusively by the submit thread)
+ static _Atomic uint64_t g_sub_open;             // the open submission's fence, 0 with none open: from mtl_sub_begin until its commit has taken that fence and encoded everything (pool_gone_release)
+@@ -3775,7 +3777,76 @@
+ static NSHashTable *g_up_lost; static os_unfair_lock g_up_lost_lk = OS_UNFAIR_LOCK_INIT; static _Atomic int g_up_lost_n; static _Atomic uint64_t g_up_lost_redo;   // Weak-reference table: if a texture in the record is never fetched again and is released normally, this table does not keep it alive
+ static int up_lost_take(id tex) {   // This texture's upload was dropped: take it out of the record and return 1
+     if (!tex) return 0; os_unfair_lock_lock(&g_up_lost_lk); int hit = [g_up_lost containsObject:tex]; if (hit) { [g_up_lost removeObject:tex]; atomic_store(&g_up_lost_n, (int)g_up_lost.allObjects.count); atomic_fetch_add(&g_up_lost_redo, 1); } os_unfair_lock_unlock(&g_up_lost_lk); return hit;
++}
++// SWX_NVN_UP_BLIT_REC=1 prototype: defer a whole upload batch's buffer->texture blits to the encode thread (one RO_COMMIT_UBATCH, in the same queue slot
++// rec_commit_upload would take). Why: with DM_NVN_ENC_THREAD=1 the draw replay already runs on the encode thread, so up_flush's blit encoding is the submit
++// thread's remaining per-batch Metal encoding. The GPU executes the same individual copies in the same order; deswizzle, draw replay, pool and VFR pacing are
++// untouched. The batch is only deferred when every entry is a plain buffer->texture copy; any texture read, intra-batch barrier, payload-build failure or
++// unavailable recorder sends the whole batch through the current path, never mixing both in one command buffer.
++static int up_ub_rec_on(void) {
++    static int v = -1;
++    if (v < 0) { const char *e = getenv("SWX_NVN_UP_BLIT_REC"); v = e && atoi(e) != 0; }
++    return v;
++}
++typedef struct {   // one buffer->texture copy (src/dst: CFBridgingRetain refs, released after the replay emits them)
++    uint64_t src, dst;
++    uint64_t off, row, image, w, h, d, slice, level, ox, oy, oz;
++} up_ub_copy;
++typedef struct { int n; up_ub_copy c[]; } up_ubatch;   // immutable once built
++static int up_ub_rec_eligible(void) {
++    if (!up_ub_rec_on()) return 0;
++    if (!rec_on() || !g_rb_started) return 0;
++    if (g_nup_blits <= 0) return 0;
++    for (int i = 0; i < g_nup_blits; i++) {
++        up_blit *x = &g_up_blits[i];
++        if (x->tsrc || x->t2b || x->bar) return 0;
++        if (!x->src || !x->dst) return 0;
++    }
++    return 1;
+ }
++static up_ubatch *up_ubatch_build(void) {
++    int n = g_nup_blits;
++    up_ubatch *u = malloc(sizeof *u + (size_t)n * sizeof u->c[0]);
++    if (!u) return NULL;
++    u->n = n;
++    for (int i = 0; i < n; i++) {
++        up_blit *x = &g_up_blits[i];
++        if (!x->src || !x->dst) { for (int j = 0; j < i; j++) { if (u->c[j].src) CFRelease((CFTypeRef)(uintptr_t)u->c[j].src); if (u->c[j].dst) CFRelease((CFTypeRef)(uintptr_t)u->c[j].dst); } free(u); return NULL; }
++        u->c[i].src = rec_obj(x->src);
++        u->c[i].dst = rec_obj(x->dst);
++        u->c[i].off = x->off; u->c[i].row = x->row; u->c[i].image = x->image;
++        u->c[i].w = x->size.width; u->c[i].h = x->size.height; u->c[i].d = x->size.depth;
++        u->c[i].slice = x->slice; u->c[i].level = x->level;
++        u->c[i].ox = x->at.x; u->c[i].oy = x->at.y; u->c[i].oz = x->at.z;
++    }
++    return u;
++}
++static void up_ubatch_discard(up_ubatch *u) {
++    if (!u) return;
++    for (int i = 0; i < u->n; i++) { if (u->c[i].src) CFRelease((CFTypeRef)(uintptr_t)u->c[i].src); if (u->c[i].dst) CFRelease((CFTypeRef)(uintptr_t)u->c[i].dst); }
++    free(u);
++}
++// The encode thread's half: emit the batch's barrier and copies on the real command buffer, then end and commit it like RO_COMMIT_REAL (rx_flush first in
++// rec_exec; same lock, same publish-before-commit, same queue call here), under the GPU-completion contract the submit thread's feedback handler set up.
++static void up_ubatch_replay(uint64_t o, uint64_t cb, uint64_t tag, uint64_t up) {
++    id<MTL4CommandBuffer> ucb = (__bridge id)(void *)(uintptr_t)cb;
++    MTL4CommitOptions *uo = (__bridge id)(void *)(uintptr_t)o;
++    up_ubatch *ub = (up_ubatch *)(uintptr_t)up;
++    id<MTL4ComputeCommandEncoder> ue = [ucb computeCommandEncoder];
++    [ue barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
++    for (int i = 0; i < ub->n; i++) {
++        up_ub_copy *c = &ub->c[i];
++        enc_b_copy_buffer_texture(ue, (__bridge id<MTLBuffer>)(void *)(uintptr_t)c->src, (NSUInteger)c->off, (NSUInteger)c->row, (NSUInteger)c->image, MTLSizeMake((NSUInteger)c->w, (NSUInteger)c->h, (NSUInteger)c->d), (__bridge id<MTLTexture>)(void *)(uintptr_t)c->dst, (NSUInteger)c->slice, (NSUInteger)c->level, MTLOriginMake((NSUInteger)c->ox, (NSUInteger)c->oy, (NSUInteger)c->oz));
++    }
++    nvn_deswz_gpu_m4_invalidate(ue); m4_end(ue);
++    up_ubatch_discard(ub);
++    cb_end(ucb, nil);
++    id<MTL4CommandBuffer> ubufs[] = {ucb};
++    pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as RO_COMMIT_REAL and the present snapshot's queue commit (nvn_mtl.m res_commit)
++    tb_published((uintptr_t)tag);
++    if (uo) [g_q4 commit:ubufs count:1 options:uo]; else [g_q4 commit:ubufs count:1];
++    rx_mark(); pthread_mutex_unlock(&g_res_commit_mu);
++}
+ static void up_diag(void);
+ static void up_flush(void) {
+     up_owner_check("up_flush");
+@@ -3785,6 +3856,74 @@
+         nvn_deswz_gpu_m4_invalidate(g_up_ce);
+         m4_end(g_up_ce); g_up_ce = nil;
+     }
++    // SWX_NVN_UP_BLIT_REC=1 prototype: the whole batch validated above as plain buffer->texture copies with no per-entry barrier. Hand its blits to the
++    // encode thread as one RO_COMMIT_UBATCH instead of encoding them here. The command buffer, residency accounting and GPU-completion contract below mirror
++    // the current path; only the blit emission moves. A payload-build failure falls through to the current path with the command buffer still unencoded.
++    // DM_TEST_UP_LOST counts prototype batches on its own counter (ulost_at/ubatch_n), shared with nothing else.
++    if (up_ub_rec_eligible()) {
++        up_ubatch *uub = up_ubatch_build();
++        if (uub) {
++            id<MTL4CommandBuffer> ucb = g_up_cb;
++            unsigned uslot = (g_up_seq - 1) % 3;
++            // Only this upload batch uses its overflow staging. Retire it on upload
++            // completion, even when the main rendering submission is still being built.
++            NSMutableArray *ustaging = g_up_keep;
++            if (g_up_block && !g_up_block_pooled && !up_retained(g_up_block, uslot)) [ustaging addObject:g_up_block];
++            NSMutableArray *uviews = g_up_views; g_up_views = nil;
++            g_up_keep = nil; g_up_block = nil;
++            unsigned uswx_pm = g_swx_batch_pool; g_swx_batch_pool = 0;
++            g_up_block_off = g_up_block_size = g_up_staging_bytes = 0; g_up_block_pooled = 0;
++            NSMutableSet *utargets = [NSMutableSet setWithArray:g_up_texs]; for (int uii = 0; uii < g_nup_blits; uii++) if (g_up_blits[uii].dst) [utargets addObject:g_up_blits[uii].dst];
++            NSArray *udsts = utargets.allObjects;
++            static int ulost_at = -2; static uint64_t ubatch_n; if (ulost_at == -2) { const char *e = getenv("DM_TEST_UP_LOST"); ulost_at = e ? atoi(e) : -1; } int ufakelost = udsts.count && ulost_at > 0 && (int)++ubatch_n == ulost_at;
++            MTL4CommitOptions *uo = [MTL4CommitOptions new];
++            texture_burst_rec *utb = g_tb_current;
++            if (utb) {
++                utb->textures = udsts.count; utb->mips = utb->layers = 0;
++                for (id<MTLTexture> t in udsts) { utb->mips += t.mipmapLevelCount; utb->layers += t.arrayLength ? t.arrayLength : 1; }
++                utb->blits = (uint64_t)g_nup_blits;
++                utb->flush_ns += tb_now() - tb_flush0;
++            }
++            atomic_fetch_add(&g_up_pending, 1);
++            [uo addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
++                if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "upload"); }
++                if (f.error || ufakelost) {
++                    atomic_fetch_add(&g_up_lost_gen, 1);
++                    os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in udsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
++                    own_epoch();   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
++                    MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", ufakelost ? "DM_TEST_UP_LOST: " : "", (unsigned long)udsts.count, n);
++                }
++                double d = f.GPUEndTime - f.GPUStartTime;
++                if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
++                tb_gpu_done(utb, f.GPUStartTime, f.GPUEndTime);
++                @autoreleasepool {
++                    for (id<MTLResource> obj in ustaging) res_remove(obj);
++                    [ustaging removeAllObjects];
++                    [uviews removeAllObjects];   // upload-only integer views share their targets' residency
++                    res_commit();
++                }
++                atomic_store(&g_up_alloc_busy[uslot], 0);
++                if (uswx_pm) { for (unsigned bi = 0; bi < SWX_UP_POOL_N; bi++) if (uswx_pm & (1u << bi)) atomic_fetch_and(&g_swx_pool_busy, ~(1ull << bi)); }
++                atomic_fetch_sub(&g_up_pending, 1);
++                up_wake();
++            }];
++            uint64_t utb_commit0 = utb ? tb_now() : 0;
++            res_commit();
++            // No cb_end here: the encode thread ends the command buffer in up_ubatch_replay, outside the commit lock.
++            if (utb) utb->queued_ns = tb_now();
++            rec_commit_ubatch(ucb, uo, (uintptr_t)utb, (uint64_t)(uintptr_t)uub);
++            // Outside a submission nothing else hands the encode thread its current block until the next submission, so a batch flushed on the spot stayed a record and every wait for it
++            // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
++            if (!g_cb) rec_publish();
++            if (utb) { utb->commit_ns += tb_now() - utb_commit0; atomic_store_explicit(&utb->producer_done, 1, memory_order_release); g_tb_current = NULL; }
++            if (up_reuse()) g_up_slot_want[uslot] = MAX(g_up_slot_want[uslot], g_up_batch_bytes);
++            g_up_cb = nil;
++            up_diag();
++            g_nup_blits = 0;
++            [g_up_texs removeAllObjects];
++            return;
++        }
++    }
+     id<MTL4ComputeCommandEncoder> b = g_nup_blits ? g_up_ce = [g_up_cb computeCommandEncoder] : nil;
+     if (b) [b barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+     id<MTLTexture> from = nil;
+--- a/dm/gfx/nvn/nvn_rec.h
++++ b/dm/gfx/nvn/nvn_rec.h
+@@ -93,6 +93,7 @@
+     RO_T_ADDR, RO_T_TEX, RO_T_SAMP,
+     RO_LABEL, RO_R_TS, RO_C_TS,   // diagnostics: DM_NVN_ENC_LABEL, DM_NVN_GPUPROF
+     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
++    RO_COMMIT_UBATCH,   // SWX_NVN_UP_BLIT_REC prototype: a whole upload batch of buffer->texture copies (a[0] options, a[1] command buffer, a[2] tb tag, a[3] up_ubatch payload)
+ };
+ typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
+ enum { REC_BLK = 256 };
+@@ -235,6 +236,10 @@
+         tb_published((uintptr_t)a[2]);
+         if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+         rx_mark(); pthread_mutex_unlock(&g_res_commit_mu);
++        break; }
++    case RO_COMMIT_UBATCH: {   // SWX_NVN_UP_BLIT_REC prototype: the batch's blits run on the encode thread, in queue order after everything recorded before it
++        rx_flush();
++        up_ubatch_replay(a[0], a[1], a[2], a[3]);
+         break; }
+     case RO_SIGNAL:
+         if (after && g_rx_npend && g_rx_npost < (int)(sizeof g_rx_post / sizeof *g_rx_post)) { g_rx_post_ev[g_rx_npost] = rec_id(a[0]); g_rx_post[g_rx_npost].v = a[1]; g_rx_post[g_rx_npost++].p = NULL; g_rx_after = 1; break; }   // its command buffer is not committed yet
+@@ -498,6 +503,11 @@
+     tb_published(tag);
+     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+ }
++// A SWX_NVN_UP_BLIT_REC upload batch: the same queue slot as rec_commit_upload, but the buffer->texture blits are still unencoded (up_flush validated the
++// whole batch first): the payload carries the copies, and the encode thread emits them in up_ubatch_replay before ending and committing the command buffer.
++static void rec_commit_ubatch(id cb, MTL4CommitOptions *o, uintptr_t tag, uint64_t up) {
++    rec_t *r = rec_put(RO_COMMIT_UBATCH, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[2] = tag; r->a[3] = up;
++}
+ // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
+ // committed after it and after the command buffers committed before it
+ static void rec_queue_block(void (^block)(void)) { if (rec_on() && g_rb_started) rec_put(RO_Q_BLOCK, 1)->a[0] = rec_obj([block copy]); else block(); }

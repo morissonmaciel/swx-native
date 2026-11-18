@@ -277,3 +277,99 @@ contains the only eligible empty tick and oldest drop in the capture.
 Window aggregation prevents exact attribution to that frame. An earlier
 56.7 MB burst at frame 463 had zero eligible empty ticks and no on-screen
 losses in its reporting window.
+
+## Texture bursts — 2×2 staging pool and bind cache (2026-11-18)
+
+Nine captures at 2560×1440, VFR `relaxed/auto` on a 60 Hz link and
+`DM_NVN_WAITS=1`. No per-frame timing TSV was enabled. Counts below cover
+link ticks through 3,900, common to all captures. Burst comparisons use
+reported first-upload count and volume as matching proxies. Mip/format and
+per-batch work equivalence were not captured.
+
+| Arm, run | First uploads / MB | Whole frame / submit+present / upload scope (ms) | Eligible empty / dropped oldest |
+|---|---:|---:|---:|
+| Baseline 1 | 188 / 27.7 | 45.3 / 39.6 / 4.3 | 2 / 2 |
+| Baseline 2 | 215 / 39.0 | 46.9 / 44.2 / 5.1 | 3 / 2 |
+| Pool only 1 | 220 / 39.8 | 43.3 / 38.5 / 4.5 | 1 / 1 |
+| Pool only 2 | 215 / 39.0 | 41.2 / 34.4 / 4.6 | 1 / 1 |
+| Bind only 1 | 181 / 27.5 | 39.8 / 34.8 / 3.7 | 1 / 1 |
+| Bind only 2 | 188 / 27.7 | 38.6 / 35.0 / 3.6 | 1 / 1 |
+| Combined 1 | 188 / 27.7 | 35.9 / 32.1 / 3.6 | 17 / 2 |
+| Combined 2 | 188 / 27.7 | 44.2 / 39.6 / 4.0 | 1 / 2 |
+| Combined 3 | 188 / 27.7 | 35.9 / 33.9 / 3.9 | 8 / 2 |
+
+The pool materialized two 32 MiB blocks (64 MiB resident) and reported zero
+misses in all five pool-enabled captures. All nine hosts exited normally
+with no `[RED]`.
+The final resize in bind-only 1 followed the last included window. Combined
+1 had 15 eligible empty ticks across two post-burst windows. Both windows
+had 33.33 ms on-screen p99 and newest-fence SyncWait of 3.56 and 6.75 ms per
+frame, respectively. Upload-slot blocking was 0.000 ms per frame in both
+windows. These aggregates show a contemporaneous wait, with the cause of
+the difference between runs still unresolved.
+
+The most closely matched count-and-volume pair is Baseline 2 versus Pool only
+2 (215 first uploads / 39.0 MB each): whole frame 46.9 vs 41.2 ms,
+submit+present 44.2 vs 34.4 ms, and upload scope 5.1 vs 4.6 ms. This is one
+pair, with other runs varying in burst size and metrics; it is suggestive,
+not causal proof or a broad performance claim. The scoped upload timer
+accounts for only 3.6–5.1 ms across these captures, and CPU dispatch/setup
+remains unattributed.
+
+Rollout decision: enable the repaired pool in the managed BOTW installation
+environment (`SWX_GPU_TEXTURE_POOL=1`) after two clean pool-only gameplay
+runs, both with zero misses and 64 MiB resident. This is scoped to that
+installation and does not change the core compiled default. Keep
+`SWX_GPU_BIND_ONCE` experimental, compiled default off, and absent from the
+managed environment; it remains explicitly available for A/B.
+The combined pool+bind configuration is not promoted: the player reported
+hitches in runs 1 and 3 of 3, while run 2 did not reproduce them. Logs show
+recurrent eligible-empty clusters in runs 1 and 3, but do not isolate bind
+cache as the cause. Do not describe the combined package as successful.
+Grouped-dispatch remains a separate follow-up whose entry criterion is open.
+Captures are saved under `.swx-history/ab-texture-burst-20261118-*` in the
+BOTW installation directory.
+
+### Combined run 3 — presentation regression reproduced
+
+The player reported visible hitches in combined runs 1 and 3, with no
+similar episode in run 2. Run 3 logged 188 uploads / 27.7 MB at frame 739
+(35.9 ms whole, 33.9 ms submit+present, 3.9 ms upload scope). Of its eight
+eligible empty ticks, seven were in the window ending at tick 2,700, after
+the burst. That window had 33.33 ms on-screen p99 and 2.991 ms/frame of
+newest-fence SyncWait, with zero measured upload-slot blocking. Combined
+run 1 had ten eligible empty ticks in the same numbered window. Runs with
+either switch alone had zero eligible empty ticks in that window. Last
+pool report for run 3: 237 reuses, two cold allocations, zero misses.
+
+The tested configuration with both switches enabled remains unsuitable for
+promotion. The repeated pattern warrants auditing the bind cache and its
+interaction with the pool. It does not isolate the bind cache as the cause.
+Capture: `ab-texture-burst-20261118-combined-03` in the installation history.
+
+### Instrumented bursts on entry to the same area (2026-11-18)
+
+The player identified the same area in attribution runs 1 and 2. Run 2
+started closer to that area. Both used the promoted pool configuration and
+timing TSV. The saved captures contain 554 and 159 fully joined upload
+batches, respectively, with no overflow or upload-slot waits. Run 2 reused
+the live TSV path; it was matched to the 55.139 ms row at frame 692 and
+archived separately from run 1.
+
+| Metric | Run 1, frame 3,351 | Run 2, frame 692 |
+|---|---:|---:|
+| First uploads / reported MB | 134 / 28.3 | 277 / 40.3 |
+| Whole frame / submit+present (ms) | 42.9 / 41.1 | 55.1 / 51.3 |
+| Submit-thread CPU / rendering GPU (ms) | 37.2 / 5.1 | 48.9 / 5.6 |
+| Draws / upload dispatches / blit records | 2,319 / 3,602 / 3,670 | 3,139 / 4,718 / 4,786 |
+| Deswizzle encode / flush (ms, each summed across matching batches) | 1.54 / 4.11 | 2.21 / 5.27 |
+
+The larger burst includes more texture operations and more draws. CPU time
+grows alongside both, so this establishes the CPU-side bottleneck without
+isolating the cost of recording individual uploads. Flush is the largest
+upload bucket in both submissions, but it explains only a small share of
+submit time. In a separate run-1 burst, 11 uploads totaling 56.7 MB took
+30.1 ms submit+present, and source preparation was the largest upload
+bucket (8.03 ms). Run 2 logged two eligible empty ticks in the burst window
+and nine in two later windows. The TSV gives frame 692 a 16.667 ms presented
+interval; the empty ticks describe its surrounding window.

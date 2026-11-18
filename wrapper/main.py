@@ -482,13 +482,16 @@ def redirect_saves(cfg, master, phase_log):
                     if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=", "DM_PSO_PAIRS=",
                                                  "DM_SAVE_ASYNC=", "DM_PSO_USER_ASYNC=",
                                                  "SWX_GPU_KEEPALIVE=", "SWX_GPU_KEEPALIVE_YIELD=",
-                                                 "SWX_RESIDENCY_UB_RING="))]
+                                                 "SWX_RESIDENCY_UB_RING=",
+                                                 "SWX_GPU_TEXTURE_POOL=", "SWX_GPU_BIND_ONCE="))]
     # Keep explicit player VFR choices across reinstalls. A new install
     # uses the VFR 60 fps lock and derives display-link rate from the panel.
     # DM_NVN_SYNC_LAG is not pinned either and must stay out of the env.
     # DM_SAVE_ASYNC=1 (swapped-out save deleted on
     # a background thread; clone+swap stay synchronous). SWX switches
-    # default in code (keep-alive on on macOS; upload split opt-in);
+    # default in code (keep-alive on on macOS; upload split opt-in). The
+    # repaired texture staging pool is pinned on here; bind-once stays out
+    # of installed env files and remains available through the A/B harness.
     # DM tuning the user set by hand (MAX_TEX, KEEPALIVE_US, …) passes
     # through untouched via kept.
     vfr_defaults = {"SWX_VFR": "relaxed", "SWX_VFR_HZ": "auto"}
@@ -511,6 +514,7 @@ def redirect_saves(cfg, master, phase_log):
             f.write(f"DM_PSO_PAIRS={pso_pairs}\n")
         for key, value in vfr_defaults.items():
             f.write(f"{key}={value}\n")
+        f.write("SWX_GPU_TEXTURE_POOL=1\n")
         f.write("DM_SAVE_ASYNC=1\n")
         f.write("DM_PSO_USER_ASYNC=1\n")
         f.write("SWX_GPU_KEEPALIVE=1\n")
@@ -518,7 +522,7 @@ def redirect_saves(cfg, master, phase_log):
         f.write("SWX_RESIDENCY_UB_RING=1\n")
     log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE"
                      f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''}, "
-                     f"DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1, SWX_GPU_KEEPALIVE=1, SWX_GPU_KEEPALIVE_YIELD=1, SWX_RESIDENCY_UB_RING=1 to {env_path}")
+                     f"DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1, SWX_GPU_KEEPALIVE=1, SWX_GPU_KEEPALIVE_YIELD=1, SWX_RESIDENCY_UB_RING=1, SWX_GPU_TEXTURE_POOL=1 to {env_path}")
 
     moved, kept_back = [], []
     old_save = os.path.join(as_dir, "save")

@@ -1,0 +1,11 @@
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -3813,7 +3813,6 @@
+ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
+     size_t need = (n + 255u) & ~((size_t)255u);
+-    }
+-    int pool_on = swx_texture_pool_on();
++    const int pool_on = swx_texture_pool_on();
+     int switching = !g_up_block || need > g_up_block_size - g_up_block_off;
+ 
+     // Preflight using the cheaper pooled reservation before taking a pool

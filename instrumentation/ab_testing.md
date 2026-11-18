@@ -4,6 +4,14 @@ The user plays a fixed route; `instrumentation/ab_test.py` manages player-env
 overrides and snapshots each finished run before launcher log rotation can
 lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discussion.
 
+The texture-burst measurement, 2×2 flag matrix, candidate reuse assessment,
+and post-data grouped-dispatch gate are documented in
+[`docs/texture_burst_measurement_and_dispatch_plan.md`](../docs/texture_burst_measurement_and_dispatch_plan.md).
+That plan uses only the existing `pool` and `bind_once` switches. The repaired
+pool is enabled in the managed BOTW installation environment, while bind-once
+remains experimental and off there; the core compiled defaults remain off.
+Missing historical upload fields are reported as unavailable, not zero.
+
 ## Fixed variables (do not change mid A/B)
 
 - Same save, same start point, same route (the area-entry that produces the
@@ -21,7 +29,7 @@ lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discuss
 
 ```
 python3 instrumentation/ab_test.py status
-python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear
+python3 instrumentation/ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec on|off|clear
 python3 instrumentation/ab_test.py set vfr uncapped
 python3 instrumentation/ab_test.py set vfr-hz auto|30..240|clear
 python3 instrumentation/ab_test.py collect <label> [--install-dir I] [--log PATH]
@@ -41,6 +49,10 @@ Keep-alive on on macOS (install default `SWX_GPU_KEEPALIVE=1` with
 `SWX_GPU_KEEPALIVE_YIELD=1`; the texture-upload count split was removed after its
 Gate 1 showed +13 ms; numbers preserved in `instrumentation/ab_results.md`).
 `set yield off` restores the old run-to-end spinner for A/B within keepalive=1.
+`up-blit-rec on` sets `SWX_NVN_UP_BLIT_REC=1` (upload blit recorder path),
+`off` forces `=0`, `clear` restores the compiled default 0; both arms run the
+same binary with the recorder active, so `collect`/`compare` capture equivalent
+attribution — compare `off` vs `on` on the fixed route.
 `collect` snapshots the finished run's game log (default: the current
 log; `--log` for the rotated `.prev.log`), the `env.txt` state, and the
 `log_report.py` JSON into `<I>/.swx-history/ab-<label>/`.

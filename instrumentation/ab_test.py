@@ -7,10 +7,11 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec on|off|clear
   ab_test.py set vfr uncapped
   ab_test.py set vfr-hz auto|30..240|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
+                       [--tsv PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
 "on" writes an explicit value (visible as `launcher: env K=V` at boot;
@@ -47,6 +48,7 @@ KEYS = {
     "yield": "SWX_GPU_KEEPALIVE_YIELD",
     "residency-ub-ring": "SWX_RESIDENCY_UB_RING",
     "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
+    "up-blit-rec": "SWX_NVN_UP_BLIT_REC",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
 ON_VALUES = {"snap": "4", "vfr": "relaxed"}
@@ -128,18 +130,31 @@ def cmd_collect(args):
     log = DEFAULT_LOG
     if "--log" in args:
         log = args[args.index("--log") + 1]
+    tsv = args[args.index("--tsv") + 1] if "--tsv" in args else os.environ.get("DM_NVN_TSV")
+    if not tsv:
+        tsv = next((ln.split("=", 1)[1] for ln in read_env_lines()
+                    if ln.strip().startswith("DM_NVN_TSV=")), None)
     dest = os.path.join(install_dir(args), ".swx-history", f"ab-{label}")
     os.makedirs(dest, exist_ok=True)
     if not os.path.isfile(log):
         print(f"error: no finished run log yet: {log}", file=sys.stderr)
         raise SystemExit(2)
     shutil.copy2(log, os.path.join(dest, "game.log"))
+    stored_tsv = None
+    if tsv:
+        if not os.path.isfile(tsv):
+            print(f"error: DM_NVN_TSV was set but the timing TSV is missing: {tsv}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        stored_tsv = os.path.join(dest, "timing.tsv")
+        shutil.copy2(tsv, stored_tsv)
     with open(os.path.join(dest, "env.txt"), "w", encoding="utf-8") as f:
         for ln in read_env_lines():
             f.write(ln + "\n")
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from log_report import report
-    rep = report(log)
+    rep = report(log, stored_tsv)
+    rep["timing_tsv"] = "timing.tsv" if stored_tsv else None
     with open(os.path.join(dest, "report.json"), "w", encoding="utf-8") as f:
         json.dump(rep, f, indent=2)
     print(f"collected '{label}': {rep['frames']} frames, "

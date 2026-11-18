@@ -1,0 +1,12 @@
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -18975,7 +18975,7 @@
+     uint64_t v = ++g_snap_v;
+     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
+         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
+         rec_blk *b = rec_own_begin();
+-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
++        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb); r->a[2] = 0;
+         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
+         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
+         rec_own_push(b);

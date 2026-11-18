@@ -140,9 +140,11 @@ drop_stale_newfiles() {   # --force only: remove add-file targets of unapplied p
 
 WANT="$(hash_state)"
 
-# Exact append-only upgrades for known installed VFR prefixes. The current
-# ordered stack is ratio (#10), worker (#11), queue policy (#12), alpha guard
-# (#13). Historical markers are retained for append-only upgrades.
+# Exact append-only upgrades for known installed prefixes. The ordered stack
+# currently ends with ratio (#10), worker (#11), queue policy (#12), alpha
+# guard (#13), texture-pool correctness repair (#14), burst attribution
+# (#15), burst host lifetime (#16), and upload batch blit prototype (#17).
+# Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
 VFR_RATIO_PREFIX_COUNT=10
@@ -152,6 +154,23 @@ PRESENT_WORKER="dm_present_worker.patch"
 PRESENT_WORKER_OLD="compat/dm_present_worker-v1.patch"
 PRESENT_QUEUE_POLICY="dm_vfr_queue_policy.patch"
 QUICK_MENU_ALPHA="dm_vfr_quick_menu_alpha.patch"
+POOL_REPAIR="dm_gpu_texture_pool_fix.patch"
+POOL_REPAIR_PREFIX_COUNT=13
+POOL_REPAIR_PREFIX_HASH="ea9b59b9c90f9d50"
+POOL_REPAIR_SCOPE_V1_HASH="053f4709d36ee757"
+POOL_REPAIR_SCOPE_UPGRADE="compat/dm_gpu_texture_pool_fix-scope-v1.patch"
+TEXTURE_BURST_ATTRIBUTION="dm_texture_burst_attribution.patch"
+TEXTURE_BURST_PREFIX_COUNT=14
+TEXTURE_BURST_PREFIX_HASH="f56148a5c5d18b4a"
+TEXTURE_BURST_A2_UPGRADE="compat/dm_texture_burst_attribution-rec_a2-v1.patch"
+TEXTURE_BURST_A2_V1_HASH="05e12967a955adcb"
+TEXTURE_BURST_A2_V1_WANT="844febe76ff28fd9"
+TEXTURE_BURST_HOST_LIFETIME="dm_texture_burst_attribution_host_lifetime.patch"
+TEXTURE_BURST_HOST_PREFIX_COUNT=15
+TEXTURE_BURST_HOST_PREFIX_HASH="e65ca40b937099e0"
+UP_BLIT_REC="dm_up_blit_rec.patch"
+UP_BLIT_PREFIX_COUNT=16
+UP_BLIT_PREFIX_HASH="95af732262d69275"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -171,6 +190,108 @@ verify_series_prefix() {
     done
     [ "$i" -eq "$((n + 1))" ]
 }
+apply_pool_repair() (
+    [ "$(sed -n '14p' "$SERIES")" = "$POOL_REPAIR" ] || exit 1
+    if ! is_applied "$POOL_REPAIR"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$POOL_REPAIR" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$POOL_REPAIR" >/dev/null || exit 1
+        is_applied "$POOL_REPAIR" || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_ATTRIBUTION"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_ATTRIBUTION" || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_HOST_LIFETIME"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_HOST_LIFETIME" || exit 1
+    fi
+    if ! is_applied "$UP_BLIT_REC"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        is_applied "$UP_BLIT_REC" || exit 1
+    fi
+)
+append_texture_burst_attribution() (
+    [ "$(hash_series_prefix "$TEXTURE_BURST_PREFIX_COUNT")" = "$TEXTURE_BURST_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$TEXTURE_BURST_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$TEXTURE_BURST_PREFIX_COUNT" || exit 1
+    if ! is_applied "$TEXTURE_BURST_ATTRIBUTION"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_ATTRIBUTION" || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_HOST_LIFETIME"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_HOST_LIFETIME" || exit 1
+    fi
+    if ! is_applied "$UP_BLIT_REC"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        is_applied "$UP_BLIT_REC" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_texture_burst_host_lifetime() (
+    [ "$(hash_series_prefix "$TEXTURE_BURST_HOST_PREFIX_COUNT")" = "$TEXTURE_BURST_HOST_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$TEXTURE_BURST_HOST_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$TEXTURE_BURST_HOST_PREFIX_COUNT" || exit 1
+    if ! is_applied "$TEXTURE_BURST_HOST_LIFETIME"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_HOST_LIFETIME" || exit 1
+    fi
+    if ! is_applied "$UP_BLIT_REC"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        is_applied "$UP_BLIT_REC" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_up_blit_rec() (
+    [ "$(hash_series_prefix "$UP_BLIT_PREFIX_COUNT")" = "$UP_BLIT_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$UP_BLIT_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$UP_BLIT_PREFIX_COUNT" || exit 1
+    if ! is_applied "$UP_BLIT_REC"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
+        is_applied "$UP_BLIT_REC" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+apply_texture_burst_a2_upgrade() (
+    [ "$(hash_series_prefix "$TEXTURE_BURST_HOST_PREFIX_COUNT")" = "$TEXTURE_BURST_HOST_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$TEXTURE_BURST_PREFIX_COUNT" || exit 1
+    if ! is_applied "$TEXTURE_BURST_ATTRIBUTION"; then
+        grep -Fq 'rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);' "$CORE/dm/gfx/nvn/nvn_mtl.m" || { echo "[ERROR] snapshot commit snippet diverges; refusing punctual a[2] repair." >&2; exit 1; }
+        if ! patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_A2_UPGRADE" >/dev/null; then
+            echo "[ERROR] texture-burst snapshot a[2] repair preflight failed; core left untouched." >&2
+            exit 1
+        fi
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_A2_UPGRADE" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_ATTRIBUTION" || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_HOST_LIFETIME"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        is_applied "$TEXTURE_BURST_HOST_LIFETIME" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_texture_pool_repair() (
+    [ "$(hash_series_prefix "$POOL_REPAIR_PREFIX_COUNT")" = "$POOL_REPAIR_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$POOL_REPAIR_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$POOL_REPAIR_PREFIX_COUNT" || exit 1
+    apply_pool_repair || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
 apply_queue_and_alpha() (
     [ "$(sed -n '12p' "$SERIES")" = "$PRESENT_QUEUE_POLICY" ] || exit 1
     [ "$(sed -n '13p' "$SERIES")" = "$QUICK_MENU_ALPHA" ] || exit 1
@@ -211,6 +332,7 @@ append_vfr_ratio_worker_queue_alpha() (
     fi
     verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || exit 1
     apply_queue_and_alpha
+    apply_pool_repair
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -219,6 +341,7 @@ append_vfr_worker_to_full_stack() (
     [ "$(cat "$MARKER")" = "$PRESENT_WORKER_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || exit 1
     apply_queue_and_alpha
+    apply_pool_repair
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -236,6 +359,7 @@ upgrade_vfr_queue_policy_display_rate() (
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY_PRE_RATE" >/dev/null || exit 1
     grep -Fq 'int rate = swx_link_target(), link_rate = atomic_load(&g_swx_link_hz);' "$CORE/dm/gfx/nvn/nvn_mtl.m" || exit 1
     apply_queue_and_alpha
+    apply_pool_repair
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -256,12 +380,13 @@ apply_present_worker_migration() (
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
     is_applied "$PRESENT_WORKER" || exit 1
     apply_queue_and_alpha
+    apply_pool_repair
 )
 migrate_present_worker() (
     old_patch="$1"
     stage="$(mktemp -d "${TMPDIR:-/tmp}/swx-present-worker.XXXXXX")"
     trap 'rm -rf "$stage"' EXIT
-    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" "$HERE/$PRESENT_QUEUE_POLICY" "$HERE/$QUICK_MENU_ALPHA" | sort -u |
+    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" "$HERE/$PRESENT_QUEUE_POLICY" "$HERE/$QUICK_MENU_ALPHA" "$HERE/$POOL_REPAIR" | sort -u |
         while IFS= read -r f; do
             if [ -f "$CORE/$f" ]; then mkdir -p "$stage/$(dirname "$f")"; cp -p "$CORE/$f" "$stage/$f"; fi
         done
@@ -284,26 +409,26 @@ fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
    { [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ] || [ "$(cat "$MARKER")" = "$VFR_RATIO_PREFIX_HASH" ]; }; then
     if ! append_vfr_ratio_worker_queue_alpha; then
-        echo "[ERROR] append-only VFR ratio/worker/queue/alpha update failed preflight/apply; core left otherwise untouched." >&2
+        echo "[ERROR] append-only VFR ratio/worker/queue/alpha and texture-pool update failed preflight/apply; core left otherwise untouched." >&2
         exit 1
     fi
-    echo "patches: appended VFR ratio, worker, queue policy, and alpha guard ($WANT)."
+    echo "patches: appended VFR ratio, worker, queue policy, alpha guard, and texture-pool repair ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$PRESENT_WORKER_PREFIX_HASH" ]; then
     if ! append_vfr_worker_to_full_stack; then
-        echo "[ERROR] append-only VFR queue/alpha update failed preflight/apply; core left otherwise untouched." >&2
+        echo "[ERROR] append-only VFR queue/alpha and texture-pool update failed preflight/apply; core left otherwise untouched." >&2
         exit 1
     fi
-    echo "patches: appended VFR queue policy and alpha guard ($WANT)."
+    echo "patches: appended VFR queue policy, alpha guard, and texture-pool repair ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$PRESENT_QUEUE_POLICY_PRE_RATE_HASH" ]; then
     if ! upgrade_vfr_queue_policy_display_rate; then
-        echo "[ERROR] cached display-rate correction plus alpha-guard upgrade failed preflight/apply; core left unchanged where possible." >&2
+        echo "[ERROR] cached display-rate correction, alpha guard, and texture-pool upgrade failed preflight/apply; core left unchanged where possible." >&2
         exit 1
     fi
-    echo "patches: upgraded VFR queue policy display rate and alpha guard ($WANT)."
+    echo "patches: upgraded VFR queue policy display rate, alpha guard, and texture-pool repair ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$(hash_series_prefix "$PRESENT_QUEUE_PREFIX_COUNT")" ]; then
@@ -314,9 +439,72 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$(hash_seri
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || { echo "[ERROR] alpha-guard preflight failed; core left untouched." >&2; exit 1; }
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
     fi
+    if ! apply_pool_repair; then echo "[ERROR] texture-pool repair preflight failed; core left untouched." >&2; exit 1; fi
     stack_verified || { echo "[ERROR] alpha-guard stack verification failed." >&2; exit 1; }
     echo "$WANT" > "$MARKER"
-    echo "patches: appended VFR quick-menu alpha guard ($WANT)."
+    echo "patches: appended VFR quick-menu alpha guard and texture-pool repair ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$POOL_REPAIR_SCOPE_V1_HASH" ]; then
+    verify_series_prefix "$POOL_REPAIR_PREFIX_COUNT" || exit 1
+    if ! is_applied "$POOL_REPAIR"; then
+        if ! patch --batch -F 0 -V none -p1 --dry-run -d "$CORE" < "$HERE/$POOL_REPAIR_SCOPE_UPGRADE" >/dev/null; then
+            echo "[ERROR] texture-pool scope repair preflight failed; core left untouched." >&2
+            exit 1
+        fi
+        patch --batch -F 0 -V none -p1 -d "$CORE" < "$HERE/$POOL_REPAIR_SCOPE_UPGRADE" >/dev/null || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_ATTRIBUTION"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_ATTRIBUTION" >/dev/null || exit 1
+    fi
+    if ! is_applied "$TEXTURE_BURST_HOST_LIFETIME"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$TEXTURE_BURST_HOST_LIFETIME" >/dev/null || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+    echo "patches: corrected texture-pool allocator scope ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_BURST_A2_V1_HASH" ] || [ "$(cat "$MARKER")" = "$TEXTURE_BURST_A2_V1_WANT" ]; }; then
+    if ! apply_texture_burst_a2_upgrade; then
+        echo "[ERROR] texture-burst snapshot a[2] repair failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$UP_BLIT_PREFIX_HASH" ]; then
+    if ! append_up_blit_rec; then
+        echo "[ERROR] append-only upload batch blit prototype failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended upload batch blit prototype ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$TEXTURE_BURST_HOST_PREFIX_HASH" ]; then
+    if ! append_texture_burst_host_lifetime; then
+        echo "[ERROR] append-only texture burst host lifetime repair failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: repaired texture burst host lifetime handoff ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$TEXTURE_BURST_PREFIX_HASH" ]; then
+    if ! append_texture_burst_attribution; then
+        echo "[ERROR] append-only texture burst attribution failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended texture burst attribution ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$POOL_REPAIR_PREFIX_HASH" ]; then
+    if ! append_texture_pool_repair; then
+        echo "[ERROR] append-only texture-pool correctness update failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended texture-pool correctness repair ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then

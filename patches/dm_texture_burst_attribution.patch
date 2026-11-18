@@ -1,0 +1,302 @@
+# verify: dm/gfx/nvn/nvn_mtl.m:[texture-burst] schema=1 event=encode
+# verify: dm/gfx/nvn/nvn_rec.h:tb_published((uintptr_t)a[2])
+# verify: dm/gfx/nvn/hle_nvn.c:mtl_texture_burst_tsv(g_tsv)
+# verify: dm/gfx/nvn/nvn_mtl.m:rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb); r->a[2] = 0;
+# Texture burst attribution v1: opt-in through the existing DM_NVN_TSV; no new environment switch.
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -341,6 +341,7 @@
+     return o;
+ }
+ static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
++static void tb_published(uintptr_t tag);
+ #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
+ // Ends a Metal 4 command buffer, naming the residency sets first (see res_name). A recorded one (DM_NVN_ENC_THREAD) records its end, and the encode thread names them at RO_CB_END.
+ // Nothing else calls endCommandBuffer (dm/tools/tests/test_residency_naming.py)
+@@ -3592,6 +3593,69 @@
+ // the same queue executes in commit order ⇒ uploads are always finished before the first sample. Uploads outside a submission are flushed on the spot. The staging area is cut from 32 MB private blocks, held by the command buffer until completion.
+ static _Atomic uint64_t g_upload_ns;   // Cumulative time of deswizzle + upload encoding on the submit thread (timing instrumentation)
+ static _Atomic uint64_t g_upload_gpu_ns;
++// DM_NVN_TSV opt-in, batch-correlated texture upload attribution. Records are
++// emitted by hle_nvn.c on the TSV/game thread; Metal feedback only publishes
++// timestamps into a reserved slot and never performs I/O or takes a lock.
++#define TB_REC_N 256
++typedef struct {
++    _Atomic int state;                 // bounded lock-free handoff: collecting/encoded/feedback states below
++    _Atomic uint64_t gpu_ns, complete_ns, publish_at_ns;
++    _Atomic int publish_emitted;
++    uint64_t batch, frame, submission, textures, mips, layers, dispatches, blits, bytes, slot_waits;
++    uint64_t dst_ns, source_ns, origin_ns, deswizzle_ns, flush_ns, commit_ns, wait_ns, queued_ns;
++} texture_burst_rec;
++static texture_burst_rec g_tb_rec[TB_REC_N];
++static _Atomic uint64_t g_tb_batch, g_tb_dropped;
++static texture_burst_rec *g_tb_current;
++static uint64_t g_tb_pending_dst_ns, g_tb_pending_source_ns, g_tb_pending_origin_ns, g_tb_pending_bytes;
++static int g_tb_suppressed;
++static int tb_on(void) { static int on = -1; if (on < 0) on = getenv("DM_NVN_TSV") != NULL; return on; }
++static int tb_track(void) { return tb_on() && !g_tb_suppressed; }
++static uint64_t tb_now(void) { return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW); }
++static texture_burst_rec *tb_begin(void) {
++    if (!tb_on()) return NULL;
++    for (unsigned i = 0; i < TB_REC_N; i++) {
++        int z = 0; if (!atomic_compare_exchange_strong(&g_tb_rec[i].state, &z, 1)) continue;
++        texture_burst_rec *r = &g_tb_rec[i]; r->batch = atomic_fetch_add(&g_tb_batch, 1) + 1;
++        r->frame = atomic_load(&g_cur_frame); r->submission = g_sub_serial;
++        r->textures = r->mips = r->layers = r->dispatches = r->blits = r->bytes = r->slot_waits = 0;
++        r->dst_ns = r->source_ns = r->origin_ns = r->deswizzle_ns = r->flush_ns = r->commit_ns = r->wait_ns = 0;
++        r->queued_ns = 0; atomic_store(&r->gpu_ns, 0); atomic_store(&r->complete_ns, 0); atomic_store(&r->publish_at_ns, 0); atomic_store(&r->publish_emitted, 0); g_tb_suppressed = 0; return r;
++    }
++    g_tb_pending_dst_ns = g_tb_pending_source_ns = g_tb_pending_origin_ns = g_tb_pending_bytes = 0;
++    g_tb_suppressed = 1; atomic_fetch_add(&g_tb_dropped, 1); return NULL;
++}
++static void tb_published(uintptr_t tag) { texture_burst_rec *r = (texture_burst_rec *)tag; if (r) atomic_store(&r->publish_at_ns, tb_now()); }
++static void tb_gpu_done(texture_burst_rec *r, double start, double end) {
++    if (!r) return;
++    if (end > start && start > 0) atomic_store(&r->gpu_ns, (uint64_t)((end - start) * 1e9));
++    atomic_store(&r->complete_ns, tb_now());
++    int s = atomic_load(&r->state);
++    while ((s == 1 || s == 2 || s == 3 || s == 7) && !atomic_compare_exchange_weak(&r->state, &s, s == 1 ? 6 : s == 2 ? 4 : 5)) {}
++}
++void mtl_texture_burst_tsv(FILE *out) {
++    if (!out) return;
++    uint64_t dropped = atomic_exchange(&g_tb_dropped, 0);
++    if (dropped) fprintf(out, "[texture-burst] schema=1 event=overflow dropped=%llu\n", (unsigned long long)dropped);
++    for (unsigned i = 0; i < TB_REC_N; i++) {
++        texture_burst_rec *r = &g_tb_rec[i]; int s = atomic_load(&r->state);
++        uint64_t pub = atomic_load(&r->publish_at_ns); int pe = 0;
++        if (pub && atomic_compare_exchange_strong(&r->publish_emitted, &pe, 1)) fprintf(out, "[texture-burst] schema=1 event=publish batch=%llu frame=%llu submission=%llu queue_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)(pub > r->queued_ns ? pub - r->queued_ns : 0));
++        if (s == 2) { int expect = 2; if (atomic_compare_exchange_strong(&r->state, &expect, 3)) {
++            fprintf(out, "[texture-burst] schema=1 event=encode batch=%llu frame=%llu submission=%llu textures=%llu mips=%llu layers=%llu dispatches=%llu blits=%llu bytes=%llu slot_waits=%llu dst_wall_ns=%llu protect_wall_ns=%llu origin_wall_ns=%llu deswizzle_wall_ns=%llu flush_wall_ns=%llu commit_wall_ns=%llu wait_wall_ns=%llu\n",
++                (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission,
++                (unsigned long long)r->textures, (unsigned long long)r->mips, (unsigned long long)r->layers, (unsigned long long)r->dispatches, (unsigned long long)r->blits, (unsigned long long)r->bytes, (unsigned long long)r->slot_waits,
++                (unsigned long long)r->dst_ns, (unsigned long long)r->source_ns, (unsigned long long)r->origin_ns, (unsigned long long)r->deswizzle_ns, (unsigned long long)r->flush_ns, (unsigned long long)r->commit_ns, (unsigned long long)r->wait_ns);
++            int expect3 = 3; atomic_compare_exchange_strong(&r->state, &expect3, 7);
++        } else s = expect; }
++        else if (s == 4 || s == 6) {
++            fprintf(out, "[texture-burst] schema=1 event=encode batch=%llu frame=%llu submission=%llu textures=%llu mips=%llu layers=%llu dispatches=%llu blits=%llu bytes=%llu slot_waits=%llu dst_wall_ns=%llu protect_wall_ns=%llu origin_wall_ns=%llu deswizzle_wall_ns=%llu flush_wall_ns=%llu commit_wall_ns=%llu wait_wall_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)r->textures, (unsigned long long)r->mips, (unsigned long long)r->layers, (unsigned long long)r->dispatches, (unsigned long long)r->blits, (unsigned long long)r->bytes, (unsigned long long)r->slot_waits, (unsigned long long)r->dst_ns, (unsigned long long)r->source_ns, (unsigned long long)r->origin_ns, (unsigned long long)r->deswizzle_ns, (unsigned long long)r->flush_ns, (unsigned long long)r->commit_ns, (unsigned long long)r->wait_ns);
++            uint64_t gn = atomic_load(&r->gpu_ns); if (gn) fprintf(out, "[texture-burst] schema=1 event=gpu batch=%llu frame=%llu submission=%llu gpu_ns=%llu complete_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)gn, (unsigned long long)atomic_load(&r->complete_ns)); else fprintf(out, "[texture-burst] schema=1 event=gpu batch=%llu frame=%llu submission=%llu complete_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)atomic_load(&r->complete_ns)); atomic_store(&r->state, 0);
++        } else if (s == 5) {
++            uint64_t gn = atomic_load(&r->gpu_ns); if (gn) fprintf(out, "[texture-burst] schema=1 event=gpu batch=%llu frame=%llu submission=%llu gpu_ns=%llu complete_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)gn, (unsigned long long)atomic_load(&r->complete_ns)); else fprintf(out, "[texture-burst] schema=1 event=gpu batch=%llu frame=%llu submission=%llu complete_ns=%llu\n", (unsigned long long)r->batch, (unsigned long long)r->frame, (unsigned long long)r->submission, (unsigned long long)atomic_load(&r->complete_ns)); atomic_store(&r->state, 0);
++        }
++    }
++}
+ static id<MTL4CommandBuffer> g_up_cb;
+ static id<MTL4ComputeCommandEncoder> g_up_ce;
+ static _Atomic int g_up_alloc_busy[3];
+@@ -3685,6 +3749,7 @@
+ static void up_flush(void) {
+     up_owner_check("up_flush");
+     if (!g_up_cb) return;
++    uint64_t tb_flush0 = g_tb_current ? tb_now() : 0;
+     if (g_up_ce) {
+         nvn_deswz_gpu_m4_invalidate(g_up_ce);
+         m4_end(g_up_ce); g_up_ce = nil;
+@@ -3716,6 +3781,13 @@
+     NSArray *dsts = targets.allObjects;
+     static int lost_at = -2; static uint64_t batch_n; if (lost_at == -2) { const char *e = getenv("DM_TEST_UP_LOST"); lost_at = e ? atoi(e) : -1; } int fake_lost = dsts.count && lost_at > 0 && (int)++batch_n == lost_at;
+     MTL4CommitOptions *o = [MTL4CommitOptions new];
++    texture_burst_rec *tb = g_tb_current;
++    if (tb) {
++        tb->textures = dsts.count; tb->mips = tb->layers = 0;
++        for (id<MTLTexture> t in dsts) { tb->mips += t.mipmapLevelCount; tb->layers += t.arrayLength ? t.arrayLength : 1; }
++        tb->blits = (uint64_t)g_nup_blits;
++        tb->flush_ns += tb_now() - tb_flush0;
++    }
+     atomic_fetch_add(&g_up_pending, 1);
+     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+         if (f.error) { MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String); res_top_once(f.error); gpu_lost_check(f.error, "upload"); }
+@@ -3727,6 +3799,7 @@
+         }
+         double d = f.GPUEndTime - f.GPUStartTime;
+         if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
++        tb_gpu_done(tb, f.GPUStartTime, f.GPUEndTime);
+         @autoreleasepool {
+             for (id<MTLResource> obj in staging) res_remove(obj);
+             [staging removeAllObjects];
+@@ -3738,12 +3811,15 @@
+         atomic_fetch_sub(&g_up_pending, 1);
+         up_wake();
+     }];
++    uint64_t tb_commit0 = tb ? tb_now() : 0;
+     res_commit();
+     cb_end(cb, nil);
+-    rec_commit_upload(cb, o);
++    if (tb) tb->queued_ns = tb_now();
++    rec_commit_upload(cb, o, (uintptr_t)tb);
+     // Outside a submission nothing else hands the encode thread its current block until the next submission, so a batch flushed on the spot stayed a record and every wait for it
+     // (nvnQueueFinish on any thread, up_begin on another) waited for that submission: hand it over now (from PR #141, which found the nvnQueueFinish half)
+     if (!g_cb) rec_publish();
++    if (tb) { tb->commit_ns += tb_now() - tb_commit0; int expect = 1; if (!atomic_compare_exchange_strong_explicit(&tb->state, &expect, 2, memory_order_release, memory_order_relaxed) && expect == 6) atomic_store_explicit(&tb->state, 4, memory_order_release); g_tb_current = NULL; }
+     if (up_reuse()) g_up_slot_want[slot] = MAX(g_up_slot_want[slot], g_up_batch_bytes);
+     g_up_cb = nil;
+     up_diag();
+@@ -3758,8 +3834,11 @@
+     // The slot's last batch may still be only a commit record in the encode thread's current block (rec_commit_upload), which is handed over when it fills or the submission drains:
+     // waiting without handing it over waited for a batch never committed. Little Nightmares II's first render passes zero-filled enough new targets to come round to a slot within one
+     // block, and its RHI thread waited for good inside nvnQueueSubmitCommands (q_cb drains before it waits for the same reason)
+-    if (atomic_load(&g_up_alloc_busy[slot])) rec_publish();
++    uint64_t tb_wait0 = tb_track() ? tb_now() : 0;
++    int tb_slot_waited = atomic_load(&g_up_alloc_busy[slot]);
++    if (tb_slot_waited) rec_publish();
+     up_wait_zero(&g_up_alloc_busy[slot], WS_UPALLOC);
++    uint64_t tb_wait_ns = tb_wait0 ? tb_now() - tb_wait0 : 0;
+     atomic_store(&g_up_alloc_busy[slot], 1); g_up_cur_slot = slot;
+     g_up_batch_bytes = 0; g_up_over_used = 0;
+     [g_up_alloc4[slot] reset];
+@@ -3769,6 +3848,11 @@
+     nvn_deswz_gpu_m4_invalidate(g_up_ce);
+     [g_up_ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()];
+     [g_up_ce setArgumentTable:g_up_ct];
++    g_tb_current = tb_begin(); if (g_tb_current) {
++        g_tb_current->wait_ns = tb_wait_ns; g_tb_current->slot_waits = (uint64_t)tb_slot_waited; g_tb_current->bytes = g_tb_pending_bytes; g_tb_pending_bytes = 0;
++        g_tb_current->dst_ns = g_tb_pending_dst_ns; g_tb_current->source_ns = g_tb_pending_source_ns; g_tb_current->origin_ns = g_tb_pending_origin_ns;
++        g_tb_pending_dst_ns = g_tb_pending_source_ns = g_tb_pending_origin_ns = 0;
++    }
+     if (!g_up_texs) g_up_texs = [NSMutableArray array];
+     if (!g_up_keep) g_up_keep = [NSMutableArray array];
+ }
+@@ -4032,6 +4116,7 @@
+     [g_up_ce setArgumentTable:g_up_ct]; [g_up_ce setComputePipelineState:sp_gather_pso()];
+     at_addr(g_up_ct, dst.gpuAddress + off, 0, "sparse gather table slot", 1); at_addr(g_up_ct, tb.gpuAddress, 1, "sparse gather table slot", 1); at_addr(g_up_ct, params.gpuAddress + poff, 2, "sparse gather table slot", 1);
+     [g_up_ce dispatchThreadgroups:MTLSizeMake((NSUInteger)((n >> 4) + 63) / 64, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
++    if (g_tb_current) g_tb_current->dispatches++;
+     [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];   // the deswizzles read it
+ }
+ int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n); int nvn_sparse_mapped(const void *pool, uint64_t a, uint64_t n);
+@@ -4137,6 +4222,7 @@
+     return need;
+ }
+ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep, id<MTLTexture> prev, const void *span, uint64_t since, unsigned *taken) {
++    uint64_t tb_dst0 = tb_track() ? tb_now() : 0;
+     MTLTextureDescriptor *d = tex_desc(t, 1);
+     if (!d) return nil;
+     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
+@@ -4153,10 +4239,13 @@
+              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
+     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
+     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
++    if (tb_dst0) { uint64_t dt = tb_now() - tb_dst0; if (g_tb_current) g_tb_current->dst_ns += dt; else g_tb_pending_dst_ns += dt; }
+     int sparse = t->pool && nvn_sparse_pool(t->pool);
++    uint64_t tb_src0 = tb_track() ? tb_now() : 0;
+     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
+         *stamp = nvn_dirty_now();
+         if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size); }
++    if (tb_src0) { uint64_t dt = tb_now() - tb_src0; if (g_tb_current) g_tb_current->source_ns += dt; else g_tb_pending_source_ns += dt; }
+     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
+     // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look
+@@ -4173,10 +4262,11 @@
+         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
+     }
+     g_bp_up_bytes += total;
++    if (tb_track()) { if (g_tb_current) g_tb_current->bytes += total; else g_tb_pending_bytes += total; }
+     void *mb; uint64_t mo;
+     // A texture in a large pool (BIG_MIN) or one that holds only textures is read through a buffer of its own, held by the upload batch: a one-time read must not leave that memory wired for good
+     id<MTLBuffer> upsrc = nil; unsigned src_batch = 0;   // the upload batch that holds upsrc (g_up_seq)
+-    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (upsrc) mb = (__bridge void *)upsrc; }
++    if (!linear && !rb_shift && !sparse && g_nvn_deswz_gpu) { up_begin(); src_batch = g_up_seq; uint64_t tb_o0 = g_tb_current ? tb_now() : 0; upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo); if (g_tb_current) g_tb_current->origin_ns += tb_now() - tb_o0; else if (tb_o0) g_tb_pending_origin_ns += tb_now() - tb_o0; if (upsrc) mb = (__bridge void *)upsrc; }
+     // A sparse pool's texture is gathered on the GPU through its page table (sp_pages_gpu), but on the CPU for DM_NVN_ZBLOCK, which counts its blocks there
+     uint64_t *spt = NULL, spn = 0;
+     t_tex_upload_lookup = 1;
+@@ -4184,9 +4274,15 @@
+         spn = sp_pages_n((uint64_t)(uintptr_t)t->mem, t->L.size);
+         if (!(spt = malloc((size_t)spn * sizeof *spt))) MDIE("sparse page table of %llu pages", (unsigned long long)spn);
+         up_begin(); src_batch = g_up_seq;
++        uint64_t tb_o0 = g_tb_current ? tb_now() : 0;
+         if (!sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0)) { free(spt); spt = NULL; }
++        if (g_tb_current) g_tb_current->origin_ns += tb_now() - tb_o0; else if (tb_o0) g_tb_pending_origin_ns += tb_now() - tb_o0;
+     }
+-    int use_gpu = !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
++    uint64_t tb_o0 = tb_track() ? tb_now() : 0;
++    int gpu_eligible = !linear && !rb_shift && g_nvn_deswz_gpu;
++    int addr_ok = 0; if (gpu_eligible && !sparse && !upsrc) addr_ok = mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);
++    int use_gpu = gpu_eligible && (sparse ? spt != NULL : upsrc || addr_ok);
++    if (tb_o0) { uint64_t dt = tb_now() - tb_o0; if (g_tb_current) g_tb_current->origin_ns += dt; else g_tb_pending_origin_ns += dt; }
+     t_tex_upload_lookup = 0;
+     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
+     if (use_gpu) {
+@@ -4199,8 +4295,9 @@
+                 int ok=1;
+                 for(unsigned l=0;l<d.mipmapLevelCount;l++) {
+                     size_t poff;id<MTLBuffer> params=up_param_alloc(&poff);
++                    uint64_t tb_enc0 = g_tb_current ? tb_now() : 0;
+                     if(nvn_deswz_gpu_direct_m4(g_up_ce,g_up_ct,params,poff,(__bridge id<MTLBuffer>)mb,mo,&t->d,l,view)){ok=0;break;}
+-                    g_direct_dispatches++;
++                    g_direct_dispatches++; if (g_tb_current) { g_tb_current->dispatches++; g_tb_current->deswizzle_ns += tb_now() - tb_enc0; }
+                 }
+                 if(ok){[g_up_texs addObject:mt];g_direct_uploads++;if(!g_cb)up_flush();return mt;}
+                 // Any encoded writes must finish before fallback copies replace
+@@ -4225,7 +4322,9 @@
+             for (unsigned y = 0; y < layers; y++) {
+                 if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
+                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
++                uint64_t tb_enc0 = g_tb_current ? tb_now() : 0;
+                 if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
++                if (g_tb_current) { g_tb_current->dispatches++; g_tb_current->deswizzle_ns += tb_now() - tb_enc0; }
+                 up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+                 off += pitch * rows * z;
+             }
+@@ -4263,7 +4362,10 @@
+                 size_t srow = tex_linear_row(t);
+                 if (l || y || z != 1 || srow < pitch || srow * rows > t->L.size) { RED_ONCE(153, "linear texture upload: %ux%u format %#x target %d levels %u is not one 2D level of rows (stride %zu)", t->d.width, t->d.height, t->d.format, t->d.target, t->d.levels, srow); break; }
+                 for (size_t r = 0; r < rows; r++) memcpy((uint8_t *)stg.contents + off + r * pitch, src + r * srow, pitch);
+-            } else if (nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch)) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; }
++            } else { uint64_t tb_cpu_dw0 = g_tb_current ? tb_now() : 0;
++                int dwerr = nvn_deswizzle(&t->d, l, y, src, (uint8_t *)stg.contents + off, pitch);
++                if (g_tb_current) g_tb_current->deswizzle_ns += tb_now() - tb_cpu_dw0;
++                if (dwerr) { RED_ONCE(9, "deswizzle failed format %#x target %d", t->d.format, t->d.target); break; } }
+             if (rb_shift) rb_swap_rows((uint8_t *)stg.contents + off, pitch, rows, z, pitch, pitch * rows, rb_shift);
+             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
+                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
+@@ -18842,7 +18944,7 @@
+     uint64_t v = ++g_snap_v;
+     if (rec_on() && g_rb_started) {   // a block of the encode thread's queue, behind the frame's work (see above)
+         if (on_sub_thread()) rec_publish();   // what the submitting thread recorded outside a submission goes first
+         rec_blk *b = rec_own_begin();
+-        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb);
++        rec_t *r = rec_own_put(b, RO_COMMIT_REAL, 2); r->a[0] = 0; r->a[1] = rec_obj(cb); r->a[2] = 0;
+         r = rec_own_put(b, RO_SIGNAL, 1); r->a[0] = rec_obj(g_snap_ev); r->a[1] = v;
+         r = rec_own_put(b, RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_snap_cmt; r->a[1] = v;
+         rec_own_push(b);
+--- a/dm/gfx/nvn/nvn_rec.h
++++ b/dm/gfx/nvn/nvn_rec.h
+@@ -234,6 +234,7 @@
+         pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the present snapshot's queue commit (nvn_mtl.m res_commit)
+         if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+         rx_mark(); pthread_mutex_unlock(&g_res_commit_mu);
++        tb_published((uintptr_t)a[2]);
+         break; }
+     case RO_SIGNAL:
+         if (after && g_rx_npend && g_rx_npost < (int)(sizeof g_rx_post / sizeof *g_rx_post)) { g_rx_post_ev[g_rx_npost] = rec_id(a[0]); g_rx_post[g_rx_npost].v = a[1]; g_rx_post[g_rx_npost++].p = NULL; g_rx_after = 1; break; }   // its command buffer is not committed yet
+@@ -491,10 +492,11 @@
+     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
+ }
+ // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
+-static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
+-    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); return; }
++static void rec_commit_upload(id cb, MTL4CommitOptions *o, uintptr_t tag) {
++    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_COMMIT_REAL, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[2] = tag; return; }
+     id<MTL4CommandBuffer> buffers[] = {cb};
+     if (o) [g_q4 commit:buffers count:1 options:o]; else [g_q4 commit:buffers count:1];
++    tb_published(tag);
+ }
+ // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
+ // committed after it and after the command buffers committed before it
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -1877,6 +1877,7 @@
+     r->x = r->y = 0; r->width = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0; r->height = o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0;
+ }
+ static void trow(uint64_t f, const char *name, double v);
++void mtl_texture_burst_tsv(FILE *out);   // batch records drained here; Metal feedback never writes the TSV
+ static void rt_acquire(uint64_t period_ns);
+ static void rt_line(char *b, size_t n);
+ static double g_rt_comp_ms;   // The computation the acquire thread declares (ms; 0 = not declared)
+@@ -2917,6 +2918,7 @@
+         trow(f, "@mprotect_calls", (double)(mc_ - pmc)); trow(f, "@mprotect_pages", (double)(mpg_ - pmp)); trow(f, "@mprotect_ms", (mn_ - pmn) / 1e6); pmc = mc_; pmp = mpg_; pmn = mn_;
+         double up_ms = mtl_upload_ns_take() / 1e6; trow(f, "@upload_ms", up_ms);
+         trow(f, "@upload_gpu_ms", mtl_upload_gpu_ns_take() / 1e6);
++        mtl_texture_burst_tsv(g_tsv);
+         // Accounting: number of synchronous creations on the submit thread this frame + a timestamp on the same clock as UIMSG (offline, frames are split into front end / loading / in-run by the loading screen intervals)
+         static uint64_t plib, ppso; uint64_t lib_, pso_; mtl_create_stats(&lib_, &pso_);
+         trow(f, "@lib_new", (double)(lib_ - plib)); trow(f, "@pso_new", (double)(pso_ - ppso));
