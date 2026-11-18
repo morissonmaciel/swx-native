@@ -8,13 +8,15 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 Usage:
   ab_test.py status [--install-dir I]
   ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear
+  ab_test.py set vfr uncapped
+  ab_test.py set vfr-hz auto|30..240|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
   ab_test.py compare <labelA> <labelB> [--install-dir I]
 
 "on" writes an explicit value (visible as `launcher: env K=V` at boot;
 =1, except snap=4 and vfr=relaxed); "off" forces stock (=0, except snap=2);
 "clear" removes the line so the compiled/profile default applies. Every
-install pins the steady-beat baseline: `SWX_VFR=relaxed` at auto Hz (the
+new install defaults to the VFR 60 fps lock: `SWX_VFR=relaxed` at auto Hz (the
 snapshot ring is not pinned, so the compiled default applies unless set
 for A/B); `set vfr off` restores the legacy
 Switch-interval frame step for A/B. `snap 4` is an optional smoothness
@@ -41,6 +43,7 @@ KEYS = {
     "pool": "SWX_GPU_TEXTURE_POOL",
     "bind_once": "SWX_GPU_BIND_ONCE",
     "vfr": "SWX_VFR",
+    "vfr-hz": "SWX_VFR_HZ",
     "yield": "SWX_GPU_KEEPALIVE_YIELD",
     "residency-ub-ring": "SWX_RESIDENCY_UB_RING",
     "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
@@ -94,19 +97,26 @@ def cmd_status(args):
 
 
 def cmd_set(args):
-    if len(args) < 2 or args[0] not in KEYS or args[1] not in ("on", "off", "clear"):
-        print("usage: ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve on|off|clear",
-              file=sys.stderr)
-        raise SystemExit(2)
-    key, mode = KEYS[args[0]], args[1]
-    lines = [ln for ln in read_env_lines()
-             if not ln.strip().startswith((key + "=",))]
-    if mode == "on":
-        lines.append(f"{key}={ON_VALUES.get(args[0], '1')}")
-    elif mode == "off":
-        lines.append(f"{key}={OFF_VALUES.get(args[0], '0')}")
+    if len(args) != 2 or args[0] not in KEYS:
+        raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
+    feature, mode = args
+    if feature == "vfr-hz":
+        if mode not in ("auto", "clear") and mode not in map(str, range(30, 241)):
+            raise SystemExit("usage: ab_test.py set vfr-hz auto|30..240|clear")
+        value = mode
+    elif feature == "vfr" and mode == "uncapped":
+        value = mode
+    elif mode in ("on", "off", "clear"):
+        values = ON_VALUES if mode == "on" else OFF_VALUES
+        value = values.get(feature, "1" if mode == "on" else "0")
+    else:
+        raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
+    key = KEYS[feature]
+    lines = [ln for ln in read_env_lines() if not ln.strip().startswith(key + "=")]
+    if mode != "clear":
+        lines.append(f"{key}={value}")
     write_env_lines(lines)
-    print(f"{key}: {'removed (compiled default applies)' if mode == 'clear' else mode}")
+    print(f"{key}: {'removed (compiled default applies)' if mode == 'clear' else value}")
 
 
 def cmd_collect(args):
@@ -146,6 +156,9 @@ def one_line(path):
         "frames": rep["frames"],
         "longframes": rep["longframe_count"],
         "worst": rep["worst_ms"],
+        "screen_p99_max": max((w["p99_ms"] for w in rep.get("display_windows", [])), default="-"),
+        "screen_late": sum(w["late"] for w in rep["display_windows"]) if rep.get("display_windows") else "-",
+        "screen_discarded": sum(w["discarded"] for w in rep["display_windows"]) if rep.get("display_windows") else "-",
         "lf_up": rep["lf_uploads"],
         "lf_up_worst": rep["lf_uploads_worst_ms"],
         "lf_up_submit_p95": rep.get("lf_upload_submit_p95_ms", 0.0),
@@ -202,7 +215,7 @@ def cmd_compare(args):
             print(f"error: run '{lab}' not collected yet", file=sys.stderr)
             raise SystemExit(2)
         rows.append(one_line(p))
-    cols = ["label", "frames", "longframes", "worst", "lf_up", "lf_up_worst", "lf_up_submit_p95",
+    cols = ["label", "frames", "longframes", "worst", "screen_p99_max", "screen_late", "screen_discarded", "lf_up", "lf_up_worst", "lf_up_submit_p95",
             "lf_gpu", "lf_gpu_worst", "uploads", "mb", "batches",
             "up_per_batch", "u_alloc", "u_rescommit", "u_commit", "u_drain",
             "u_slotwait", "u_oldq", "p_direct", "p_enc", "p_cpu",

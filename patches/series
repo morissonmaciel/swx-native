@@ -7,3 +7,4 @@ dm_vfr_framepace.patch
 dm_gpu_keepalive_yield.patch
 dm_residency_ub_ring.patch
 dm_rt_heap_reserve.patch
+dm_vfr_ratio_load_fix.patch

@@ -1,0 +1,24 @@
+# SWX_VFR: correct BOTW delta-time and UI ratio loads to read state +0xA0.
+# The old delta-time load read +0 and the UI-step load read +0x10, producing the wrong VFR ratio.
+# verify: dm/games/01007EF00011E000/patches.py:0xbd40a100
+# verify: dm/games/01007EF00011E000/patches.py:0xbd40a120
+
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -200,14 +200,14 @@
+     # The first gated stub publishes s0 only in VFR mode, then the second
+     # conditionally skips the stock overwrite at +0x11c.
+     gated_instruction(0x125f118, 0x1e230000,
+-                      [('adrp', 8, FS_STATE_OFF), ('word', 0xbd400100)],
++                      [('adrp', 8, FS_STATE_OFF), ('word', 0xbd40a100)],
+                       'BOTW VFR delta time follows the host ratio')
+     gated_instruction(0x125f11c, 0x1e2c1001, [],
+                       'BOTW VFR delta time preserves stock conversion outside VFR')
+     gated_instruction(0x125f128, 0x1e210800, [],
+                       'BOTW VFR delta time preserves stock overwrite outside VFR')
+     gated_instruction(0x1280ee4, 0x1e210800,
+-                      [('adrp', 9, FS_STATE_OFF), ('word', 0xbd400120)],
++                      [('adrp', 9, FS_STATE_OFF), ('word', 0xbd40a120)],
+                       'BOTW UI animation step follows the host ratio in VFR mode')
+     gated_instruction(0x128106c, 0x1e204009, [('word', 0x1e2e1009)],
+                       'BOTW physics keeps six substeps per frame in VFR mode')

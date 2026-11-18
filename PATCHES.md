@@ -13,10 +13,11 @@ opt-in via `ab_test.py`).
 | 3 | `dm_pso_user_async.patch` | `DM_PSO_USER_ASYNC` | promoted (default ON) | batched `pso_user.tsv` writes, one fflush per flush on a background queue | header ("default ON since Gate 1 pass") |
 | 4 | `dm_gpu_texture_pool.patch` | `SWX_GPU_TEXTURE_POOL` | experimental (stays `=0`) | Gate failed on numbers: pool p95 worse than baseline, frames >33 ms only with pool on | phase-1 gate verdict |
 | 5 | `dm_gpu_bind_once.patch` | `SWX_GPU_BIND_ONCE` | experimental (default off) | suppresses repeated deswizzle binds; counters only, no gate numbers recorded | A/B only |
-| 6 | `dm_vfr_framepace.patch` | `SWX_VFR` | promoted (install default `relaxed`) | steady-beat frame pace instead of 1/2/3-vsync intervals, bounded debt | install default + `docs/vfr_framepace.md` |
+| 6 | `dm_vfr_framepace.patch` | `SWX_VFR` | install default `relaxed`; new cadence A/B pending | display-divisor lock, monotonic fallback, real-time delta measured at game present | `docs/vfr_framepace.md` |
 | 7 | `dm_gpu_keepalive_yield.patch` | `SWX_GPU_KEEPALIVE_YIELD` | promoted (install pins `=1`) | luneta frame p95 16.73–16.89 ms vs 17.41–20.48 (`yield=0`) vs 19.56–21.31 (off); GPU p95 9.95–15.17 vs 15.27–18.66 vs 16.81–19.84 | triple A/B, `ab_results.md` |
 | 8 | `dm_residency_ub_ring.patch` | `SWX_RESIDENCY_UB_RING` | promoted (install pins `=1`) | hot UB rotation 0 vs 34–41 MB/window; residency commits 0.1–1.3 vs 3.1–5.2 ms; frame p95 unchanged; not a fix for the 20–24 ms luneta GPU cost | 2×2 luneta A/B, `ab_results.md` + `docs/residency_ub_ring.md` |
 | 9 | `dm_rt_heap_reserve.patch` | `SWX_RT_HEAP_RESERVE` | experimental, in main, default off | automatic-MTLHeap arenas (16 MB min, 64 MB/arena, 256 MB total) for private RenderTarget heaps; mechanism pass (87–100% stock RT creations eliminated hot, 0 fallback); perf gate open | `ab_results.md` |
+| 10 | `dm_vfr_ratio_load_fix.patch` | `SWX_VFR` | VFR guest timing fix | BOTW delta-time and UI-step VFR stubs load the published ratio at state `+0xA0`; gameplay A/B pending | `docs/vfr_framepace.md` |
 
 ## Out of tree (frozen, not in `series`)
 

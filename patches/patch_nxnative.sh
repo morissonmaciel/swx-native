@@ -14,7 +14,7 @@
 #   # verify: <relpath>             — the file itself must exist and be non-empty
 # A patch counts as applied only when every sentinel holds. Sentinels prove
 # applied-ness, not applied-version: after a patch file's *content* changes,
-# only a revert with the old version (e.g. `git show HEAD:patches/<p>`)
+# a revert with the old version (e.g. `git show HEAD:patches/<p>`)
 # followed by a re-run converges — the script errors out loudly instead of
 # blessing stale code (see the apply loop).
 #
@@ -139,6 +139,53 @@ drop_stale_newfiles() {   # --force only: remove add-file targets of unapplied p
 }
 
 WANT="$(hash_state)"
+
+# Append-only upgrade from the installed VFR v2 stack. Preserve unrelated
+# local core edits (for example PSO warm-demand) by applying only the new
+# trailing ratio-load correction when the exact v2 marker and full prefix
+# sentinels match. The fixed hash also prevents this path from adopting a
+# different or partially upgraded series.
+VFR_V2_PREFIX_COUNT=9
+VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
+VFR_RATIO_FIX="dm_vfr_ratio_load_fix.patch"
+hash_vfr_v2_prefix() {
+    { sed -n "1,${VFR_V2_PREFIX_COUNT}p" "$SERIES"
+      for p in $(sed -n "1,${VFR_V2_PREFIX_COUNT}p" "$SERIES"); do cat "$HERE/$p"; done
+    } | shasum -a 256 | cut -c1-16
+}
+apply_vfr_ratio_append() (
+    if [ "$(hash_vfr_v2_prefix)" != "$VFR_V2_PREFIX_HASH" ] ||
+       [ "$(sed -n "$((VFR_V2_PREFIX_COUNT + 1))p" "$SERIES")" != "$VFR_RATIO_FIX" ] ||
+       [ -n "$(sed -n "$((VFR_V2_PREFIX_COUNT + 2))p" "$SERIES")" ]; then
+        exit 1
+    fi
+    i=0
+    for p in $PATCHES; do
+        i=$((i + 1))
+        [ "$i" -le "$VFR_V2_PREFIX_COUNT" ] || break
+        is_applied "$p" || exit 1
+    done
+    [ "$i" -eq "$((VFR_V2_PREFIX_COUNT + 1))" ] || exit 1
+    if is_applied "$VFR_RATIO_FIX"; then
+        stack_verified || exit 1
+    else
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
+        is_applied "$VFR_RATIO_FIX" || exit 1
+        stack_verified || exit 1
+    fi
+    echo "$WANT" > "$MARKER"
+)
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
+   [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ] &&
+   [ "$(hash_vfr_v2_prefix)" = "$VFR_V2_PREFIX_HASH" ]; then
+    if ! apply_vfr_ratio_append; then
+        echo "[ERROR] append-only VFR ratio upgrade failed preflight/apply; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: appended VFR ratio-load fix ($WANT)."
+    exit 0
+fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then
     if stack_verified; then
         echo "patches: already applied and verified ($WANT)."
@@ -146,6 +193,58 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; t
     fi
     echo "warning: marker matches but the tree does not verify (manual edits? partial apply?). Re-checking from scratch; use --force to normalize first." >&2
     rm -f "$MARKER"
+fi
+
+VFR_CURRENT="dm_vfr_framepace.patch"
+VFR_OLD="compat/dm_vfr_framepace-v1.patch"
+
+migrate_vfr() (
+    # Preflight both diffs on copies of the patch's files before touching
+    # the installed stack. Later patches may remain applied in this upgrade.
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/swx-vfr.XXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
+    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$VFR_OLD" "$HERE/$VFR_CURRENT" |
+        sort -u | while IFS= read -r f; do
+            if [ -f "$CORE/$f" ]; then
+                mkdir -p "$stage/$(dirname "$f")"
+                cp -p "$CORE/$f" "$stage/$f"
+            fi
+        done
+    apply_vfr_migration "$stage"
+)
+
+apply_vfr_migration() (
+    CORE="$1"
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$VFR_OLD" >/dev/null || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$VFR_OLD" >/dev/null || exit 1
+    ! is_applied "$VFR_OLD" || exit 1
+    newfile_targets "$VFR_OLD" | while IFS= read -r f; do
+        if [ -e "$CORE/$f" ] && [ ! -s "$CORE/$f" ]; then rm -f "$CORE/$f"; fi
+    done
+    patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$VFR_CURRENT" >/dev/null || exit 1
+    patch --batch -V none -p1 -d "$CORE" < "$HERE/$VFR_CURRENT" >/dev/null || exit 1
+    is_applied "$VFR_CURRENT"
+)
+
+if [ "$FORCE" -eq 0 ] && ! is_applied "$VFR_CURRENT" && is_applied "$VFR_OLD"; then
+    complete=1
+    for p in $PATCHES; do
+        if [ "$p" != "$VFR_CURRENT" ] && ! is_applied "$p"; then complete=0; fi
+    done
+    if [ "$complete" -eq 1 ]; then
+        if ! migrate_vfr; then
+            echo "[ERROR] cannot upgrade the old VFR patch over this core; the stack was left as-is." >&2
+            exit 1
+        fi
+        rm -f "$MARKER"
+        if ! apply_vfr_migration "$CORE" || ! stack_verified; then
+            echo "[ERROR] VFR upgrade did not verify." >&2
+            exit 1
+        fi
+        echo "$WANT" > "$MARKER"
+        echo "patches: upgraded VFR ($WANT)."
+        exit 0
+    fi
 fi
 
 # 0. normalize first when the tree is not the verified marked state:
@@ -160,6 +259,7 @@ fi
 any_applied() {
     for p in $PATCHES; do
         is_applied "$p" && return 0
+        if [ "$p" = "$VFR_CURRENT" ] && is_applied "$VFR_OLD"; then return 0; fi
     done
     return 1
 }
@@ -175,6 +275,9 @@ if { [ "$FORCE" -eq 1 ] || any_applied; } then
         # content forward-applies with exit 0 (proven 2026-11-16: tripled
         # split hunks, phantom singles). A revert that does not clear the
         # sentinels is a hard stop, never a warning to run past.
+        if [ "$p" = "$VFR_CURRENT" ] && ! is_applied "$p" && is_applied "$VFR_OLD"; then
+            p="$VFR_OLD"
+        fi
         if is_applied "$p"; then
             patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$p" >/dev/null 2>&1 || true
             if is_applied "$p"; then

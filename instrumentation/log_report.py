@@ -61,6 +61,7 @@ def classify(line):
 
 def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
+           "display_windows": [], "display_link": {}, "vfr_windows": [], "timing_windows": [],
            "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0,
            "ka_kernels": 0, "ka_gpu_ms": 0.0, "ka_max_ms": 0.0,
            "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0,
@@ -91,6 +92,33 @@ def report(path):
                 rep.setdefault("submit_pipeline_ms", []).append(float(m.group(1)))
             if "[longframe]" in line:
                 rep["longframes"].append(classify(line))
+            shown = re.search(
+                r"on-screen up to frame (\d+): (\d+) frames, dropped (\d+) "
+                r"\(discarded (\d+)\), p99 ([\d.]+) ms", line)
+            if shown:
+                present, count, dropped, discarded = map(int, shown.groups()[:4])
+                rep["display_windows"].append({
+                    "present": present, "shown": count - discarded, "late": dropped - discarded,
+                    "discarded": discarded, "p99_ms": float(shown[5]),
+                })
+            link = re.search(
+                r"display link up to tick \d+: ticks (\d+), presents (\d+), empty ticks (\d+) "
+                r"\(held for the present interval (\d+)\), old frames dropped by merging (\d+)", line)
+            if link:
+                fields = ("ticks", "presents", "empty", "held", "merged")
+                rep["display_link"] = dict(zip(fields, map(int, link.groups())))
+            if ("[nvn] vfr frame pace" in line.lower() or "[nvn] vfr cadence" in line.lower()
+                    or "[nvn] vfr up to present" in line.lower()):
+                rep["vfr_windows"].append(line.strip())
+            timing = re.search(
+                r"timing up to frame (\d+): frame time p50 [\d.]+ / p95 ([\d.]+).*?;"
+                r" GPU p50 ([\d.]+) / p95 ([\d.]+)", line)
+            if timing:
+                rep["timing_windows"].append({
+                    "present": int(timing[1]), "frame_p95_ms": float(timing[2]),
+                    "gpu_p50_ms": float(timing[3]), "gpu_p95_ms": float(timing[4]),
+                })
+
             m = re.search(r"keep-alive up to frame \d+: (\d+) kernels, ([\d.]+) GPU ms, max ([\d.]+) ms, (\d+) stopped, stop-cb max ([\d.]+) ms", line)
             if m:
                 rep["ka_kernels"] += int(m.group(1)); rep["ka_gpu_ms"] += float(m.group(2));
@@ -188,6 +216,13 @@ def main(argv=None):
           f"slotwait {rep.get('up_slotwait_ms_total', 0.0):.1f} ms + oldq {rep.get('up_oldq_ms_total', 0.0):.1f} ms")
     print(f"upload paths: {rep.get('up_direct_total', 0)} direct + {rep.get('up_enc_total', 0)} GPU-encode + {rep.get('up_cpu_total', 0)} CPU")
     print(f"upload path ms: direct {rep.get('up_pdi_ms_total', 0.0):.1f} + enc {rep.get('up_pen_ms_total', 0.0):.1f} + cpu {rep.get('up_pcp_ms_total', 0.0):.1f}")
+    if windows := rep["display_windows"]:
+        print(f"screen: {sum(w['shown'] for w in windows)} shown, "
+              f"{sum(w['late'] for w in windows)} late, "
+              f"{sum(w['discarded'] for w in windows)} discarded, "
+              f"worst window p99 {max(w['p99_ms'] for w in windows):.2f} ms")
+    if rep["display_link"]:
+        print(f"display link (last cumulative report): {rep['display_link']}")
     print(f"frame-step transitions: {', '.join(rep['steps']) if rep['steps'] else 'none'}")
     for r in rep["red"][:10]:
         print(f"RED: {r}")

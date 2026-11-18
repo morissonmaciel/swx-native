@@ -49,6 +49,11 @@ application walks in order and `--force` reverts walk in reverse.
    instead of lying (this exact blind-trust failure happened once,
    2026-11-16). A fully-patched tree that lost its marker is adopted, not
    rebuilt.
+   The VFR v1 upgrade keeps an exact copy of the previous diff under
+   `patches/compat/`. If the rest of the stack verifies, the installer
+   preflights the old reverse and the new apply on scratch copies,
+   then upgrades VFR in place. The next build fingerprints the changed
+   game rewrite rules and regenerates the executable's stubs.
 4. `--force` normalizes first: best-effort revert in reverse order (a later
    patch's context depends on the earlier ones, so forward-order revert
    fails), then a normal run. The way out of half-applied or hand-edited

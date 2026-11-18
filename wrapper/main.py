@@ -481,20 +481,19 @@ def redirect_saves(cfg, master, phase_log):
             kept = [ln for ln in f.read().splitlines()
                     if not ln.strip().startswith(("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=", "DM_PSO_PAIRS=",
                                                  "DM_SAVE_ASYNC=", "DM_PSO_USER_ASYNC=",
-                                                 "SWX_VFR=", "SWX_VFR_HZ=",
                                                  "SWX_GPU_KEEPALIVE=", "SWX_GPU_KEEPALIVE_YIELD=",
                                                  "SWX_RESIDENCY_UB_RING="))]
-    # Steady-beat frame pace baseline, pinned every install: SWX_VFR=relaxed
-    # (the game's clock follows the host beat; =0 restores the legacy
-    # Switch-interval frame step), SWX_VFR_HZ=auto (window refresh up to
-    # 120 Hz; 60 with no window). DM_PRESENT_SNAP is not pinned: the compiled
-    # default (stock ring) applies unless set by hand for A/B (snap 2/4).
+    # Keep explicit player VFR choices across reinstalls. A new install
+    # uses the VFR 60 fps lock and derives display-link rate from the panel.
     # DM_NVN_SYNC_LAG is not pinned either and must stay out of the env.
     # DM_SAVE_ASYNC=1 (swapped-out save deleted on
     # a background thread; clone+swap stay synchronous). SWX switches
     # default in code (keep-alive on on macOS; upload split opt-in);
     # DM tuning the user set by hand (MAX_TEX, KEEPALIVE_US, …) passes
     # through untouched via kept.
+    vfr_defaults = {"SWX_VFR": "relaxed", "SWX_VFR_HZ": "auto"}
+    for line in kept:
+        vfr_defaults.pop(line.strip().partition("=")[0], None)
     shaders_dir = os.path.join(cfg["install_dir"], "shaders")
     os.makedirs(shaders_dir, exist_ok=True)
     pso_user = os.path.join(shaders_dir, "pso_user.tsv")
@@ -510,8 +509,8 @@ def redirect_saves(cfg, master, phase_log):
         f.write(f"DM_PSO_ARCHIVE={pso_archive}\n")
         if os.path.isfile(pso_pairs):
             f.write(f"DM_PSO_PAIRS={pso_pairs}\n")
-        f.write("SWX_VFR=relaxed\n")
-        f.write("SWX_VFR_HZ=auto\n")
+        for key, value in vfr_defaults.items():
+            f.write(f"{key}={value}\n")
         f.write("DM_SAVE_ASYNC=1\n")
         f.write("DM_PSO_USER_ASYNC=1\n")
         f.write("SWX_GPU_KEEPALIVE=1\n")
@@ -519,7 +518,7 @@ def redirect_saves(cfg, master, phase_log):
         f.write("SWX_RESIDENCY_UB_RING=1\n")
     log_line(master, f"save-redirect: wrote DM_SAVE, DM_PSO_USER, DM_PSO_ARCHIVE"
                      f"{', DM_PSO_PAIRS' if os.path.isfile(pso_pairs) else ''}, "
-                     f"SWX_VFR=relaxed, SWX_VFR_HZ=auto, DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1, SWX_GPU_KEEPALIVE=1, SWX_GPU_KEEPALIVE_YIELD=1, SWX_RESIDENCY_UB_RING=1 to {env_path}")
+                     f"DM_SAVE_ASYNC=1, DM_PSO_USER_ASYNC=1, SWX_GPU_KEEPALIVE=1, SWX_GPU_KEEPALIVE_YIELD=1, SWX_RESIDENCY_UB_RING=1 to {env_path}")
 
     moved, kept_back = [], []
     old_save = os.path.join(as_dir, "save")
