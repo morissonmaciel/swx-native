@@ -143,7 +143,8 @@ WANT="$(hash_state)"
 # Exact append-only upgrades for known installed prefixes. The ordered stack
 # currently ends with ratio (#10), worker (#11), queue policy (#12), alpha
 # guard (#13), texture-pool correctness repair (#14), burst attribution
-# (#15), burst host lifetime (#16), and upload batch blit prototype (#17).
+# (#15), burst host lifetime (#16), upload batch blit prototype (#17), and
+# save cleanup worker (#18).
 # Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
@@ -171,6 +172,9 @@ TEXTURE_BURST_HOST_PREFIX_HASH="e65ca40b937099e0"
 UP_BLIT_REC="dm_up_blit_rec.patch"
 UP_BLIT_PREFIX_COUNT=16
 UP_BLIT_PREFIX_HASH="95af732262d69275"
+SAVE_WORKER="swx_save_cleanup_worker.patch"
+SAVE_WORKER_PREFIX_COUNT=17
+SAVE_WORKER_PREFIX_HASH="2e8ec3cfb8de1dfb"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -260,6 +264,18 @@ append_up_blit_rec() (
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$UP_BLIT_REC" >/dev/null || exit 1
         is_applied "$UP_BLIT_REC" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_save_worker() (
+    [ "$(hash_series_prefix "$SAVE_WORKER_PREFIX_COUNT")" = "$SAVE_WORKER_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$SAVE_WORKER_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$SAVE_WORKER_PREFIX_COUNT" || exit 1
+    if ! is_applied "$SAVE_WORKER"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
+        is_applied "$SAVE_WORKER" || exit 1
     fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
@@ -473,6 +489,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$SAVE_WORKER_PREFIX_HASH" ]; then
+    if ! append_save_worker; then
+        echo "[ERROR] append-only save cleanup worker failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended save cleanup worker ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$UP_BLIT_PREFIX_HASH" ]; then

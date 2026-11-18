@@ -63,10 +63,12 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   experiment, not the default): the frame-ahead overlap (`DM_NVN_SYNC_LAG`)
   was removed (not approved as default — subjective call, Gates 3a/3b
   mixed); numbers preserved in `instrumentation/ab_results.md`.
-- `DM_SAVE_ASYNC=1` (pinned by the installer; `=0` restores stock):
-  swapped-out save versions delete on a background thread while
-  clone+swap stay synchronous — commits measure sub-ms, no save-attributed
-  longframe in the corpus. `DM_PSO_USER_ASYNC=1` (pinned; `=0` restores
+- `SWX_SAVE_ASYNC=1` (pinned by the installer; `=0` restores stock):
+  swapped-out save versions delete on a persistent background cleanup
+  worker while clone+swap stay synchronous — commits measure sub-ms,
+  no save-attributed longframe in the corpus. `DM_SAVE_ASYNC` remains
+  only as a legacy alias: `SWX_SAVE_ASYNC` wins when both are set, both
+  absent means on. `DM_PSO_USER_ASYNC=1` (pinned; `=0` restores
   stock): `pso_user.tsv` rows batch in memory, one fflush per flush.
 - To re-measure after the I/O work lands: same fixed route, `instrumentation/ab_test.py`
   (`collect`/`compare` labels). Expected to move: burst `submit+present`
@@ -82,9 +84,9 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
   Pools/overlap are future work, not this split.
 - Single white-frame display drops happen rarely in stock too; ring 4
   absorbs them.
-- Autosave commits are background-cleaned by default (`DM_SAVE_ASYNC=1`):
+- Autosave commits are background-cleaned by default (`SWX_SAVE_ASYNC=1`):
   clone+swap stay synchronous (~1 ms measured), the swapped-out tree is
-  deleted off-thread. Forced writes (manual/config save) still show as
+  deleted by a persistent worker off-thread. Forced writes (manual/config save) still show as
   sub-detector ripples in flat regions — the remaining floor is clone+swap
   + locks, which only a durability-changing redesign would remove.
 - First-seen pipeline builds can stall the submit thread once (rows

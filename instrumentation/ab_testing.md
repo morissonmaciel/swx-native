@@ -164,6 +164,20 @@ creations and/or residency-commit/submit cost in the repeated stretch down
 creation/growth on re-entry and transitions, not the luneta's continuous GPU
 cost.
 
+## Save-async gate (promoted, default ON)
+
+`save on` writes only `SWX_SAVE_ASYNC=1` and drops any `DM_SAVE_ASYNC=`
+line; `save off` writes only `SWX_SAVE_ASYNC=0` (legacy synchronous
+path); `save clear` removes both lines so the compiled default (on)
+applies. `DM_SAVE_ASYNC` remains only as a legacy alias:
+`SWX_SAVE_ASYNC` wins when both are set, both absent means on.
+
+Single-install A/B: `set save off`, same save/route →
+`collect save-off` → `set save on`, same save/route →
+`collect save-on` → `compare save-off save-on`. Pass = latest save
+loads, zero FS errors, no new reproducible hitch; cadence benefit
+inconclusive if back-to-back saves never overlap an in-flight cleanup.
+
 ## Run order (phases 0–2, no rebuilds needed)
 
 1. Historical Gate 1 (done; split patch since removed — the recipe below

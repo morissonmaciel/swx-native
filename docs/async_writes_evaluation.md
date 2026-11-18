@@ -64,19 +64,26 @@ swap still on-thread — re-measure; escalate to S1 only if frames still tip.
 re-commits. Not indicated by current data (2–4 commits/run, seconds apart).
 Parked.
 
-Recommendation: S2 under `DM_SAVE_ASYNC=1` (default off), documented as step
-1 of the switch's meaning; S1 stays a documented escalation, not this slice.
+Recommendation: S2 under `SWX_SAVE_ASYNC=1` (`DM_SAVE_ASYNC` legacy alias;
+`SWX_SAVE_ASYNC` wins when both are set, both absent means on), documented
+as step 1 of the switch's meaning; S1 stays a documented escalation, not this slice.
 
 ## 5. Slice 1 plan + gates — IMPLEMENTED 2026-11-16, pending Gate 1
 
 - Prototype: `patches/dm_save_async.patch` (single file, `hle_fs.c`,
-  switch `DM_SAVE_ASYNC`, default off) — S2 as designed, with one
-  simplification from the sketch: plain joinable pthread instead of a serial
-  queue (no queue lifecycle; pre-clear join bounds reuse). Only the
-  post-swap `rm_tree` leaves the frame; clone+swap stay synchronous, so the
-  durability contract is unchanged and no read-after-commit audit was needed
-  for this slice (S1 would need it). Refused-commit path and cloud sender
-  untouched. A/B via `instrumentation/ab_test.py set save on/off`.
+  switch `SWX_SAVE_ASYNC` with `DM_SAVE_ASYNC` as legacy alias, on when
+  both absent, `=0` restores stock) — S2 as designed, superseded by
+  `patches/swx_save_cleanup_worker.patch`: a persistent
+  `QOS_CLASS_BACKGROUND` cleanup worker (FIFO depth 4, per-generation
+  `mkdtemp` staging, orphan recovery on mount) replaces the plain
+  joinable pthread (no queue lifecycle; pre-clear join bounds reuse).
+  Only the post-swap `rm_tree` leaves the frame; clone+swap stay
+  synchronous, so the durability contract is unchanged and no
+  read-after-commit audit was needed for this slice (S1 would need it).
+  Refused-commit path and cloud sender untouched. A/B via
+  `instrumentation/ab_test.py set save on/off` on a single install
+  (same save, same route): `on`/`off` write only `SWX_SAVE_ASYNC=1`/`=0`
+  and drop the alias line, `clear` removes both.
 - Prerequisite audit (done 2026-11-16, no code needed): S2 keeps the swap
   synchronous, so durability is identical — no read-after-commit proof
   required. Commit-path coverage, verified by code + log: all four commit
@@ -95,7 +102,9 @@ Recommendation: S2 under `DM_SAVE_ASYNC=1` (default off), documented as step
   off the frame path (clone+swap timings move to the background queue's
   log context or vanish from frame-attributed cost), zero new longframe
   class, holds unchanged-or-better. Success = save cost no longer
-  frame-attributed, not a fps number.
+  frame-attributed, not a fps number. Pass = latest save loads, zero FS
+  errors, no new reproducible hitch; cadence benefit inconclusive if
+  back-to-back saves never overlap an in-flight cleanup.
 - Decision: keep env-gated; promote to default only with a second corpus
   (different area, longer session).
 

@@ -39,7 +39,7 @@ APP_SUPPORT_ENV = os.path.expanduser(
 KEYS = {
     "keepalive": "SWX_GPU_KEEPALIVE",
     "snap": "DM_PRESENT_SNAP",
-    "save": "DM_SAVE_ASYNC",
+    "save": "SWX_SAVE_ASYNC",
     "pso": "DM_PSO_USER_ASYNC",
     "pool": "SWX_GPU_TEXTURE_POOL",
     "bind_once": "SWX_GPU_BIND_ONCE",
@@ -114,7 +114,8 @@ def cmd_set(args):
     else:
         raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
     key = KEYS[feature]
-    lines = [ln for ln in read_env_lines() if not ln.strip().startswith(key + "=")]
+    drop = (key + "=", "DM_SAVE_ASYNC=") if feature == "save" else (key + "=",)
+    lines = [ln for ln in read_env_lines() if not ln.strip().startswith(drop)]
     if mode != "clear":
         lines.append(f"{key}={value}")
     write_env_lines(lines)
