@@ -1,0 +1,62 @@
+# SWX VFR: run BOTW's quick-menu alpha correction on every positive fractional animation frame.
+# Stock, movie, scripted-override, zero, negative, and unordered frame comparisons retain their original paths.
+# verify: dm/games/01007EF00011E000/patches.py:BOTW VFR quick-menu alpha guard
+
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -66,6 +66,14 @@
+             elif kind == 'bhi':
+                 off = labels[op[1]] - here()
+                 emit(0x54000008 | (((off >> 2) & 0x7ffff) << 5))
++            elif kind == 'bcond':
++                cond, target = op[1:]
++                off = labels[target] - here()
++                if off & 3 or not -(1 << 20) <= off < (1 << 20):
++                    raise AssertionError('conditional branch target is out of range')
++                emit(0x54000000 | (((off >> 2) & 0x7ffff) << 5) | cond)
++            elif kind == 'b_abs':
++                emit(B(here(), op[1]))
+             elif kind in ('cbz', 'cbnz'):
+                 reg, target, is_x = op[1:]
+                 off = labels[target] - here()
+@@ -211,6 +219,40 @@
+                       'BOTW UI animation step follows the host ratio in VFR mode')
+     gated_instruction(0x128106c, 0x1e204009, [('word', 0x1e2e1009)],
+                       'BOTW physics keeps six substeps per frame in VFR mode')
++
++    # MainShortCut's HoldShortCutBg corrects P_Capture_00's alpha only when
++    # the UI animation lands exactly on frame 1. Fractional VFR steps can
++    # cross that boundary without equality and leave the captured backdrop
++    # transparent. Preserve the exact stock comparison outside the host-owned
++    # game clock, while VFR runs the original correction for every positive
++    # frame. s0/s1 remain live through the stock compare; x16/x17 are dead
++    # across both original branch destinations (main+0xe26a3c/e26a54).
++    fs_site(0xe26a30, '01102e1e')  # fmov s1, #1.0
++    fs_site(0xe26a34, '0020211e')  # fcmp s0, s1
++    fs_site(0xe26a38, 'e1000054')  # b.ne main+0xe26a54
++    start = here()
++    emit_ops([
++        ('adrp', 16, FS_STATE_OFF),
++        ('word', 0xb940aa11),             # ldr w17,[x16,#0xa8] VFR mode
++        ('cbz', 17, 'stock', False),
++        ('word', 0xb9400611),             # movie frame-step ownership
++        ('cbnz', 17, 'stock', False),
++        ('word', 0xb9402611),             # scripted guest frame-step override
++        ('cbnz', 17, 'stock', False),
++        ('word', 0x1e202008),             # fcmp s0, #0.0
++        ('bcond', 12, 'vfr_correct'),     # b.gt: positive, ordered UI frame
++        ('b_abs', 0xe26a54),               # zero, negative or NaN: skip alpha correction
++        ('label', 'stock'),
++        ('word', 0x1e212000),             # original fcmp s0, s1
++        ('bcond', 1, 'stock_skip'),        # original b.ne decision
++        ('b_abs', 0xe26a3c),               # equal: run the original alpha correction
++        ('label', 'stock_skip'),
++        ('b_abs', 0xe26a54),
++        ('label', 'vfr_correct'),
++        ('b_abs', 0xe26a3c),
++    ])
++    fs_put(0xe26a38, [B(0xe26a38, start)],
++           'BOTW VFR quick-menu alpha guard: preserve stock equality and correct every positive VFR frame')
+     ctx.capabilities.add('VFR_FRAMEPACE')
+     # Held buttons: sead::ControllerBase::updateDerivativeParams_ (main+0xeb0ef0) adds s8 to each held button's count, a constant 1.0 (main+0xeb0f78..88), and raises the repeat bit
+     # when fmod(count - delay, pulse) < s8: delays and pulses are counted in frames, so at 60 fps menus repeated twice as fast as at 30 (MacNativeGames 866beb9). s8 is now the VFR's

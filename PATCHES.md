@@ -19,6 +19,7 @@ opt-in via `ab_test.py`).
 | 9 | `dm_rt_heap_reserve.patch` | `SWX_RT_HEAP_RESERVE` | experimental, in main, default off | automatic-MTLHeap arenas (16 MB min, 64 MB/arena, 256 MB total) for private RenderTarget heaps; mechanism pass (87–100% stock RT creations eliminated hot, 0 fallback); perf gate open | `ab_results.md` |
 | 10 | `dm_vfr_ratio_load_fix.patch` | `SWX_VFR` | VFR guest timing fix | BOTW delta-time and UI-step VFR stubs load the published ratio at state `+0xA0`; gameplay A/B pending | `docs/vfr_framepace.md` |
 | 11 | `dm_present_worker.patch` | `SWX_VFR` | experimental (active whenever VFR armed; no new flags) | worker waits for source-safe completion, keeps cancellation observable without advancing `g_pq_done` over unfinished reads, and blocks promotion after purge; ready FIFO of 2; `SWX_VFR=0` stock untouched; gameplay A/B pending | `docs/vfr_framepace.md` |
+| 12 | `dm_vfr_quick_menu_alpha.patch` | `SWX_VFR` | experimental (VFR-only quick-menu alpha guard; visual A/B pending) | Runs BOTW 1.9.0's existing capture-alpha correction at every positive VFR animation frame, while preserving the stock equality branch and movie/scripted-override paths | `docs/vfr_quick_menu_alpha.md` |
 
 ## Out of tree (frozen, not in `series`)
 

@@ -40,6 +40,11 @@ previous implementation.
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
 
+The VFR-only quick-menu capture alpha guard is documented in
+[`vfr_quick_menu_alpha.md`](vfr_quick_menu_alpha.md). It preserves the stock
+frame-1 comparison and uses BOTW's existing alpha correction on positive
+fractional UI frames when VFR owns the clock. Its visual A/B remains pending.
+
 ## Etapa 1 — present worker + ready FIFO (`dm_present_worker.patch`)
 
 Active whenever VFR is armed (`SWX_VFR=relaxed`/`uncapped` with a resolved

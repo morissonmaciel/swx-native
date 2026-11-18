@@ -150,6 +150,9 @@ VFR_RATIO_PREFIX_HASH="08aa37472c9ef5e5"
 VFR_RATIO_FIX="dm_vfr_ratio_load_fix.patch"
 PRESENT_WORKER="dm_present_worker.patch"
 PRESENT_WORKER_OLD="compat/dm_present_worker-v1.patch"
+QUICK_MENU_ALPHA="dm_vfr_quick_menu_alpha.patch"
+PRESENT_WORKER_PREFIX_COUNT=11
+PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 hash_series_prefix() {
     n="$1"
     { sed -n "1,${n}p" "$SERIES"
@@ -168,7 +171,8 @@ append_vfr_ratio_and_worker() (
     [ "$(hash_series_prefix "$VFR_V2_PREFIX_COUNT")" = "$VFR_V2_PREFIX_HASH" ] || exit 1
     [ "$(hash_series_prefix "$VFR_RATIO_PREFIX_COUNT")" = "$VFR_RATIO_PREFIX_HASH" ] || exit 1
     [ "$(sed -n '11p' "$SERIES")" = "$PRESENT_WORKER" ] || exit 1
-    [ -z "$(sed -n '12p' "$SERIES")" ] || exit 1
+    [ "$(sed -n '12p' "$SERIES")" = "$QUICK_MENU_ALPHA" ] || exit 1
+    [ -z "$(sed -n '13p' "$SERIES")" ] || exit 1
     if [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ]; then
         verify_series_prefix "$VFR_V2_PREFIX_COUNT" || exit 1
         if ! is_applied "$VFR_RATIO_FIX"; then
@@ -185,13 +189,18 @@ append_vfr_ratio_and_worker() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
         is_applied "$PRESENT_WORKER" || exit 1
     fi
+    if ! is_applied "$QUICK_MENU_ALPHA"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
+        is_applied "$QUICK_MENU_ALPHA" || exit 1
+    fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
 hash_present_worker_state() {
     old_patch="$1"
-    { cat "$SERIES"
-      for p in $PATCHES; do
+    { sed -n "1,${PRESENT_WORKER_PREFIX_COUNT}p" "$SERIES"
+      for p in $(sed -n "1,${PRESENT_WORKER_PREFIX_COUNT}p" "$SERIES"); do
           if [ "$p" = "$PRESENT_WORKER" ]; then cat "$HERE/$old_patch"; else cat "$HERE/$p"; fi
       done
     } | shasum -a 256 | cut -c1-16
@@ -203,13 +212,16 @@ apply_present_worker_migration() (
     ! is_applied "$old_patch" || exit 1
     patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
-    is_applied "$PRESENT_WORKER"
+    is_applied "$PRESENT_WORKER" || exit 1
+    patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
+    patch --batch -V none -p1 -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
+    is_applied "$QUICK_MENU_ALPHA"
 )
 migrate_present_worker() (
     old_patch="$1"
     stage="$(mktemp -d "${TMPDIR:-/tmp}/swx-present-worker.XXXXXX")"
     trap 'rm -rf "$stage"' EXIT
-    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" | sort -u |
+    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" "$HERE/$QUICK_MENU_ALPHA" | sort -u |
         while IFS= read -r f; do
             if [ -f "$CORE/$f" ]; then mkdir -p "$stage/$(dirname "$f")"; cp -p "$CORE/$f" "$stage/$f"; fi
         done
@@ -236,6 +248,27 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
         exit 1
     fi
     echo "patches: appended VFR ratio and present-worker fixes ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$PRESENT_WORKER_PREFIX_HASH" ]; then
+    [ "$(hash_series_prefix "$PRESENT_WORKER_PREFIX_COUNT")" = "$PRESENT_WORKER_PREFIX_HASH" ] || {
+        echo "[ERROR] VFR alpha-guard upgrade prefix does not match the installed worker." >&2; exit 1;
+    }
+    [ "$(sed -n '12p' "$SERIES")" = "$QUICK_MENU_ALPHA" ] && [ -z "$(sed -n '13p' "$SERIES")" ] || {
+        echo "[ERROR] VFR alpha-guard series position changed; refusing an ambiguous append." >&2; exit 1;
+    }
+    verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || {
+        echo "[ERROR] installed worker prefix does not verify; refusing alpha-guard upgrade." >&2; exit 1;
+    }
+    if ! is_applied "$QUICK_MENU_ALPHA"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || {
+            echo "[ERROR] VFR alpha-guard preflight failed; core left untouched." >&2; exit 1;
+        }
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$QUICK_MENU_ALPHA" >/dev/null || exit 1
+    fi
+    stack_verified || { echo "[ERROR] VFR alpha-guard stack verification failed." >&2; exit 1; }
+    echo "$WANT" > "$MARKER"
+    echo "patches: appended VFR quick-menu alpha guard ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then

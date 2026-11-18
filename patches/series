@@ -9,3 +9,4 @@ dm_residency_ub_ring.patch
 dm_rt_heap_reserve.patch
 dm_vfr_ratio_load_fix.patch
 dm_present_worker.patch
+dm_vfr_quick_menu_alpha.patch
