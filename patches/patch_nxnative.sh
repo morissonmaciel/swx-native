@@ -150,6 +150,11 @@ VFR_RATIO_PREFIX_HASH="08aa37472c9ef5e5"
 VFR_RATIO_FIX="dm_vfr_ratio_load_fix.patch"
 PRESENT_WORKER="dm_present_worker.patch"
 PRESENT_WORKER_OLD="compat/dm_present_worker-v1.patch"
+PRESENT_QUEUE_POLICY="dm_vfr_queue_policy.patch"
+PRESENT_WORKER_PREFIX_COUNT=11
+PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
+PRESENT_QUEUE_POLICY_PRE_RATE_HASH="b188e4d88f1c537e"
+PRESENT_QUEUE_POLICY_PRE_RATE="compat/dm_vfr_queue_policy-display-rate-v1.patch"
 hash_series_prefix() {
     n="$1"
     { sed -n "1,${n}p" "$SERIES"
@@ -168,7 +173,8 @@ append_vfr_ratio_and_worker() (
     [ "$(hash_series_prefix "$VFR_V2_PREFIX_COUNT")" = "$VFR_V2_PREFIX_HASH" ] || exit 1
     [ "$(hash_series_prefix "$VFR_RATIO_PREFIX_COUNT")" = "$VFR_RATIO_PREFIX_HASH" ] || exit 1
     [ "$(sed -n '11p' "$SERIES")" = "$PRESENT_WORKER" ] || exit 1
-    [ -z "$(sed -n '12p' "$SERIES")" ] || exit 1
+    [ "$(sed -n '12p' "$SERIES")" = "$PRESENT_QUEUE_POLICY" ] || exit 1
+    [ -z "$(sed -n '13p' "$SERIES")" ] || exit 1
     if [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ]; then
         verify_series_prefix "$VFR_V2_PREFIX_COUNT" || exit 1
         if ! is_applied "$VFR_RATIO_FIX"; then
@@ -185,13 +191,53 @@ append_vfr_ratio_and_worker() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
         is_applied "$PRESENT_WORKER" || exit 1
     fi
+    verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || exit 1
+    if ! is_applied "$PRESENT_QUEUE_POLICY"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+        is_applied "$PRESENT_QUEUE_POLICY" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_vfr_queue_policy() (
+    [ "$(hash_series_prefix "$PRESENT_WORKER_PREFIX_COUNT")" = "$PRESENT_WORKER_PREFIX_HASH" ] || exit 1
+    [ "$(sed -n '12p' "$SERIES")" = "$PRESENT_QUEUE_POLICY" ] || exit 1
+    [ -z "$(sed -n '13p' "$SERIES")" ] || exit 1
+    [ "$(cat "$MARKER")" = "$PRESENT_WORKER_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || exit 1
+    if ! is_applied "$PRESENT_QUEUE_POLICY"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+        is_applied "$PRESENT_QUEUE_POLICY" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+upgrade_vfr_queue_policy_display_rate() (
+    [ "$(hash_series_prefix "$PRESENT_WORKER_PREFIX_COUNT")" = "$PRESENT_WORKER_PREFIX_HASH" ] || exit 1
+    [ "$(sed -n '12p' "$SERIES")" = "$PRESENT_QUEUE_POLICY" ] || exit 1
+    [ -z "$(sed -n '13p' "$SERIES")" ] || exit 1
+    [ "$(cat "$MARKER")" = "$PRESENT_QUEUE_POLICY_PRE_RATE_HASH" ] || exit 1
+    verify_series_prefix "$PRESENT_WORKER_PREFIX_COUNT" || exit 1
+    grep -Fq 'int rate = swx_link_target(), link_rate = mtl_display_hz();' "$CORE/dm/gfx/nvn/nvn_mtl.m" || exit 1
+    # The display-rate delta alone must never bless a tree that still paces
+    # off the defective credit: no pre-credit-fix revert path is retained
+    # (the v1 patch file was superseded), so require the fixed producer path
+    # in core first and fail loudly otherwise. Recovery: restore a clean core
+    # at the current series, run the normalizer, then re-run the upgrade.
+    grep -Fq 'Signal-only: always 0' "$CORE/dm/gfx/nvn/nvn_mtl.m" || { echo "[ERROR] upgrade needs the Etapa 2 credit fix in core first (restore a clean core at the current series and run the normalizer, then re-run the upgrade)." >&2; exit 1; }
+    grep -Fq 'Punctual-recovery poll, once per present' "$CORE/dm/gfx/nvn/hle_nvn.c" || { echo "[ERROR] upgrade needs the Etapa 2 credit fix in core first (restore a clean core at the current series and run the normalizer, then re-run the upgrade)." >&2; exit 1; }
+    patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY_PRE_RATE" >/dev/null || exit 1
+    patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY_PRE_RATE" >/dev/null || exit 1
+    grep -Fq 'int rate = swx_link_target(), link_rate = atomic_load(&g_swx_link_hz);' "$CORE/dm/gfx/nvn/nvn_mtl.m" || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
 hash_present_worker_state() {
     old_patch="$1"
-    { cat "$SERIES"
-      for p in $PATCHES; do
+    { sed -n "1,${PRESENT_WORKER_PREFIX_COUNT}p" "$SERIES"
+      for p in $(sed -n "1,${PRESENT_WORKER_PREFIX_COUNT}p" "$SERIES"); do
           if [ "$p" = "$PRESENT_WORKER" ]; then cat "$HERE/$old_patch"; else cat "$HERE/$p"; fi
       done
     } | shasum -a 256 | cut -c1-16
@@ -203,13 +249,16 @@ apply_present_worker_migration() (
     ! is_applied "$old_patch" || exit 1
     patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
     patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
-    is_applied "$PRESENT_WORKER"
+    is_applied "$PRESENT_WORKER" || exit 1
+    patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+    patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_QUEUE_POLICY" >/dev/null || exit 1
+    is_applied "$PRESENT_QUEUE_POLICY"
 )
 migrate_present_worker() (
     old_patch="$1"
     stage="$(mktemp -d "${TMPDIR:-/tmp}/swx-present-worker.XXXXXX")"
     trap 'rm -rf "$stage"' EXIT
-    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" | sort -u |
+    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" "$HERE/$PRESENT_QUEUE_POLICY" | sort -u |
         while IFS= read -r f; do
             if [ -f "$CORE/$f" ]; then mkdir -p "$stage/$(dirname "$f")"; cp -p "$CORE/$f" "$stage/$f"; fi
         done
@@ -236,6 +285,22 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
         exit 1
     fi
     echo "patches: appended VFR ratio and present-worker fixes ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$PRESENT_WORKER_PREFIX_HASH" ]; then
+    if ! append_vfr_queue_policy; then
+        echo "[ERROR] append-only VFR queue-policy update failed preflight/apply; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: appended VFR queue policy ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$PRESENT_QUEUE_POLICY_PRE_RATE_HASH" ]; then
+    if ! upgrade_vfr_queue_policy_display_rate; then
+        echo "[ERROR] cached display-rate correction failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: switched VFR callback to cached display-link rate ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then

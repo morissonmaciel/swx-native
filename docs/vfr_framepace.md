@@ -33,9 +33,9 @@ the stock timing path. The VFR link owns its range and queue selection.
 The existing render-scale, dynamic resolution and Metal safety mechanisms
 continue to apply.
 
-See [the presentation A/B protocol](../instrumentation/ab_testing.md#vfr-presentation-gate)
-for the measurements required before judging the new cadence against the
-previous implementation.
+See the [Gate 2 present-queue protocol](../instrumentation/vfr_present_gate.md)
+for planned coverage and interpretation. It is not a report of completed
+gameplay runs or an approval of the cadence.
 
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
@@ -44,7 +44,8 @@ BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 
 Active whenever VFR is armed (`SWX_VFR=relaxed`/`uncapped` with a resolved
 rate); `SWX_VFR=0` keeps the stock take/wait/present path byte-for-byte.
-No new flags, no new log lines (the Etapa 0 parser needs no change).
+No new flags. Gate 2 observability is documented in the linked protocol and
+the parser keeps those counters nullable for older logs.
 
 - A worker thread (`nvn-present-worker`) takes `g_pq[]` tickets in order
   through `g_pq_wk`, separate from `g_pq_read`, which still means taken for

@@ -1,0 +1,376 @@
+# SWX VFR queue policy: four physical snapshots, two-ready FIFO with oldest-drop, and punctual-recovery credit signal.
+# VFR configures four snapshot slots and the display worker keeps a two-frame ready reserve.
+# Cold start and resume hold the first ready frame until a second is ready or it has waited one game period.
+# On overflow the oldest complete ready frame is canceled and unpinned before the next is promoted.
+# A punctual-recovery signal covers an isolated empty refresh in the active regime after priming; the next acquire re-reads depth plus work on the way. Signal-only: both outcomes clear the flag with no pacing effect and no observable difference yet, so the locked cadence is unchanged and the credit counter counts only anticipations effectively used (expected 0 until a pacing use lands).
+# Target-rate callbacks use an accumulator against physical display refresh, including non-divisor rates; intentional holds and eligible empty ticks are separate.
+# Gate 2 telemetry records ready depth, oldest drops, credits, queue/promote p95 with sample counts, and VFR game/wall window time.
+# verify: dm/gfx/nvn/nvn_mtl.m:VFR present queue up to tick
+# verify: dm/gfx/nvn/nvn_mtl.m:ready_depth max
+# verify: dm/gfx/nvn/hle_nvn.c:window game %.3f s / wall %.3f s
+# verify: dm/gfx/nvn/nvn_mtl.m:link_rate = atomic_load(&g_swx_link_hz)
+# verify: dm/gfx/nvn/nvn_mtl.m:Signal-only: always 0
+# verify: dm/gfx/nvn/hle_nvn.c:Punctual-recovery poll, once per present
+--- a/dm/gfx/nvn/nvn_mtl.m	2026-11-18 11:16:26
++++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-18 11:18:06
+@@ -18130,8 +18130,9 @@
+ // The worker takes tickets from g_pq[] in order on its own g_pq_wk frontier,
+ // separate from g_pq_read, which remains the presentation-take frontier. It
+ // waits until the GPU has finished each ticket's producer work, then promotes it to a ready FIFO of
+-// at most 2. The display-link callback pops the oldest ready ticket without
++// at most 2. When full, the worker drops and unpins the oldest complete ticket before promoting the new one. The display-link callback pops the oldest ready ticket without
+ // blocking and presents it; an empty FIFO keeps the last image on screen.
++// A punctual-recovery signal (one pending credit per episode) covers an isolated producer delay, without changing the locked cadence: the callback sets it when an eligible refresh stays empty in the active regime after the initial priming. Signal-only for now: both outcomes clear the flag and return 0, so the reserve-vs-missing distinction has no observable effect yet; the credit counter counts only anticipations effectively used (expected 0 until a pacing use lands) while the lock restoration is validated.
+ // Promotion happens only after GPU completion is confirmed (a submit is not
+ // enough): the snapshot copy via g_snap_ev, an external producer via
+ // g_ext_ev, the game's own draws via mtl_wait on the submission fence.
+@@ -18140,12 +18141,25 @@
+ // the copy is readable only after it completed, and a slot is reused only
+ // after the core freed its reading through presentation (g_pq_done).
+ // Every enqueue pins once; the pin travels with the ticket and is released
+-// exactly once: on present, on a drop, on a ready-queue purge, or on a
++// exactly once: on present, on overflow, on a ready-queue purge, or on a
+ // worker skip of a dropped ticket.
+ #define SWX_RDY 2
+ static pq_item g_rdy[SWX_RDY];
+ static uint64_t g_rdy_ticket[SWX_RDY];
++static double g_rdy_ready_at[SWX_RDY];
+ static uint64_t g_rdy_in, g_rdy_read;
++// At most one punctual-recovery credit pending per episode (under g_pq_mu).
++// The next acquire settles it: reserve recomposing -> discard, missing work
++// -> consume single-shot and return to the normal phase (no double release).
++static int g_vfr_credit_pending;
++static struct {
++    unsigned ready_depth_max, drop_oldest, credit, held, empty;
++    unsigned queue_n, promote_n;
++    double queue_ms[300], promote_ms[300];
++} g_vfr_queue_window;
++static uint64_t g_vfr_rate_accumulator;
++static int g_vfr_window_rate, g_vfr_window_link_rate;
++static int g_vfr_prime = 1;
+ static uint64_t g_wk_inflight;   // worker owns tickets through producer waits and ready-capacity waits
+ static uint64_t g_pq_wk;   // VFR worker take frontier: tickets at or below it were taken by the worker. g_pq_read stays the taken-for-presentation frontier (callback/classic takes and ready pops); g_pq_wk >= g_pq_read always.
+ static uint64_t g_pq_cancelled[PRING], g_pq_cancel_safe[PRING], g_pq_pin_released[PRING];   // Under g_pq_mu: exact canceled ticket, producer-read safety and unique pin release. Cancellation wakes ticket waiters; only safe cancellations may advance g_pq_done.
+@@ -18170,6 +18184,49 @@
+     while (pq_cancelled_locked(g_pq_done + 1) && g_pq_cancel_safe[(g_pq_done + 1) % PRING] == g_pq_done + 1) g_pq_done++;
+ }
+ static int swx_vfr_path(void) { return swx_link_target() != 0; }
++// One poll per game present (hle_nvn.c swx_vfr_wait runs after the slot and
++// ticket waits): settle a pending punctual recovery under the queue lock.
++// Reserve recomposing (ready depth, untaken tickets, ticket under the worker)
++// -> discard; missing work -> consume single-shot. Signal-only: always 0, so
++// both outcomes clear the flag with no observable difference yet; the credit
++// counter counts only anticipations effectively used. Any rate/clock-source/
++// mode change and any link pause/resume clears the pending flag below.
++int mtl_swx_vfr_acquire_credit(void) {
++    if (!swx_vfr_path()) return 0;
++    pthread_mutex_lock(&g_pq_mu);
++    // Re-read depth plus work on the way (untaken tickets, ticket under the
++    // worker): a recomposing reserve discards the pending recovery, missing
++    // work consumes it single-shot. Both clear the flag with no pacing
++    // effect (no observable difference yet); the next acquire stays nominal.
++    if (g_vfr_credit_pending && (g_rdy_in != g_rdy_read || g_wk_inflight > 0 || g_pq_in != g_pq_read))
++        g_vfr_credit_pending = 0;   // discard: reserve recomposing
++    else if (g_vfr_credit_pending)
++        g_vfr_credit_pending = 0;   // consume: signal-only, pacing unchanged
++    pthread_mutex_unlock(&g_pq_mu);
++    return 0;
++}
++static int vfr_double_compare(const void *a, const void *b) {
++    double x = *(const double *)a, y = *(const double *)b;
++    return (x > y) - (x < y);
++}
++static double vfr_p95(double values[300], unsigned count) {
++    if (!count) return 0.0;
++    qsort(values, count, sizeof values[0], vfr_double_compare);
++    return values[(count * 95 + 99) / 100 - 1];
++}
++static void vfr_queue_window_report_locked(uint64_t tick) {
++    double queue[300], promote[300];
++    unsigned queue_n = g_vfr_queue_window.queue_n;
++    unsigned promote_n = g_vfr_queue_window.promote_n;
++    memcpy(queue, g_vfr_queue_window.queue_ms, queue_n * sizeof queue[0]);
++    memcpy(promote, g_vfr_queue_window.promote_ms, promote_n * sizeof promote[0]);
++    double queue_p95 = vfr_p95(queue, queue_n), promote_p95 = vfr_p95(promote, promote_n);
++    MLOG("VFR present queue up to tick %llu: window 300 refreshes, ready_depth max %u frames, drop_oldest %u frames, credit %u acquires, queue_ms p95 %.3f ms from %u pops, promote_ms p95 %.3f ms from %u promotions, held %u intentional refreshes, empty %u eligible refreshes",
++         (unsigned long long)tick, g_vfr_queue_window.ready_depth_max, g_vfr_queue_window.drop_oldest,
++         g_vfr_queue_window.credit, queue_p95, queue_n, promote_p95, promote_n,
++         g_vfr_queue_window.held, g_vfr_queue_window.empty);
++    memset(&g_vfr_queue_window, 0, sizeof g_vfr_queue_window);
++}
+ // Drop every ready ticket at or below tk (stall/suspend fallback): the
+ // frames will never be shown, so release their pins. Called with g_pq_mu.
+ static void rdy_purge_leq(uint64_t tk) {
+@@ -18241,7 +18298,8 @@
+     double cb = CACurrentMediaTime();
+     pthread_mutex_lock(&g_pq_mu);
+     if (g_stall_t0) { uint64_t since = dm_focus_in_since(), t = now_ns();
+-        MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0; }
++        MLOG("display link recovered: stalled %.0f ms (%.0f ms of it active), fallback dropped %llu frames (stall #%llu)", (t - g_stall_t0) / 1e6, (t - (g_stall_t0 > since ? g_stall_t0 : since)) / 1e6, (unsigned long long)g_stall_drop, (unsigned long long)g_stall_n); g_stall_t0 = 0;
++        g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0; }
+     pthread_mutex_unlock(&g_pq_mu);
+     int vfr = atomic_load(&g_swx_link_hz) != 0;
+     double vp = vfr ? 0 : g_link_vperiod, tol = 0.002;   // tol: how early a tick may come and still end a hold (below)
+@@ -18263,8 +18321,56 @@
+     int requested = link_requested_mode();
+     int wk = swx_vfr_path();   // the worker takes from g_pq via its own g_pq_wk frontier; the callback pops ready tickets (first, even across a mode change). g_pq_read is only advanced by takes for presentation (callback/classic) and ready pops
+     int rdy = g_rdy_in != g_rdy_read;
++    if (wk) {
++        int rate = swx_link_target(), link_rate = atomic_load(&g_swx_link_hz);
++        if (rate != g_vfr_window_rate || link_rate != g_vfr_window_link_rate) {
++            g_vfr_rate_accumulator = 0;
++            g_vfr_window_rate = rate;
++            g_vfr_window_link_rate = link_rate;
++            g_vfr_prime = 1;
++            g_vfr_credit_pending = 0;
++        }
++        if (rate > 0 && link_rate > rate) {
++            g_vfr_rate_accumulator += (uint64_t)rate;
++            if (g_vfr_rate_accumulator < (uint64_t)link_rate) {
++                g_vfr_queue_window.held++;
++                if (g_link_tick_n % 300 == 0) vfr_queue_window_report_locked(g_link_tick_n);
++                pthread_mutex_unlock(&g_pq_mu);
++                return;
++            }
++            g_vfr_rate_accumulator -= (uint64_t)link_rate;
++        }
++    }
++    if (wk && requested && !g_rescue_mode) {
++        uint64_t depth = g_rdy_in - g_rdy_read;
++        if (depth > g_vfr_queue_window.ready_depth_max)
++            g_vfr_queue_window.ready_depth_max = (unsigned)depth;
++        if (rdy && g_vfr_prime) {
++            int target_rate = swx_link_target();
++            double first_ready = g_rdy_ready_at[g_rdy_read % SWX_RDY];
++            if (depth >= SWX_RDY || target_rate <= 0 || CACurrentMediaTime() - first_ready >= 1.0 / target_rate) {
++                g_vfr_prime = 0;
++            } else {
++                g_vfr_queue_window.held++;
++                if (g_link_tick_n % 300 == 0) vfr_queue_window_report_locked(g_link_tick_n);
++                pthread_mutex_unlock(&g_pq_mu);
++                return;
++            }
++        }
++    }
+     if (!requested || g_rescue_mode || (!rdy && (wk || g_pq_read == g_pq_in || g_wk_inflight))) {
+-        if (requested && !g_rescue_mode) g_link_empty++;
++        if (requested && !g_rescue_mode) {
++            g_link_empty++;
++            if (wk) {
++                g_vfr_queue_window.empty++;
++                // Punctual recovery only: an eligible refresh staying empty in
++                // the active regime after the initial priming. A pop 2->1, an
++                // intentional hold and the wait for the 2nd frame at opening
++                // never reach here, so they never signal.
++                if (!g_vfr_prime && !g_vfr_credit_pending) g_vfr_credit_pending = 1;
++            }
++        }
++        if (wk && g_link_tick_n % 300 == 0) vfr_queue_window_report_locked(g_link_tick_n);
+         pthread_mutex_unlock(&g_pq_mu);
+         return;
+     }
+@@ -18275,9 +18381,18 @@
+     pq_item it;
+     int from_rdy = rdy;   // a ready ticket is already GPU-complete (the worker waited); a stock take still needs the commit waits
+     if (rdy) {
++        double pop_at = CACurrentMediaTime();
++        if (wk && g_vfr_queue_window.queue_n < 300)
++            g_vfr_queue_window.queue_ms[g_vfr_queue_window.queue_n++] = (pop_at - g_rdy_ready_at[g_rdy_read % SWX_RDY]) * 1000.0;
+         // VFR worker path: take the oldest ready one without blocking.
+         // An empty FIFO keeps the last image (handled above).
+-        if (!rdy_pop_oldest(&it, &ticket)) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
++        if (!rdy_pop_oldest(&it, &ticket)) {
++            g_link_empty++;
++            if (wk) g_vfr_queue_window.empty++;
++            if (wk && g_link_tick_n % 300 == 0) vfr_queue_window_report_locked(g_link_tick_n);
++            pthread_mutex_unlock(&g_pq_mu);
++            return;
++        }
+         if (g_pq_read < ticket) g_pq_read = ticket;   // taken for presentation (the worker frontier g_pq_wk already covers it)
+         first = ticket;
+         if (pq_cancelled_locked(ticket)) { pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); return; }
+@@ -18291,7 +18406,13 @@
+     } else {
+         first = g_pq_read + 1; if (first <= g_pq_wk) first = g_pq_wk + 1;   // the worker took these ahead across a mode change; take after it
+         ticket = g_pq_in;
+-        if (first > ticket) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }   // nothing untaken (the worker owns the rest)
++        if (first > ticket) {
++            g_link_empty++;
++            if (wk) g_vfr_queue_window.empty++;
++            if (wk && g_link_tick_n % 300 == 0) vfr_queue_window_report_locked(g_link_tick_n);
++            pthread_mutex_unlock(&g_pq_mu);
++            return;
++        }   // nothing untaken (the worker owns the rest)
+     // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
+     // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
+     // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
+@@ -18316,7 +18437,12 @@
+     int submitted;
+     if (!from_rdy) { ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v); }   // ready tickets already waited in the worker before promoting
+     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+-    pthread_mutex_lock(&g_pq_mu); g_link_take_inflight--; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
++    pthread_mutex_lock(&g_pq_mu);
++    g_link_take_inflight--;
++    if (vfr && g_link_tick_n % 300 == 0)
++        vfr_queue_window_report_locked(g_link_tick_n);
++    pthread_cond_broadcast(&g_pq_cv);
++    pthread_mutex_unlock(&g_pq_mu);
+     g_link_hold_until = !vfr && submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+     if (!submitted) {
+         pthread_mutex_lock(&g_pq_mu);
+@@ -18410,6 +18536,7 @@
+     if (!swx_link_target() && (want < 0 || want > 2)) { g_dm_present_link = applied == 3 ? 1 : applied; pthread_mutex_unlock(&g_pq_mu); return; }
+     if (g_rescue_mode && (want != g_rescue_mode || now_ns() >= g_rescue_back_at)) {
+         g_rescue_mode = 0; g_stall_t0 = 0; __atomic_store_n(&g_link_tick_ns, now_ns(), __ATOMIC_RELAXED);
++        g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0;
+         MLOG("display link: rescue ended, trying pacing mode %d (frame %llu)", want, (unsigned long long)atomic_load(&g_cur_frame));
+     }
+     if (g_rescue_mode) want = 0;
+@@ -18446,6 +18573,7 @@
+ static void present_drop_for_suspend(void) {
+     uint64_t dropped_to = 0;
+     pthread_mutex_lock(&g_pq_mu);
++    g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0;
+     if (g_link_owns_layer) {
+         uint64_t n = g_pq_in - g_pq_read;
+         // Publish cancellation before any condition wait can release g_pq_mu.
+@@ -18531,7 +18659,14 @@
+ // The short period when the front end goes to the background and waits for the game to save: presents are dropped directly (the display link does not call back in the background, enqueueing would block the game thread; nobody sees the picture anyway).
+ // When turned on, also clear the frames already queued: the system first stops the display-link callback and only afterwards notifies about going to the background, and in that gap the game has already filled the swapchain and is stuck at "before acquiring the next texture, wait for its previous present to be processed"
+ // (hle_nvn.c nvnWindowAcquireTexture -> mtl_present_wait). Without clearing, the game cannot advance a single tick during those 2.5 seconds of waiting for the save, and the save is not written (the same pattern three times in player logs: 3 frames queued, 0 submits)
+-void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if (on) present_drop_for_suspend(); pthread_mutex_lock(&g_pq_mu); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); }
++void mtl_present_discard(int on) {
++    atomic_store(&g_present_discard, on != 0);
++    if (on) present_drop_for_suspend();
++    pthread_mutex_lock(&g_pq_mu);
++    g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0;
++    pthread_cond_broadcast(&g_pq_cv);
++    pthread_mutex_unlock(&g_pq_mu);
++}
+ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy);
+ uint64_t mtl_present(const tex_t *t, double period, const int crop[4], uint64_t *copy) { return present_enqueue(t, period, crop, 0, copy); }
+ void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
+@@ -18587,8 +18722,9 @@
+     static int v = -1; if (v >= 0) return v;
+     const char *e = getenv("DM_PRESENT_SNAP");
+     int n = e ? atoi(e) : DM_GAME_PRESENT_SNAP ? 2 : 0;   // the profile's present_snap (a ring of 2)
+-    v = n > 0; g_snap_n = n < 2 ? 2 : n > SNAP_MAX ? SNAP_MAX : n;
+-    if (v) MLOG("present snapshots (DM_PRESENT_SNAP=%d): each present is copied into a ring of %d host textures, so the screen never samples the game's texture", n, g_snap_n);
++    v = n > 0 || swx_vfr_path();
++    g_snap_n = swx_vfr_path() ? SNAP_MAX : n < 2 ? 2 : n > SNAP_MAX ? SNAP_MAX : n;
++    if (v) MLOG("present snapshots: each present is copied into a ring of %d host textures%s", g_snap_n, swx_vfr_path() ? " for VFR" : "");
+     return v;
+ }
+ static void snap_commit_wait(uint64_t v) { if (v) rec_note_wait(&g_snap_cmt, v); }
+@@ -18807,11 +18943,11 @@
+             if (canceled) pres_seen(ticket, -1);
+             continue;
+         }
+-        // Keep worker ownership and its pin through the ready-capacity wait.
+-        while (g_rdy_in - g_rdy_read >= SWX_RDY && !pq_cancelled_locked(ticket) && !atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++        // A full ready FIFO is a bounded mailbox for this consumer cadence:
++        // discard its oldest completed frame so the newest two remain usable.
+         if (atomic_load(&g_present_discard)) pq_cancel_locked(ticket);
+         if (pq_cancelled_locked(ticket)) {
+-            g_pq_cancel_safe[ticket % PRING] = ticket;   // source_safe was confirmed before waiting for FIFO capacity
++            g_pq_cancel_safe[ticket % PRING] = ticket;
+             int unpin = g_pq_pin_released[ticket % PRING] != ticket;
+             if (unpin) g_pq_pin_released[ticket % PRING] = ticket;
+             g_wk_inflight--;
+@@ -18822,7 +18958,25 @@
+             pres_seen(ticket, -1);
+             continue;
+         }
+-        g_rdy[g_rdy_in % SWX_RDY] = it; g_rdy_ticket[g_rdy_in % SWX_RDY] = ticket; g_rdy_in++;
++        if (g_rdy_in - g_rdy_read >= SWX_RDY) {
++            unsigned slot = (unsigned)(g_rdy_read % SWX_RDY);
++            uint64_t dropped_ticket = g_rdy_ticket[slot];
++            pq_cancel_locked(dropped_ticket);
++            g_pq_cancel_safe[dropped_ticket % PRING] = dropped_ticket;
++            if (g_pq_pin_released[dropped_ticket % PRING] != dropped_ticket) {
++                mtl_tex_unpin(g_rdy[slot].t.serial);
++                g_pq_pin_released[dropped_ticket % PRING] = dropped_ticket;
++            }
++            g_rdy_read++;
++            g_vfr_queue_window.drop_oldest++;
++            pq_done_advance_locked(g_pq_done);
++        }
++        unsigned ready_slot = (unsigned)(g_rdy_in % SWX_RDY);
++        double ready_at = CACurrentMediaTime();
++        g_rdy[g_rdy_in % SWX_RDY] = it; g_rdy_ticket[g_rdy_in % SWX_RDY] = ticket;
++        g_rdy_ready_at[ready_slot] = ready_at; g_rdy_in++;
++        if (g_vfr_queue_window.promote_n < 300)
++            g_vfr_queue_window.promote_ms[g_vfr_queue_window.promote_n++] = (ready_at - it.t_in) * 1000.0;
+         g_wk_inflight--;
+         pthread_cond_broadcast(&g_pq_cv);
+         pthread_mutex_unlock(&g_pq_mu);
+@@ -18912,7 +19066,10 @@
+         while (g_pq_inflight || g_link_take_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+         pq_done_advance_locked(tk);
+         pthread_cond_broadcast(&g_pq_cv);
+-        if (!g_stall_t0) { g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++; }
++        if (!g_stall_t0) {
++            g_stall_t0 = last ? last : now; g_stall_drop = 0; g_stall_red = 0; g_stall_logged = 0; g_stall_n++;
++            g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0;
++        }
+         g_stall_drop += n;
+         int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since(), from = g_stall_t0 > since ? g_stall_t0 : since;
+         uint64_t elapsed = now >= from ? now - from : 0;   // Focus can return after the earlier now sample, including while waiting for an in-flight present
+@@ -18921,6 +19078,7 @@
+         int requested = link_requested_mode();
+         if (active && !g_rescue_mode && requested && elapsed >= LINK_RESCUE_NS) {
+             g_rescue_mode = requested; g_rescue_n++; g_rescue_back_at = now + g_rescue_back_ns;
++            g_vfr_prime = 1; g_vfr_rate_accumulator = 0; g_vfr_window_rate = g_vfr_window_link_rate = 0; g_vfr_credit_pending = 0;
+             MLOG("display link silent for %.0f ms while active: the present thread takes drawables itself (rescue #%llu), the link is tried again in %.0f s", (now - from) / 1e6, (unsigned long long)g_rescue_n, g_rescue_back_ns / 1e9);
+             g_rescue_back_ns = g_rescue_back_ns < 30000000000ull ? g_rescue_back_ns * 2 : 60000000000ull;
+         }
+--- a/dm/gfx/nvn/hle_nvn.c	2026-11-18 11:16:26
++++ b/dm/gfx/nvn/hle_nvn.c	2026-11-18 11:17:50
+@@ -1915,6 +1915,7 @@
+ int mtl_link_stalled(void);
+ int mtl_link_rate(void);
+ int mtl_swx_vfr_wait_ticks(unsigned ticks, uint64_t timeout_ns, uint64_t *last_tick);
++int mtl_swx_vfr_acquire_credit(void);
+ // ---- VFR frame pace (SWX_VFR=relaxed or uncapped; SWX_VFR=0 restores stock) ----
+ __attribute__((weak)) int dm_vfr_capable;
+ enum { SWX_VFR_DISABLED, SWX_VFR_LOCK, SWX_VFR_UNCAPPED };
+@@ -2043,6 +2044,12 @@
+     int link_hz = mtl_link_rate();
+     int divisor = nvn_swx_vfr_divisor(link_hz);
+     int link_source = divisor > 0 && mtl_link_active() && !mtl_link_stalled();
++    // Punctual-recovery poll, once per present after the slot/ticket waits:
++    // settles a pending credit; both outcomes clear the flag with no pacing
++    // effect and no observable difference yet (discard vs consume is kept
++    // for a future pacing use). The synchronized path waits the full
++    // divisor and the fallback honors the fractional deadline.
++    if (swx_vfr_policy() == SWX_VFR_LOCK) mtl_swx_vfr_acquire_credit();
+     if (rate != g_vfr_phase_rate || link_hz != g_vfr_phase_link_hz || divisor != g_vfr_phase_divisor || link_source != g_vfr_phase_link_source) {
+         g_vfr_link_tick = 0; g_vfr_clock.deadline_ns = now; g_vfr_clock.fraction = 0; g_vfr_clock.clock_hz = rate;
+         g_vfr_phase_rate = rate; g_vfr_phase_link_hz = link_hz; g_vfr_phase_divisor = divisor; g_vfr_phase_link_source = link_source;
+@@ -2944,6 +2951,13 @@
+     { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
+     if (g_frame % TWIN == 0) tsummary(g_frame);
+     if (atomic_load_explicit(&g_vfr_on, memory_order_acquire) && o->presents % 300 == 0 && o->presents > 0) {   // compact VFR target, cadence and simulation-time telemetry
++        static uint64_t report_wall_ns;
++        static double report_game_s;
++        uint64_t wall_now_ns = now_ns();
++        double game_window_s = report_wall_ns ? g_vfr_total_game_s - report_game_s : 0.0;
++        double wall_window_s = report_wall_ns ? (wall_now_ns - report_wall_ns) / 1e9 : 0.0;
++        report_wall_ns = wall_now_ns;
++        report_game_s = g_vfr_total_game_s;
+         uint32_t fixed = 0; float ratio = 0, secs = 0;
+         if (dm_fps_state) {
+             uint64_t b = __atomic_load_n((uint64_t *)(dm_fps_state + SWX_VFR_RATIO_OFF), __ATOMIC_RELAXED);
+@@ -2959,10 +2973,10 @@
+         const char *game_clock = control_mode == 1 ? "movie" : control_mode == 2 ? "guest-override" : "game";
+         uint64_t snap_wait_ns = atomic_exchange_explicit(&g_vfr_snap_ns, 0, memory_order_relaxed);
+         uint64_t ticket_wait_ns = atomic_exchange_explicit(&g_vfr_pq_ns, 0, memory_order_relaxed);
+-        LOG("[nvn] VFR up to present %llu: %s %s %u Hz, %s clock, display %d Hz, average present %.2f ms, applied %.2f ms, sampled time %.1f s, ratio %.3f (%u VFR steps), ring waits %.1f / ticket waits %.1f ms, queued %u, %u of last %d dropped, guest interval %u",
++        LOG("[nvn] VFR up to present %llu: %s %s %u Hz, %s clock, display %d Hz, average present %.2f ms, applied %.2f ms, sampled time %.1f s, window game %.3f s / wall %.3f s, ratio %.3f (%u VFR steps), ring waits %.1f / ticket waits %.1f ms, queued %u, %u of last %d dropped, guest interval %u",
+             (unsigned long long)o->presents, swx_vfr_policy() == SWX_VFR_UNCAPPED ? "uncapped" : "lock",
+             game_clock, hz, source, link_hz, g_vfr_sample.n ? g_vfr_sample.raw_sum_s / g_vfr_sample.n * 1e3 : 0,
+-            g_vfr_sample.n ? g_vfr_sample.applied_sum_s / g_vfr_sample.n * 1e3 : 0, g_vfr_total_game_s,
++            g_vfr_sample.n ? g_vfr_sample.applied_sum_s / g_vfr_sample.n * 1e3 : 0, g_vfr_total_game_s, game_window_s, wall_window_s,
+             ratio, (unsigned)g_vfr_sample.steps, snap_wait_ns / 1e6, ticket_wait_ns / 1e6,
+             depth, dropped, TWIN, fixed);
+         g_vfr_sample.n = 0; g_vfr_sample.raw_sum_s = g_vfr_sample.applied_sum_s = 0;
