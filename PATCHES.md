@@ -23,12 +23,36 @@ installation environment, not the vendored core's compiled default.
 | 12 | `dm_vfr_queue_policy.patch` | `SWX_VFR` | experimental (Etapa 2; movie + resume approved with zero empty/drops in transition; steady 60/60 production gate still open) | four physical snapshots, two-ready FIFO, oldest drop on overflow, bounded one-period priming at startup/resume, acquire cadence credits, and per-window queue/simulation telemetry using the cached display-link rate; no new environment key | `docs/vfr_framepace.md`, `ab_results.md` |
 | 13 | `dm_vfr_quick_menu_alpha.patch` | `SWX_VFR` | experimental (two player-reported VFR runs passed; broader selector matrix and stock control unrecorded) | Runs BOTW 1.9.0's existing capture-alpha correction at every positive VFR animation frame, while preserving the stock equality branch and movie/scripted-override paths | `docs/vfr_quick_menu_alpha.md` |
 | 14 | `dm_gpu_texture_pool_fix.patch` | `SWX_GPU_TEXTURE_POOL` | correctness repair for the promoted install-pinned pool | Preserves upload-block ownership through GPU feedback, checks batch budget before pool take/fallback allocation, and reports materialized private pool capacity separately from useful reserved bytes; two pool-only gameplay runs had zero misses and 64 MiB materialized | `docs/texture_burst_measurement_and_dispatch_plan.md`, `instrumentation/ab_results.md` |
+| 15 | `dm_texture_burst_attribution.patch` | (opt-in via `DM_NVN_TSV`, no new flag) | batch-correlated texture-upload attribution (encode/publish/gpu events with stable full-ID joins; missing fields unavailable, never zero) | per-batch wall-clock buckets for area-entry bursts; 554/159 fully joined batches, zero overflow/slot-waits | `docs/texture_burst_measurement_and_dispatch_plan.md`, `instrumentation/ab_results.md` |
+| 16 | `dm_texture_burst_attribution_host_lifetime.patch` | (same opt-in) | host-side lifetime handoff for burst records (TSV drained on the game thread, GPU feedback publishes timestamps) | supports the #15 attribution path | `docs/texture_burst_measurement_and_dispatch_plan.md` |
+| 17 | `dm_up_blit_rec.patch` | `SWX_NVN_UP_BLIT_REC` | experimental (default 0, never pinned by installer) | defers whole buffer→texture upload batches to the encode thread as one `RO_COMMIT_UBATCH`; GPU executes the same copies in the same order; A/B recorded | `instrumentation/ab_results.md` |
 
 ## Out of tree (frozen, not in `series`)
 
 | Branch | Patch | Status |
 |--------|-------|--------|
 | `feat/attachment-store-lookahead` (frozen at `b2a52bd`) | `dm_store_lookahead.patch` (`DM_NVN_STORE_LOOKAHEAD`) | experimental, correct but no gain: exercised (~299–600 indexed/window, 0 invalidations, ~25–111k examined) yet only 32 warm-up stores (~0.5 MB) dropped, zero on the hot luneta stretch; flag cleared from player env |
+
+## Managed BOTW install env (production, 2026-11-18)
+
+`wrapper/main.py` pins these into
+`~/Library/Application Support/nxnative/01007EF00011E000/env.txt`; the
+launcher logs each line at boot (`launcher: env K=V`). Experimental keys
+(`DM_NVN_ENC_THREAD`, `SWX_NVN_UP_BLIT_REC`, `SWX_GPU_BIND_ONCE`,
+`DM_NVN_TSV*`, `DM_NVN_WAITS*`, `SWX_RT_HEAP_RESERVE`) stay absent:
+compiled defaults apply.
+
+| Key | Value | Status |
+|-----|-------|--------|
+| `SWX_VFR` | `relaxed` | install default (display-divisor lock) |
+| `SWX_VFR_HZ` | `auto` | panel-derived display-link rate |
+| `DM_SAVE` / `DM_PSO_USER` / `DM_PSO_ARCHIVE` / `DM_PSO_PAIRS` | paths | save + shader cache locations |
+| `SWX_GPU_TEXTURE_POOL` | `1` | promoted: resident staging pool + repair (#14) |
+| `DM_SAVE_ASYNC` | `1` | promoted (default ON) |
+| `DM_PSO_USER_ASYNC` | `1` | promoted (default ON) |
+| `SWX_GPU_KEEPALIVE` | `1` | promoted (on macOS) |
+| `SWX_GPU_KEEPALIVE_YIELD` | `1` | promoted (install pins `=1`) |
+| `SWX_RESIDENCY_UB_RING` | `1` | promoted (install pins `=1`) |
 
 ## Notes
 
