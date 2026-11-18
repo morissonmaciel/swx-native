@@ -15,3 +15,4 @@ dm_gpu_texture_pool_fix.patch
 dm_texture_burst_attribution.patch
 dm_texture_burst_attribution_host_lifetime.patch
 dm_up_blit_rec.patch
+swx_save_cleanup_worker.patch

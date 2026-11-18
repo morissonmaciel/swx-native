@@ -1,0 +1,259 @@
+# Autosave with a persistent cleanup worker: Commit clones the work tree into a
+# private mkdtemp staging (<commit>.swx-save-<pid>.XXXXXX/tree) and swaps it
+# atomically with the commit (clone+swap stay synchronous); the swapped-out old
+# version is deleted by one QOS_CLASS_BACKGROUND worker (FIFO of 4 plus the one
+# being deleted), never by a thread per commit. SWX_SAVE_ASYNC precedes
+# DM_SAVE_ASYNC (alias); both absent = on, =0 = synchronous legacy path. A full
+# queue or a worker that will not start falls back to a synchronous delete
+# outside the mount locks; the commit stays published. Crash orphans of the
+# staging are swept at mount only when their PID is provably gone. Covers
+# h_fs_Commit and h_fs_CommitList (same engine). See docs/async_writes_evaluation.md.
+# verify: dm/host/hle_fs.c:#include <signal.h>
+# verify: dm/host/hle_fs.c:orphaned stagings whose committer PID is gone
+# verify: dm/host/hle_fs.c:static void swx_save_sweep_orphans(const char *commit);
+# verify: dm/host/hle_fs.c:swx_save_sweep_orphans(dir);
+# verify: dm/host/hle_fs.c:SWX_SAVE_ASYNC
+# verify: dm/host/hle_fs.c:SWX_SAVE_QN
+# verify: dm/host/hle_fs.c:QOS_CLASS_BACKGROUND
+# verify: dm/host/hle_fs.c:swx_save_enqueue
+# verify: dm/host/hle_fs.c:swx_save_sweep_orphans(const char *commit) {
+# verify: dm/host/hle_fs.c:commit_legacy_new_locked
+# verify: dm/host/hle_fs.c:staged_out
+# verify: dm/host/hle_fs.c:.swx-save-
+# verify: dm/host/hle_fs.c:*staged_out = staged
+# verify: dm/host/hle_fs.c:swx_save_finish(staged);
+# verify: dm/host/hle_fs.c:commit_mount_locked(i, &notify_error, &staged)
+# verify: dm/host/hle_fs.c:int target = -1, notify_error = 0; char *staged = NULL;
+# verify: dm/host/hle_fs.c:commit_mount_locked(target, &notify_error, &staged)
+--- a/dm/host/hle_fs.c
++++ b/dm/host/hle_fs.c
+@@ -13,6 +13,7 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ #include <stdio.h>
++#include <signal.h>
+ #include <stdatomic.h>
+ #include <sys/clonefile.h>
+ #include <sys/xattr.h>
+@@ -32,8 +33,8 @@
+ #define MAX_MOUNT 512   // Monster Hunter Rise mounts every add-on content it owns (aoc0 … : 252 licences in the folder) right after the first-boot settings: 16 ended in "mount table full"
+ // Save transactions (HLE audit items 1–3): on the real device a save can be rolled back as a whole before commit, and after a crash / kill a remount sees only the version from the last Commit.
+ // Host: at mount, the committed directory commit (= $DM_SAVE) is clonefile'd as a whole tree into the working directory <commit>.work (APFS copy-on-write, nearly zero cost), and the mount points at the working directory,
+-// all game reads and writes happen in the working directory; Commit = clonefile(work → <commit>.new), then renamex_np(RENAME_SWAP) swaps it atomically with commit, then the swapped-out old version is deleted.
+-// Killed at any moment, commit is either the old version or the new version, never half-written / a mix of old and new; the next mount discards leftover .work / .new.
++// all game reads and writes happen in the working directory; Commit = clonefile(work → <staging>/tree), then renamex_np(RENAME_SWAP) swaps it atomically with commit, then the swapped-out old version in the staging is deleted by a persistent background worker.
++// Killed at any moment, commit is either the old version or the new version, never half-written / a mix of old and new; the next mount discards leftover .work / .new and orphaned stagings whose committer PID is gone.
+ // RomFS image (dm/tools/romfs_image.py): DM_ROMFS may name one image file instead of a folder. Its index is read at mount; a file handle is then an entry of the image
+ // (IMG_HANDLE, bit 58 set, never a valid fd), read with pread at its offset in the one descriptor kept open, and a directory lists its consecutive child entries.
+ // One file instead of a few hundred thousand copies to an iPhone at full speed: a folder copy of Tears of the Kingdom's 304,000 files ran the phone's file service out of open files
+@@ -120,6 +121,7 @@
+     return 0;
+ }
+ static int rm_tree(const char *p);
++static void swx_save_sweep_orphans(const char *commit);
+ // Reads and checks a RomFS image's header and index; NULL (and a red line) when it is not a complete image
+ static romfs_img *img_open(const char *path) {
+     romfs_img *m = romfs_image_open(path);
+@@ -204,8 +206,9 @@
+         const char *why = NULL;
+         if (!access(work, F_OK) && rm_tree(work)) why = "cannot clear the work directory left over from last time";
+         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
+-        else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0))   // ENOTSUP: HFS+ and exFAT can neither clone nor swap directories (RENAME_SWAP), so no transaction can work on them
+-            why = errno == ENOTSUP ? "the save folder's filesystem cannot clone directories (save transactions need APFS: set DM_SAVE to a folder on an APFS volume)" : "cloning the work directory failed";
++        else { swx_save_sweep_orphans(dir);   // crash orphans of the mkdtemp staging (<commit>.swx-save-<pid>.XXXXXX): a removal failure only warns, the mount goes on
++            if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0))   // ENOTSUP: HFS+ and exFAT can neither clone nor swap directories (RENAME_SWAP), so no transaction can work on them
++                why = errno == ENOTSUP ? "the save folder's filesystem cannot clone directories (save transactions need APFS: set DM_SAVE to a folder on an APFS volume)" : "cloning the work directory failed"; }
+         if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
+             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
+         else {
+@@ -958,15 +961,111 @@
+ // failure falls back to today's synchronous delete.
+ static int swx_save_async_on(void) {
+     static int v = -1;
+-    if (v < 0) { const char *e = getenv("DM_SAVE_ASYNC"); v = !e || atoi(e) != 0;
+-        if (v) LOG("DM_SAVE_ASYNC=1: swapped-out save versions are deleted on a background thread (clone+swap stay synchronous)"); }
++    if (v < 0) { const char *e = getenv("SWX_SAVE_ASYNC"); if (!e) e = getenv("DM_SAVE_ASYNC"); v = !e || atoi(e) != 0;
++        if (v) LOG("SWX_SAVE_ASYNC=1: swapped-out save versions are deleted by a persistent background worker (clone+swap stay synchronous)"); }
+     return v;
+ }
+ static pthread_t g_swx_del_thr; static int g_swx_del_busy; static pthread_mutex_t g_swx_del_mu = PTHREAD_MUTEX_INITIALIZER;
+ static void *swx_save_bg_rm(void *arg) { char *path = arg; if (rm_tree(path)) { static int n; if (n++ < 4) LOG("DM_SAVE_ASYNC: background delete of %s failed errno=%d (next commit pre-clears it)", path, errno); } free(path); return NULL; }
++// swx_save_cleanup_worker: the swapped-out old version leaves the frame on a
++// persistent QOS_CLASS_BACKGROUND worker instead of a thread per commit. The
++// FIFO holds 4 staged paths plus the one being deleted; the worker only takes
++// its own mutex (never g_lock/PATH_LOCK or a game lock) and drops it before
++// rm_tree. A full queue or a worker that will not start falls back to a
++// synchronous delete outside the mount locks; the commit stays published.
++#define SWX_SAVE_QN 4
++static char *swx_save_q[SWX_SAVE_QN];
++static int swx_save_qh, swx_save_qn;
++static pthread_mutex_t swx_save_qmu = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t swx_save_qcv = PTHREAD_COND_INITIALIZER;
++static pthread_t swx_save_qthr; static int swx_save_qon;
++static void *swx_save_worker_fn(void *arg) {
++    (void)arg;
++    pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
++    for (;;) {
++        pthread_mutex_lock(&swx_save_qmu);
++        while (!swx_save_qn) pthread_cond_wait(&swx_save_qcv, &swx_save_qmu);
++        char *path = swx_save_q[swx_save_qh]; swx_save_qh = (swx_save_qh + 1) % SWX_SAVE_QN; swx_save_qn--;
++        pthread_mutex_unlock(&swx_save_qmu);
++        if (rm_tree(path)) { static int n; if (n++ < 4) LOG("SWX_SAVE_ASYNC: background delete of %s failed errno=%d (a later mount pre-clears it)", path, errno); }
++        free(path);
++    }
++    return NULL;
++}
++// Takes ownership of path on 1; on 0 (queue full or no worker) the caller deletes it outside the locks.
++static int swx_save_enqueue(char *path) {
++    int ok = 0;
++    pthread_mutex_lock(&swx_save_qmu);
++    if (!swx_save_qon && !pthread_create(&swx_save_qthr, NULL, swx_save_worker_fn, NULL)) { pthread_detach(swx_save_qthr); swx_save_qon = 1; }
++    if (swx_save_qon && swx_save_qn < SWX_SAVE_QN) {
++        swx_save_q[(swx_save_qh + swx_save_qn) % SWX_SAVE_QN] = path; swx_save_qn++; ok = 1;
++        pthread_cond_signal(&swx_save_qcv);
++    }
++    pthread_mutex_unlock(&swx_save_qmu);
++    return ok;
++}
++// Outside the mount locks: hand the staged old version to the worker, or delete it here when the queue is full or the worker would not start. The commit is already published either way.
++static void swx_save_finish(char *staged) {
++    if (!staged) return;
++    if (swx_save_enqueue(staged)) return;
++    { static int n; if (n++ < 4) LOG("SWX_SAVE_ASYNC: cleanup queue full or worker unavailable: deleting %s synchronously (commit already published)", staged); }
++    rm_tree(staged); free(staged);
++}
++// Crash orphans of the mkdtemp staging (<commit>.swx-save-<pid>.XXXXXX): only a staging whose PID is provably gone (kill(pid,0) == ESRCH) is removed; a live
++// or uncertain PID (kill succeeds or EPERM) belongs to a running committer and stays. A removal failure only warns; the mount goes on with the published save.
++static void swx_save_sweep_orphans(const char *commit) {
++    const char *slash = strrchr(commit, '/'), *base = slash ? slash + 1 : commit;
++    size_t dl = slash ? (size_t)(slash - commit) : 0, bl = strlen(base);
++    char parent[1100];
++    if (!dl) strlcpy(parent, ".", sizeof parent);
++    else { if (dl >= sizeof parent) return; memcpy(parent, commit, dl); parent[dl] = 0; }
++    DIR *d = opendir(parent); if (!d) return;
++    struct dirent *e;
++    while ((e = readdir(d))) {
++        const char *n = e->d_name, *p, *dot;
++        size_t nl = strlen(n);
++        long pid = 0;
++        if (nl <= bl + 17 || strncmp(n, base, bl) || strncmp(n + bl, ".swx-save-", 10)) continue;
++        p = n + bl + 10; dot = strchr(p, '.');
++        if (!dot || dot == p) continue;
++        for (const char *q = p; q < dot; q++) { if (*q < '0' || *q > '9') { pid = -1; break; } pid = pid * 10 + (*q - '0'); }
++        if (pid <= 0 || (pid_t)pid != pid) continue;
++        if (strlen(dot + 1) != 6) continue;
++        { int k, ok = 1; for (k = 0; k < 6; k++) { char c = dot[1 + k]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { ok = 0; break; } } if (!ok) continue; }
++        if (!kill((pid_t)pid, 0) || errno != ESRCH) continue;   // alive or uncertain: still active
++        { char full[1200]; snprintf(full, sizeof full, "%s/%s", parent, n);
++          if (rm_tree(full) && errno != ENOENT) LOG("save mount: orphan staging %s (PID %ld gone) could not be removed errno=%d; the published save is used", full, pid, errno);
++          else LOG("save mount: removed orphan staging %s (PID %ld gone)", full, pid); }
++    }
++    closedir(d);
++}
++// Today's .new path, kept for a failed mkdtemp and for =0 (then fully synchronous: the async branches below read the same flag). Caller holds the path and mount locks.
++static Result commit_legacy_new_locked(int i) {
++    char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
++    Result r = RES_OK;
++    if (swx_save_async_on()) {   // never reuse the staging path while its background delete runs (normally already done)
++        pthread_mutex_lock(&g_swx_del_mu);
++        if (g_swx_del_busy) { pthread_join(g_swx_del_thr, NULL); g_swx_del_busy = 0; }
++        pthread_mutex_unlock(&g_swx_del_mu);
++    }
++    if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
++    else if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
++    else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
++    else if (swx_save_async_on()) {                                 // the old version that was swapped out: delete it off-thread
++        char *stale = strdup(neu);                                  // joinable thread: the next commit's pre-clear joins it, so the
++        int bg = 0;                                                 // staging path is never reused mid-delete (normally already done)
++        pthread_mutex_lock(&g_swx_del_mu);
++        if (stale && !pthread_create(&g_swx_del_thr, NULL, swx_save_bg_rm, stale)) { g_swx_del_busy = 1; bg = 1; }
++        pthread_mutex_unlock(&g_swx_del_mu);
++        if (!bg) { free(stale); rm_tree(neu); }                    // thread spawn failed: today's synchronous delete
++    }
++    else rm_tree(neu);                                                  // the old version that was swapped out
++    return r;
++}
+ // Both Commit overloads share this transaction engine. Caller holds the path
+-// and mount locks; front-end failure notification is delivered after unlocking.
+-static Result commit_mount_locked(int i, int *notify_error) {
++// and mount locks; the staged old version (*staged_out, owned) is handed to the
++// worker and front-end failure notification is delivered after unlocking.
++static Result commit_mount_locked(int i, int *notify_error, char **staged_out) {
+     int txn = g_mnt[i].txn_root;
+     if (txn < 0 || txn >= g_nmnt) return RES_FAIL;
+     pthread_once(&g_txn_lock_once, txn_locks_init);
+@@ -1004,39 +1103,34 @@
+         *notify_error = perr;
+         return RES_FAIL;
+     }
+-    char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
+     Result r = RES_OK;
+-    if (swx_save_async_on()) {   // never reuse the staging path while its background delete runs (normally already done)
+-        pthread_mutex_lock(&g_swx_del_mu);
+-        if (g_swx_del_busy) { pthread_join(g_swx_del_thr, NULL); g_swx_del_busy = 0; }
+-        pthread_mutex_unlock(&g_swx_del_mu);
+-    }
+-    if (!access(neu, F_OK) && rm_tree(neu)) { LOG("[RED] save commit: cannot clear the %s left over errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+-    else if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
+-    else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
+-    else if (swx_save_async_on()) {                                 // the old version that was swapped out: delete it off-thread
+-        char *stale = strdup(neu);                                  // joinable thread: the next commit's pre-clear joins it, so the
+-        int bg = 0;                                                 // staging path is never reused mid-delete (normally already done)
+-        pthread_mutex_lock(&g_swx_del_mu);
+-        if (stale && !pthread_create(&g_swx_del_thr, NULL, swx_save_bg_rm, stale)) { g_swx_del_busy = 1; bg = 1; }
+-        pthread_mutex_unlock(&g_swx_del_mu);
+-        if (!bg) { free(stale); rm_tree(neu); }                    // thread spawn failed: today's synchronous delete
+-    }
+-    else rm_tree(neu);                                                  // the old version that was swapped out
++    char *staged = NULL;   // private staging holding the swapped-out old version; the caller enqueues it after unlocking
++    if (swx_save_async_on()) {
++        char tmpl[1100]; snprintf(tmpl, sizeof tmpl, "%s.swx-save-%d.XXXXXX", g_mnt[i].commit, (int)getpid());
++        if (mkdtemp(tmpl)) {
++            char tree[1200]; snprintf(tree, sizeof tree, "%s/tree", tmpl);
++            if (clonefile(g_mnt[i].dir, tree, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", tree, errno); r = RES_FAIL; rm_tree(tmpl); }
++            else if (renamex_np(tree, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(tmpl); r = RES_FAIL; }
++            else if (!(staged = strdup(tmpl))) { LOG("[RED] save commit: out of memory; deleting the staged old version %s synchronously (commit published)", tmpl); rm_tree(tmpl); }
++        } else r = commit_legacy_new_locked(i);   // no private staging: today's .new path
++    } else r = commit_legacy_new_locked(i);       // =0: fully synchronous legacy path
++
+     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
+     static int n; if (r == RES_OK) { uint64_t tc2 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
+             (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
+         save_sync_committed();   // wakes the cloud sender, which clones the committed save through dm_fs_clone_committed above (save_sync.h)
+     }
++    if (staged_out) *staged_out = staged; else if (staged) { rm_tree(staged); free(staged); }
+     return r;
+ }
+ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work directory tree is cloned, then swapped atomically with the committed directory (renamex_np RENAME_SWAP)", Result, h_fs_Commit, const char *name) { dm_thread_service_request();
+     PATH_LOCK(); pthread_mutex_lock(&g_lock);
+     int i = 0; while (i < g_nmnt && !mnt_named(&g_mnt[i], name)) i++;
+     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // non-transactional mount: nothing to commit
+-    int notify_error = 0; Result r = commit_mount_locked(i, &notify_error);
++    int notify_error = 0; char *staged = NULL; Result r = commit_mount_locked(i, &notify_error, &staged);
+     pthread_mutex_unlock(&g_lock);
++    swx_save_finish(staged);
+     if (notify_error) front_save_failed(notify_error);
+     return r;
+ }
+@@ -1049,7 +1143,7 @@
+     if (count < 0 || count > MAX_MOUNT || (count && !names)) return RES_FAIL;
+     if (!count) return RES_OK;
+     PATH_LOCK(); pthread_mutex_lock(&g_lock);
+-    int target = -1, notify_error = 0; Result r = RES_FAIL;
++    int target = -1, notify_error = 0; char *staged = NULL; Result r = RES_FAIL;
+     for (int k = 0; k < count; k++) {
+         if (!names[k] || strnlen(names[k], sizeof g_mnt[0].name) == sizeof g_mnt[0].name) goto out;
+         int i = 0; while (i < g_nmnt && !mnt_named(&g_mnt[i], names[k])) i++;
+@@ -1061,9 +1155,10 @@
+         }
+         if (target < 0) target = i;
+     }
+-    r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error);
++    r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error, &staged);
+ out:
+     pthread_mutex_unlock(&g_lock);
++    swx_save_finish(staged);
+     if (notify_error) front_save_failed(notify_error);
+     return r;
+ }
