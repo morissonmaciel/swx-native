@@ -440,3 +440,23 @@ and with no upload/GPU footprint linking it to the commit. The first five
 commits' windows had zero empty refreshes. Verdict: keep the async cleanup
 on (worker promoted, default on); the isolated hitch's cause is undetermined
 and shows no link to the commit path in this log.
+
+## BOTW render scale — macOS gameplay validation (2026-11-18)
+
+Patch #19 raises the `DM_RENDER_SCALE` ceiling to `1.2` on the supported
+BOTW 1.9.0 build. The player approved promotion as an opt-in, with `1.0`
+as the launcher and host default. A short `1.0` run confirmed normal
+launch and gameplay on the candidate. Prior `1.0` measurements serve as
+historical context, and no new matched-route long run was collected.
+
+| Scale | Measured refreshes | Eligible empty refreshes | On-screen p99 per window | Player observation |
+|---|---:|---:|---|---|
+| `1.1` | 30,900 | 2 | 16.67 ms in 103/103 | No felt hitches or visual glitches |
+| `1.2` run 1 | 12,000 | 3 | 16.67 ms in 40/40 | Three felt hitches |
+| `1.2` run 2 | 18,300 | 5 | 16.67 ms in 61/61 | Nearly hitch-free through teleports and combat, with one suspected upload burst |
+
+The launcher and host confirmed the selected factors. The upload staging
+pool reported zero misses in both `1.2` runs. The logs do not record the
+dimensions of the scene render targets, so this acceptance covers launch,
+playability and observed presentation cadence. A controlled performance
+delta against `1.0` and the exact internal dimensions remain unverified.

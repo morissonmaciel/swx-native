@@ -143,8 +143,8 @@ WANT="$(hash_state)"
 # Exact append-only upgrades for known installed prefixes. The ordered stack
 # currently ends with ratio (#10), worker (#11), queue policy (#12), alpha
 # guard (#13), texture-pool correctness repair (#14), burst attribution
-# (#15), burst host lifetime (#16), upload batch blit prototype (#17), and
-# save cleanup worker (#18).
+# (#15), burst host lifetime (#16), upload batch blit prototype (#17), save
+# cleanup worker (#18), and BOTW render scale ceiling (#19).
 # Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
@@ -175,6 +175,9 @@ UP_BLIT_PREFIX_HASH="95af732262d69275"
 SAVE_WORKER="swx_save_cleanup_worker.patch"
 SAVE_WORKER_PREFIX_COUNT=17
 SAVE_WORKER_PREFIX_HASH="2e8ec3cfb8de1dfb"
+BOTW_RENDER_SCALE="swx_botw_render_scale.patch"
+BOTW_RENDER_SCALE_PREFIX_COUNT=18
+BOTW_RENDER_SCALE_PREFIX_HASH="e0ca96f9fb6d2422"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -276,6 +279,18 @@ append_save_worker() (
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
         is_applied "$SAVE_WORKER" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_botw_render_scale() (
+    [ "$(hash_series_prefix "$BOTW_RENDER_SCALE_PREFIX_COUNT")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$BOTW_RENDER_SCALE_PREFIX_COUNT" || exit 1
+    if ! is_applied "$BOTW_RENDER_SCALE"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
+        is_applied "$BOTW_RENDER_SCALE" || exit 1
     fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
@@ -489,6 +504,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ]; then
+    if ! append_botw_render_scale; then
+        echo "[ERROR] append-only BOTW render scale ceiling failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended BOTW render scale ceiling ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$SAVE_WORKER_PREFIX_HASH" ]; then
