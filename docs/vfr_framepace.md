@@ -14,8 +14,11 @@ present, independently of whether a frame reaches the screen.
 The install supplies `relaxed` and `auto` where no player override exists.
 An existing numeric `SWX_VFR_HZ` now sets game rate in lock mode or the
 ceiling in uncapped mode. The physical link separately requests the panel
-rate, up to 240 Hz, and returns the newest eligible frame on each callback.
-At 60 fps on a 120 Hz link, two ticks pace one game frame. VI still signals
+rate, up to 240 Hz. VFR presents from a two-ready FIFO in ticket order,
+consuming the oldest ready frame at each eligible callback; if a third frame
+becomes ready while both slots are occupied, it drops the oldest queued frame
+and records that drop. At 60 fps on a 120 Hz link, two ticks pace one game
+frame. VI still signals
 physical retraces. A silent or unavailable link hands pacing to the
 monotonic clock. Texture tickets, snapshot capacity and GPU fences
 retain their existing lifetime rules.
@@ -39,6 +42,29 @@ gameplay runs or an approval of the cadence.
 
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
+
+## Etapa 2 — four snapshots and two ready frames (`dm_vfr_queue_policy.patch`)
+
+With VFR active, the host uses four physical snapshot slots and targets two
+GPU-safe ready frames. The display callback consumes the oldest ready ticket;
+when the ready FIFO is full, a newly promoted frame replaces the oldest queued
+one and increments `drop_oldest`. Priming after start or resume can wait up to
+one target period for the second ready frame. The game cadence remains governed
+by `SWX_VFR_HZ`; the acquire signal is consumed only as a punctual recovery
+poll and does not alter the simulation ratio or pacing deadline. The callback
+does not wait for GPU completion. `SWX_VFR=0` remains on the stock path.
+
+The queue-policy patch also records queue depth, enqueue-to-display timing,
+drop/hold/empty counts, and game-time versus wall-time windows. These values
+support the pair-by-pair Gate 2 protocol in
+[`vfr_present_gate.md`](../instrumentation/vfr_present_gate.md). The long
+60/60 production gate remains open; the 30 fps movie and return-to-gameplay
+transition have separate passing evidence below.
+
+The VFR-only quick-menu capture alpha guard is documented in
+[`vfr_quick_menu_alpha.md`](vfr_quick_menu_alpha.md). It preserves the stock
+frame-1 comparison and uses BOTW's existing alpha correction on positive
+fractional UI frames when VFR owns the clock. Its visual A/B remains pending.
 
 ## Etapa 1 — present worker + ready FIFO (`dm_present_worker.patch`)
 

@@ -20,6 +20,7 @@ opt-in via `ab_test.py`).
 | 10 | `dm_vfr_ratio_load_fix.patch` | `SWX_VFR` | VFR guest timing fix; movie + resume path approved (ratio held across 60→30→60); rest pending | BOTW delta-time and UI-step VFR stubs load the published ratio at state `+0xA0` | `docs/vfr_framepace.md` |
 | 11 | `dm_present_worker.patch` | `SWX_VFR` | experimental (active whenever VFR armed; no new flags); movie + resume approved via ready FIFO (150/150 per 300 refreshes, 0 empty/0 drops); full Gate 2 still open | worker waits for source-safe completion, keeps cancellation observable without advancing `g_pq_done` over unfinished reads, and blocks promotion after purge; ready FIFO of 2; `SWX_VFR=0` stock untouched | `docs/vfr_framepace.md`, `ab_results.md` |
 | 12 | `dm_vfr_queue_policy.patch` | `SWX_VFR` | experimental (Etapa 2; movie + resume approved with zero empty/drops in transition; steady 60/60 production gate still open) | four physical snapshots, two-ready FIFO, oldest drop on overflow, bounded one-period priming at startup/resume, acquire cadence credits, and per-window queue/simulation telemetry using the cached display-link rate; no new environment key | `docs/vfr_framepace.md`, `ab_results.md` |
+| 13 | `dm_vfr_quick_menu_alpha.patch` | `SWX_VFR` | experimental (VFR-only quick-menu alpha guard; visual A/B pending) | Runs BOTW 1.9.0's existing capture-alpha correction at every positive VFR animation frame, while preserving the stock equality branch and movie/scripted-override paths | `docs/vfr_quick_menu_alpha.md` |
 
 ## Out of tree (frozen, not in `series`)
 
