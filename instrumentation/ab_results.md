@@ -423,3 +423,19 @@ counts and volume match ON 2, which logged 25.2 / 12.4 ms while the player
 reported a hitch and flicker. This follow-up changes the recorder setting
 as well as the prototype setting and does not isolate either one's effect.
 Preserved capture: `/tmp/swx-texture-burst-20261118/post-blit-ab-170259.log`.
+
+## Save cleanup worker — single-install A/B (2026-11-18)
+
+One BOTW install, same save/route, `SWX_SAVE_ASYNC=0` (run 2, six commits)
+vs `SWX_SAVE_ASYNC=1` (two commits of one write). Log-verified: commit #1
+clone+swap 5525 µs, commit #6 5965 µs with the flag off (sync cleanup in the
+measured path); 1100–1180 µs per commit with the flag on. Sync-path saving
+≈ 4–5 ms per commit. Player-reported numbers for the remaining commits fall
+in the same ranges.
+
+The last save's window (tick 5700, flag off) logged 2 eligible empty
+refreshes and one 74.6 ms frame with 0.4 ms GPU, recorded before the commit
+and with no upload/GPU footprint linking it to the commit. The first five
+commits' windows had zero empty refreshes. Verdict: keep the async cleanup
+on (worker promoted, default on); the isolated hitch's cause is undetermined
+and shows no link to the commit path in this log.
