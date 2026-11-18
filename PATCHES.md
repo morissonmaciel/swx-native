@@ -10,7 +10,7 @@ installation environment, not the vendored core's compiled default.
 | # | Patch | Flag | Status | Effect + metric | Evidence |
 |---|-------|------|--------|-----------------|----------|
 | 1 | `swx_keepalive_gpu.patch` | `SWX_GPU_KEEPALIVE` | promoted (on macOS) | 0 vs 8 hold transitions, ~4x fewer longframes in half the frames | Gate 2, `ab_results.md` |
-| 2 | `dm_save_async.patch` | `DM_SAVE_ASYNC` | promoted (default ON) | clone+swap 995/656 µs vs 2–4 ms stock; 0 attributable longframes over 26k frames | Gate save-async S2, `ab_results.md` |
+| 2 | `dm_save_async.patch` | `SWX_SAVE_ASYNC` (`DM_SAVE_ASYNC` legacy alias) | promoted (default ON) | clone+swap 995/656 µs vs 2–4 ms stock; 0 attributable longframes over 26k frames | Gate save-async S2, `ab_results.md` |
 | 3 | `dm_pso_user_async.patch` | `DM_PSO_USER_ASYNC` | promoted (default ON) | batched `pso_user.tsv` writes, one fflush per flush on a background queue | header ("default ON since Gate 1 pass") |
 | 4 | `dm_gpu_texture_pool.patch` | `SWX_GPU_TEXTURE_POOL` | promoted for BOTW install env (`=1`); core compiled default remains off | Pool-only passed two gameplay runs with zero misses and a 64 MiB resident pool; matched burst evidence is noisy and does not establish a general performance gain | `instrumentation/ab_results.md`, `docs/texture_burst_measurement_and_dispatch_plan.md` |
 | 5 | `dm_gpu_bind_once.patch` | `SWX_GPU_BIND_ONCE` | experimental (compiled default off; absent from managed BOTW env) | suppresses repeated deswizzle binds; remains explicitly selectable for A/B; combined pool+bind runs had recurring hitches in 2/3 runs, without isolating cause | `instrumentation/ab_results.md`, A/B only |
@@ -26,6 +26,7 @@ installation environment, not the vendored core's compiled default.
 | 15 | `dm_texture_burst_attribution.patch` | (opt-in via `DM_NVN_TSV`, no new flag) | batch-correlated texture-upload attribution (encode/publish/gpu events with stable full-ID joins; missing fields unavailable, never zero) | per-batch wall-clock buckets for area-entry bursts; 554/159 fully joined batches, zero overflow/slot-waits | `docs/texture_burst_measurement_and_dispatch_plan.md`, `instrumentation/ab_results.md` |
 | 16 | `dm_texture_burst_attribution_host_lifetime.patch` | (same opt-in) | host-side lifetime handoff for burst records (TSV drained on the game thread, GPU feedback publishes timestamps) | supports the #15 attribution path | `docs/texture_burst_measurement_and_dispatch_plan.md` |
 | 17 | `dm_up_blit_rec.patch` | `SWX_NVN_UP_BLIT_REC` | experimental (default 0, never pinned by installer) | defers whole buffer→texture upload batches to the encode thread as one `RO_COMMIT_UBATCH`; GPU executes the same copies in the same order; A/B recorded | `instrumentation/ab_results.md` |
+| 18 | `swx_save_cleanup_worker.patch` | `SWX_SAVE_ASYNC` | promoted (default ON) | persistent `QOS_CLASS_BACKGROUND` cleanup worker, FIFO depth 4, per-generation `mkdtemp` staging, orphan recovery on mount; single-install A/B: 5.47–5.97 ms/commit off vs 1.10–1.18 ms on (≈4–5 ms sync-path saving); isolated 74.6 ms frame shows no commit link | `instrumentation/ab_results.md` |
 
 ## Out of tree (frozen, not in `series`)
 
@@ -48,7 +49,7 @@ compiled defaults apply.
 | `SWX_VFR_HZ` | `auto` | panel-derived display-link rate |
 | `DM_SAVE` / `DM_PSO_USER` / `DM_PSO_ARCHIVE` / `DM_PSO_PAIRS` | paths | save + shader cache locations |
 | `SWX_GPU_TEXTURE_POOL` | `1` | promoted: resident staging pool + repair (#14) |
-| `DM_SAVE_ASYNC` | `1` | promoted (default ON) |
+| `SWX_SAVE_ASYNC` | `1` | promoted (default ON; `DM_SAVE_ASYNC` legacy alias only, `SWX_SAVE_ASYNC` wins when both are set) |
 | `DM_PSO_USER_ASYNC` | `1` | promoted (default ON) |
 | `SWX_GPU_KEEPALIVE` | `1` | promoted (on macOS) |
 | `SWX_GPU_KEEPALIVE_YIELD` | `1` | promoted (install pins `=1`) |
