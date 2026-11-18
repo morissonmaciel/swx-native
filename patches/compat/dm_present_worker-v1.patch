@@ -1,0 +1,307 @@
+# SWX VFR present worker + ready FIFO (Etapa 1; active whenever VFR is armed, no new env flags).
+# A worker thread takes g_pq[] tickets in order, waits until the GPU finished
+# each ticket's producer work (snapshot copy via g_snap_ev, external producer via
+# g_ext_ev, game draws via mtl_wait on the submission fence), and promotes the
+# ticket into a ready FIFO capped at 2. Promotion happens only after GPU
+# completion is confirmed (a submit is not enough). The display-link callback
+# loses ext_wait/snap_commit_wait/sub_commit_wait: it pops the oldest ready
+# ticket without blocking and calls present_now(); an empty FIFO keeps the last
+# image. present_main pops ready tickets the same way when the link is silent
+# or absent. Slot guarantees are untouched (g_snap ticket/ev logic, RED_ONCE(111)):
+# a copy is readable only after it completed, a slot is reused only after the core
+# freed its reading through presentation. SWX_VFR=0 keeps the stock path.
+# Take cursors: the worker takes via its own g_pq_wk frontier, never g_pq_read,
+# so mtl_present_wait's g_pq_read test still means "the display link took it"
+# and the silent-link stall timeout/rescue stay reachable with a ticket in the
+# worker or the ready FIFO. wk_wait_gpu returns 1 on confirmed GPU completion,
+# 0 on discard/GPU loss (no promotion on 0). All waits release g_pq_mu before
+# looping back to a top-of-loop lock.
+# verify: dm/gfx/nvn/nvn_mtl.m:present_worker_main
+# verify: dm/gfx/nvn/nvn_mtl.m:wk_wait_gpu
+# verify: dm/gfx/nvn/nvn_mtl.m:rdy_pop_oldest
+# verify: dm/gfx/nvn/nvn_mtl.m:rdy_purge_leq
+# verify: dm/gfx/nvn/nvn_mtl.m:g_wk_inflight
+# verify: dm/gfx/nvn/nvn_mtl.m:from_rdy
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -18124,6 +18124,48 @@
+ static pq_item g_pq[PQ];
+ static uint64_t g_pq_in;
+ static int present_now(const tex_t *, double, uint64_t, uint64_t, const int[4], id<CAMetalDrawable>, double);
++// SWX VFR present worker + ready FIFO (Etapa 1; active whenever VFR is armed).
++// The worker takes tickets from g_pq[] in order (advancing g_pq_read, as the
++// display-link callback did), waits until the GPU has finished the producer
++// work each ticket depends on, and promotes the ticket into a ready FIFO of
++// at most 2. The display-link callback pops the oldest ready ticket without
++// blocking and presents it; an empty FIFO keeps the last image on screen.
++// Promotion happens only after GPU completion is confirmed (a submit is not
++// enough): the snapshot copy via g_snap_ev, an external producer via
++// g_ext_ev, the game's own draws via mtl_wait on the submission fence.
++// Slot guarantees rest on the existing g_snap ticket/ev logic (snap_take
++// busy check, mtl_snap_acquire_wait, RED_ONCE(111)), which is untouched:
++// the copy is readable only after it completed, and a slot is reused only
++// after the core freed its reading through presentation (g_pq_done).
++// Every enqueue pins once; the pin travels with the ticket and is released
++// exactly once: on present, on a drop, on a ready-queue purge, or on a
++// worker skip of a dropped ticket.
++#define SWX_RDY 2
++static pq_item g_rdy[SWX_RDY];
++static uint64_t g_rdy_ticket[SWX_RDY];
++static uint64_t g_rdy_in, g_rdy_read;
++static uint64_t g_wk_inflight;   // taken by the worker, not yet promoted (stock takes wait for 0)
++static uint64_t g_pq_wk;   // VFR worker take frontier: tickets at or below it were taken by the worker. g_pq_read stays the taken-for-presentation frontier (callback/classic takes and ready pops); g_pq_wk >= g_pq_read always. mtl_present_wait's g_pq_read test therefore still means "the display link took it", so the silent-link stall timeout and rescue stay reachable when a ticket sits in the worker or the ready FIFO
++static _Atomic int g_present_discard;   // tentative: the definition below (next to mtl_present_discard) merges into this one
++static int swx_vfr_path(void) { return swx_link_target() != 0; }
++// Drop every ready ticket at or below tk (stall/suspend fallback): the
++// frames will never be shown, so release their pins. Called with g_pq_mu.
++static void rdy_purge_leq(uint64_t tk) {
++    while (g_rdy_in > g_rdy_read && g_rdy_ticket[g_rdy_read % SWX_RDY] <= tk) {
++        mtl_tex_unpin(g_rdy[g_rdy_read % SWX_RDY].t.serial);
++        g_pres[g_rdy_ticket[g_rdy_read % SWX_RDY] % PRING] = (pres_ent){g_rdy_ticket[g_rdy_read % SWX_RDY], -1};
++        g_rdy_read++;
++    }
++}
++// Pop the oldest ready ticket. Called with g_pq_mu; returns 0 when empty.
++static int rdy_pop_oldest(pq_item *it, uint64_t *ticket) {
++    if (g_rdy_in == g_rdy_read) return 0;
++    *it = g_rdy[g_rdy_read % SWX_RDY];
++    *ticket = g_rdy_ticket[g_rdy_read % SWX_RDY];
++    g_rdy_read++;
++    return 1;
++}
++static void *present_worker_main(void *arg);   // defined after present_enqueue
+ static double g_link_vperiod, g_link_vhalf;   // virtual ticks (link_range): seconds per counted tick (0 = every callback is a tick) and half a refresh of the screen
+ 
+ @interface NvMetalDisplayLinkDelegate : NSObject <CAMetalDisplayLinkDelegate>
+@@ -18194,7 +18236,9 @@
+     pthread_mutex_unlock(&g_link_mu);
+     pthread_mutex_lock(&g_pq_mu);
+     int requested = link_requested_mode();
+-    if (!requested || g_rescue_mode || g_pq_read == g_pq_in) {
++    int wk = swx_vfr_path();   // the worker takes from g_pq via its own g_pq_wk frontier; the callback pops ready tickets (first, even across a mode change). g_pq_read is only advanced by takes for presentation (callback/classic) and ready pops
++    int rdy = g_rdy_in != g_rdy_read;
++    if (!requested || g_rescue_mode || (!rdy && (wk || g_pq_read == g_pq_in || g_wk_inflight))) {
+         if (requested && !g_rescue_mode) g_link_empty++;
+         pthread_mutex_unlock(&g_pq_mu);
+         return;
+@@ -18202,25 +18246,29 @@
+     // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
+     //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
+     if (!vfr && g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - tol) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
+-    uint64_t first = g_pq_read + 1, ticket = g_pq_in;
+-    // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
+-    // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
+-    // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
+-    if (vfr) {
+-        // Keep uncommitted work queued. Readiness is CPU commit order, so the same
+-        // Metal queue still orders the copy and drawable work after the producer.
+-        while (ticket >= first) {
+-            const pq_item *candidate = &g_pq[(ticket - 1) % PQ];
+-            if (snap_is_committed(candidate->snap_v) &&
+-                (!candidate->sub_v || !rec_on() || atomic_load(&g_sub_cmt) >= candidate->sub_v)) break;
+-            ticket--;
+-        }
+-        if (ticket < first) {
+-            g_link_empty++;
++    uint64_t first, ticket;
++    pq_item it;
++    int from_rdy = rdy;   // a ready ticket is already GPU-complete (the worker waited); a stock take still needs the commit waits
++    if (rdy) {
++        // VFR worker path: take the oldest ready one without blocking.
++        // An empty FIFO keeps the last image (handled above).
++        if (!rdy_pop_oldest(&it, &ticket)) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }
++        if (g_pq_read < ticket) g_pq_read = ticket;   // taken for presentation (the worker frontier g_pq_wk already covers it)
++        first = ticket;
++        if (ticket <= g_pq_done) {   // defensive: the drop purges remove these first; a hit means a slot-ordering bug
++            RED_ONCE(173, "VFR worker: ready ticket %llu already freed, dropping it", (unsigned long long)ticket);
++            mtl_tex_unpin(it.t.serial);
++            pthread_cond_broadcast(&g_pq_cv);
+             pthread_mutex_unlock(&g_pq_mu);
+             return;
+         }
+     } else {
++        first = g_pq_read + 1; if (first <= g_pq_wk) first = g_pq_wk + 1;   // the worker took these ahead across a mode change; take after it
++        ticket = g_pq_in;
++        if (first > ticket) { g_link_empty++; pthread_mutex_unlock(&g_pq_mu); return; }   // nothing untaken (the worker owns the rest)
++    // In order, one frame per tick and at most one behind the newest: two waiting, the older now and the newer on the next tick; three or more, the older ones are dropped. Taking the newest
++    // dropped the one before whenever two frames landed in the same refresh, as frames of a 60 fps game that take 16-17.5 ms do, and the next frame then stayed up 33 ms
++    // (Dark Souls Remastered, from PR #31: presents within 14.7-18.7 ms 98.2 -> 99.98 %, about 2 ms more from enqueue to display). DM_PRESENT_FIFO=0 takes the newest, as before
+         static int fifo = -1;
+         if (fifo < 0) {
+             const char *e = getenv("DM_PRESENT_FIFO");
+@@ -18228,17 +18276,18 @@
+             MLOG("display link: %s", fifo ? "frames in order, at most one behind" : "the newest frame each tick (DM_PRESENT_FIFO=0)");
+         }
+         if (fifo && ticket > first) ticket = ticket - first >= 2 ? g_pq_in - 1 : first;
++        it = g_pq[(ticket - 1) % PQ];
++        g_pq_read = ticket; if (g_pq_wk < ticket) g_pq_wk = ticket;
++        if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
+     }
+-    pq_item it = g_pq[(ticket - 1) % PQ]; g_link_it_tin = it.t_in;
+-    g_pq_read = ticket;
+-    if (ticket > first) { g_link_dropped += ticket - first; for (uint64_t k = first; k < ticket; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); } }   // Old frames merged and dropped are recorded as "not presented", so the present statistics honestly count them as dropped frames
++    g_link_it_tin = it.t_in;
+     if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
+     g_link_ring[ticket % PRING] = (link_ent){ticket, update.targetPresentationTimestamp, (update.targetPresentationTimestamp - cb) * 1e3, gap_max * 1e3, nticks}; nticks = 0; gap_max = 0;
+     pthread_cond_broadcast(&g_pq_cv);
+     pthread_mutex_unlock(&g_pq_mu);
+     if (!vfr) link_drain_note(cb, cb - it.t_in, ticket > first);
+     int submitted;
+-    ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
++    if (!from_rdy) { ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v); }   // ready tickets already waited in the worker before promoting
+     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
+     g_link_hold_until = !vfr && submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
+     if (!submitted) {
+@@ -18369,9 +18418,11 @@
+ static void present_drop_for_suspend(void) {
+     pthread_mutex_lock(&g_pq_mu);
+     if (g_link_owns_layer) {
+-        uint64_t n = g_pq_in - g_pq_read;
+-        for (uint64_t k = g_pq_read + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
+-        g_link_dropped += n; g_pq_read = g_pq_in;
++        uint64_t w0 = g_pq_wk > g_pq_read ? g_pq_wk : g_pq_read;   // worker-taken tickets are freed by the worker (in-flight done-check) or the ready purge below, never here: each pin is released exactly once
++        uint64_t n = g_pq_in - w0;
++        for (uint64_t k = w0 + 1; k <= g_pq_in; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
++        g_link_dropped += n; g_pq_read = g_pq_in; if (g_pq_wk < g_pq_in) g_pq_wk = g_pq_in;
++        { uint64_t r0 = g_rdy_read; rdy_purge_leq(g_pq_in); g_link_dropped += g_rdy_read - r0; }   // VFR worker: promoted-but-unpresented frames are dropped too
+         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+         if (g_pq_done < g_pq_in) g_pq_done = g_pq_in;
+         pthread_cond_broadcast(&g_pq_cv);
+@@ -18386,9 +18437,43 @@
+     qos_class_t qc = QOS_CLASS_UNSPECIFIED; int rp = 0; pthread_get_qos_class_np(pthread_self(), &qc, &rp); atomic_store(&g_present_qos, (uint32_t)qc);
+     for (;;) {
+         pthread_mutex_lock(&g_pq_mu);
+-        while (g_pq_read == g_pq_in || g_link_owns_layer) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken
++        int wk = swx_vfr_path();
++        int rdy = g_rdy_in != g_rdy_read;   // ready tickets drain first, even across a mode change
++        if ((wk || rdy) && rdy && !g_link_owns_layer) {
++            // VFR worker path (link silent/rescued, or no link at all): pop
++            // the oldest ready ticket; the worker already waited for GPU
++            // completion. While the link owns the layer the callback pops.
++            pq_item it; uint64_t ticket; rdy_pop_oldest(&it, &ticket);
++            if (g_pq_read < ticket) g_pq_read = ticket;   // taken for presentation via the ready FIFO (the worker frontier g_pq_wk already covers it)
++            if (ticket <= g_pq_done) { mtl_tex_unpin(it.t.serial); pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); continue; }   // dropped while queued; the purge missed it only if it landed after it
++            g_link_it_tin = it.t_in;
++            if (ticket > 1 && g_pq_done < ticket - 1) g_pq_done = ticket - 1;
++            g_classic_busy = 1;
++            pthread_cond_broadcast(&g_pq_cv);
++            pthread_mutex_unlock(&g_pq_mu);
++            int submitted;
++            @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
++            pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
++            if (!submitted) {
++                pthread_mutex_lock(&g_pq_mu);
++                if (ticket > g_pq_done) g_pq_done = ticket;
++                pthread_cond_broadcast(&g_pq_cv);
++                pthread_mutex_unlock(&g_pq_mu);
++                pres_seen(ticket, -1);   // never reaches the screen: the screen wait must not wait for it
++            }
++            continue;
++        }
++        if (wk || rdy) {
++            // The link owns the takes right now, or nothing is ready yet: wait for the worker/callback (discard-aware).
++            if (atomic_load(&g_present_discard)) { pthread_mutex_unlock(&g_pq_mu); struct timespec wk_ts = {0, 5000000}; nanosleep(&wk_ts, NULL); continue; }
++            while ((g_rdy_in == g_rdy_read || g_link_owns_layer) && !atomic_load(&g_present_discard)) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++            pthread_mutex_unlock(&g_pq_mu);   // released before looping back to the top lock; the loop re-evaluates wk/rdy
++            continue;
++        }
++        while (g_pq_read == g_pq_in || g_pq_wk == g_pq_in || g_link_owns_layer || g_wk_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // In display-link mode the display-link callback takes them; an empty queue is judged by "taken"; "done" has to wait for the feedback of the present submit and lags behind taken. The worker frontier counts as taken too: a ticket the worker took ahead is in the ready FIFO (drained above) or already freed. g_wk_inflight: a VFR worker still owns takes across a mode change
++        if (g_pq_wk > g_pq_read) g_pq_read = g_pq_wk;   // the worker took these ahead across a mode change; take after it
+         pq_item it = g_pq[g_pq_read % PQ];
+-        uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
++        uint64_t ticket = ++g_pq_read; if (g_pq_wk < g_pq_read) g_pq_wk = g_pq_read; g_classic_busy = 1;
+         pthread_mutex_unlock(&g_pq_mu);
+         int submitted;
+         ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
+@@ -18405,7 +18490,7 @@
+     return NULL;
+ }
+ uint32_t mtl_present_qos(void) { return atomic_load(&g_present_qos); }
+-static void present_start(void) { pthread_t th; if (pthread_create(&th, NULL, present_main, NULL)) MDIE("cannot start the present thread"); pthread_detach(th); }
++static void present_start(void) { pthread_t th; if (pthread_create(&th, NULL, present_main, NULL)) MDIE("cannot start the present thread"); pthread_detach(th); if (pthread_create(&th, NULL, present_worker_main, NULL)) MDIE("cannot start the present worker thread"); pthread_detach(th); }
+ static _Atomic int g_present_discard;
+ void mtl_link_pause(int on);
+ // The short period when the front end goes to the background and waits for the game to save: presents are dropped directly (the display link does not call back in the background, enqueueing would block the game thread; nobody sees the picture anyway).
+@@ -18589,6 +18674,67 @@
+     pthread_mutex_unlock(&g_pq_mu);
+     // A snapshot present returns its ticket and, in *copy, its copy: the game's next acquire of this texture waits for the copy (mtl_present_wait_texture), not for the screen
+     return tk;
++}
++// ---------- SWX VFR present worker (Etapa 1) ----------
++// Wait until the GPU has finished the producer work a queued ticket depends
++// on. Called without holding g_pq_mu. Slices the waits so a discard (going
++// to the background) or a lost GPU aborts the wait. Returns 1 once GPU
++// completion is confirmed, 0 on discard/GPU loss: the caller promotes only
++// on 1, so an aborted ticket is never marked ready.
++static int wk_wait_gpu(const pq_item *it) {
++    if (it->snap_v) {
++        // The snapshot copy: commit first, then its GPU completion signal.
++        snap_commit_wait(it->snap_v);
++        for (;;) {
++            if (!g_snap_ev || g_snap_ev.signaledValue >= it->snap_v) break;
++            if (atomic_load(&g_present_discard) || atomic_load(&g_gpu_lost)) return 0;
++            [g_snap_ev waitUntilSignaledValue:it->snap_v timeoutMS:100];
++        }
++    } else {
++        // No snapshot: the game's own draws (sub_v) and/or an external
++        // producer (ev_val), each with its corresponding wait.
++        if (it->ev_val && g_ext_ev) {
++            for (;;) {
++                if (g_ext_ev.signaledValue >= it->ev_val) break;
++                if (atomic_load(&g_present_discard) || atomic_load(&g_gpu_lost)) return 0;
++                [g_ext_ev waitUntilSignaledValue:it->ev_val timeoutMS:100];
++            }
++        }
++        if (it->sub_v) {
++            sub_commit_wait(it->sub_v);   // the encode thread has committed the submissions...
++            while (!mtl_wait(it->sub_v, 100000000ull)) {   // ...and the GPU has run them (submit is not enough)
++                if (atomic_load(&g_present_discard) || atomic_load(&g_gpu_lost)) return 0;
++            }
++        }
++    }
++    return 1;
++}
++static void *present_worker_main(void *arg) {
++    (void)arg;
++    pthread_setname_np("nvn-present-worker");
++    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++    for (;;) {
++        pthread_mutex_lock(&g_pq_mu);
++        while (!swx_vfr_path() || g_pq_wk >= g_pq_in) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++        uint64_t ticket = g_pq_wk + 1;
++        if (ticket <= g_pq_done) { g_pq_wk = ticket; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu); continue; }   // freed by a fallback while queued; skip without GPU wait (unlocked before looping back to the top lock)
++        pq_item it = g_pq[(ticket - 1) % PQ];
++        g_pq_wk = ticket; g_wk_inflight++;
++        pthread_mutex_unlock(&g_pq_mu);
++        int gpu_ok = wk_wait_gpu(&it);   // 1 once GPU completion is confirmed; 0 aborts the promotion below
++        pthread_mutex_lock(&g_pq_mu);
++        g_wk_inflight--;
++        if (!gpu_ok || ticket <= g_pq_done) {
++            mtl_tex_unpin(it.t.serial);   // aborted, or a stall/suspend fallback freed this ticket while it waited
++        } else {
++            while (g_rdy_in - g_rdy_read >= SWX_RDY) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
++            if (ticket <= g_pq_done) mtl_tex_unpin(it.t.serial);
++            else { g_rdy[g_rdy_in % SWX_RDY] = it; g_rdy_ticket[g_rdy_in % SWX_RDY] = ticket; g_rdy_in++; }
++        }
++        pthread_cond_broadcast(&g_pq_cv);
++        pthread_mutex_unlock(&g_pq_mu);
++    }
++    return NULL;
+ }
+ // For the layer's frame history (hle_vi.c): the ticket of the last present queued, and the last one the present queue has handed on (to the GPU and the display, or dropped)
+ void mtl_present_progress(uint64_t *queued, uint64_t *done) { pthread_mutex_lock(&g_pq_mu); *queued = g_pq_in; *done = g_pq_done; pthread_mutex_unlock(&g_pq_mu); }
+@@ -18662,9 +18808,11 @@
+         uint64_t now = now_ns(), last = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED);
+         if (g_pq_read >= tk) continue;
+         if (now - last < STALL_NS) { pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts); continue; }   // The display link is still running, it is just not this one's turn yet: keep waiting (bounded, no busy spinning)
+-        uint64_t n = tk - g_pq_read;
+-        for (uint64_t k = g_pq_read + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
+-        g_link_dropped += n; g_pq_read = tk;
++        uint64_t w0 = g_pq_wk > g_pq_read ? g_pq_wk : g_pq_read;   // worker-taken tickets are freed by the worker (in-flight done-check) or the ready purge below, never here: each pin is released exactly once
++        uint64_t n = tk > w0 ? tk - w0 : 0;
++        for (uint64_t k = w0 + 1; k <= tk; k++) { g_pres[k % PRING] = (pres_ent){k, -1}; mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
++        g_link_dropped += n; g_pq_read = tk; if (g_pq_wk < tk) g_pq_wk = tk;
++        { uint64_t r0 = g_rdy_read; rdy_purge_leq(tk); g_link_dropped += g_rdy_read - r0; }   // VFR worker: promoted-but-unpresented frames are dropped too
+         while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+         if (g_pq_done < tk) g_pq_done = tk;
+         pthread_cond_broadcast(&g_pq_cv);

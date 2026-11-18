@@ -59,9 +59,46 @@ def classify(line):
     }
 
 
+def _parse_vfr_window(line):
+    """Janela VFR estruturada; tolera linhas legadas sem todos os campos."""
+    raw = line.strip()
+    m = re.search(
+        r"VFR up to present (\d+): (\S+) (\S+) (\d+) Hz, (\S+) clock, display (\d+) Hz, "
+        r"average present ([\d.]+) ms, applied ([\d.]+) ms, sampled time ([\d.]+) s, "
+        r"ratio ([\d.]+) \((\d+) VFR steps\), ring waits ([\d.]+) / ticket waits ([\d.]+) ms, "
+        r"queued (\d+), (\d+) of last (\d+) dropped, guest interval (\d+)", raw)
+    if not m:
+        return {"raw": raw}
+    return {
+        "raw": raw,
+        "present": int(m.group(1)),
+        "policy": m.group(2),
+        "clock": m.group(3),
+        "hz": int(m.group(4)),
+        "clock_source": m.group(5),
+        "display_hz": int(m.group(6)),
+        "avg_present_ms": float(m.group(7)),
+        "applied_ms": float(m.group(8)),
+        "sampled_s": float(m.group(9)),
+        "ratio": float(m.group(10)),
+        "steps": int(m.group(11)),
+        "ring_wait_ms": float(m.group(12)),
+        "ticket_wait_ms": float(m.group(13)),
+        "queued": int(m.group(14)),
+        "dropped": int(m.group(15)),
+        "window": int(m.group(16)),
+        "guest_interval": int(m.group(17)),
+    }
+
+
 def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
            "display_windows": [], "display_link": {}, "vfr_windows": [], "timing_windows": [],
+           "present_windows": [],
+           # Etapa 0: contadores futuros ainda nao emitidos pelo host.
+           # None = indisponivel (nunca 0, que pareceria medicao).
+           "ready_depth": None, "drop_oldest": None,
+           "credit": None, "promote_ms": None,
            "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0,
            "ka_kernels": 0, "ka_gpu_ms": 0.0, "ka_max_ms": 0.0,
            "ka_stopped": 0, "ka_stop_cb_max_ms": 0.0,
@@ -102,14 +139,49 @@ def report(path):
                     "discarded": discarded, "p99_ms": float(shown[5]),
                 })
             link = re.search(
-                r"display link up to tick \d+: ticks (\d+), presents (\d+), empty ticks (\d+) "
+                r"display link up to tick (\d+): ticks (\d+), presents (\d+), empty ticks (\d+) "
                 r"\(held for the present interval (\d+)\), old frames dropped by merging (\d+)", line)
             if link:
-                fields = ("ticks", "presents", "empty", "held", "merged")
+                fields = ("up_to_tick", "ticks", "presents", "empty", "held", "merged")
                 rep["display_link"] = dict(zip(fields, map(int, link.groups())))
+                # Sufixo opcional (logs legados podem nao te-lo): latencias e drenos.
+                m = re.search(
+                    r"submission ahead of target display p50 ([\d.]+) ms / min ([\d.]+) ms", line)
+                rep["display_link"]["submit_ahead_p50_ms"] = float(m.group(1)) if m else None
+                rep["display_link"]["submit_ahead_min_ms"] = float(m.group(2)) if m else None
+                m = re.search(
+                    r"game enqueue to target display p50 ([\d.]+) ms / min ([\d.]+) / max ([\d.]+) ms", line)
+                if m:
+                    rep["display_link"]["enqueue_to_target_p50_ms"] = float(m.group(1))
+                    rep["display_link"]["enqueue_to_target_min_ms"] = float(m.group(2))
+                    rep["display_link"]["enqueue_to_target_max_ms"] = float(m.group(3))
+                else:
+                    rep["display_link"]["enqueue_to_target_p50_ms"] = None
+                    rep["display_link"]["enqueue_to_target_min_ms"] = None
+                    rep["display_link"]["enqueue_to_target_max_ms"] = None
+                m = re.search(r"standing frames drained (\d+) times", line)
+                rep["display_link"]["drained"] = int(m.group(1)) if m else None
+            pres = re.search(
+                r"present: game enqueue to screen p50 ([\d.]+) ms, p95 ([\d.]+), max ([\d.]+) "
+                r"over 300 frames shown \(ticket (\d+)\)", line)
+            if pres:
+                rep["present_windows"].append({
+                    "ticket": int(pres.group(4)),
+                    "enqueue_to_screen_p50_ms": float(pres.group(1)),
+                    "enqueue_to_screen_p95_ms": float(pres.group(2)),
+                    "enqueue_to_screen_max_ms": float(pres.group(3)),
+                })
             if ("[nvn] vfr frame pace" in line.lower() or "[nvn] vfr cadence" in line.lower()
                     or "[nvn] vfr up to present" in line.lower()):
-                rep["vfr_windows"].append(line.strip())
+                rep["vfr_windows"].append(_parse_vfr_window(line))
+                # Contadores futuros da Etapa 1+: opcionais; ausentes = None (indisponivel).
+                for key, pat in (("ready_depth", r"ready[ _-]depth (\d+)"),
+                                  ("drop_oldest", r"drop[ _-]oldest (\d+)"),
+                                  ("credit", r"credit ([\d.]+)"),
+                                  ("promote_ms", r"promote[ _-]ms ([\d.]+)")):
+                    m = re.search(pat, line)
+                    if m:
+                        rep[key] = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
             timing = re.search(
                 r"timing up to frame (\d+): frame time p50 [\d.]+ / p95 ([\d.]+).*?;"
                 r" GPU p50 ([\d.]+) / p95 ([\d.]+)", line)
@@ -222,7 +294,31 @@ def main(argv=None):
               f"{sum(w['discarded'] for w in windows)} discarded, "
               f"worst window p99 {max(w['p99_ms'] for w in windows):.2f} ms")
     if rep["display_link"]:
-        print(f"display link (last cumulative report): {rep['display_link']}")
+        dl = rep["display_link"]
+        print(f"display link (last report, up to tick {dl.get('up_to_tick')}, window of {dl.get('ticks')} ticks): presents {dl.get('presents')}, "
+              f"empty {dl.get('empty')}, held {dl.get('held')}, merged {dl.get('merged')}")
+        print(f"  enqueue to target display p50 "
+              f"{dl.get('enqueue_to_target_p50_ms') if dl.get('enqueue_to_target_p50_ms') is not None else 'n/a'} ms, "
+              f"submit ahead p50 "
+              f"{dl.get('submit_ahead_p50_ms') if dl.get('submit_ahead_p50_ms') is not None else 'n/a'} ms, "
+              f"drained {dl.get('drained') if dl.get('drained') is not None else 'n/a'}")
+    if pw := rep.get("present_windows"):
+        print(f"enqueue to screen: p50 {pw[-1]['enqueue_to_screen_p50_ms']:.1f} ms "
+              f"(p95 {pw[-1]['enqueue_to_screen_p95_ms']:.1f}, max {pw[-1]['enqueue_to_screen_max_ms']:.1f}, "
+              f"{len(pw)} windows)")
+    if vw := rep.get("vfr_windows"):
+        last = vw[-1]
+        if "hz" in last:
+            print(f"vfr: {last.get('policy')} {last.get('hz')} Hz, display {last.get('display_hz')} Hz, "
+                  f"avg present {last.get('avg_present_ms'):.2f} ms, ratio {last.get('ratio'):.3f} "
+                  f"({last.get('steps')} steps), queued {last.get('queued')}, "
+                  f"dropped {last.get('dropped')}/{last.get('window')}")
+        else:
+            print(f"vfr: {len(vw)} legacy window(s)")
+    print(f"future counters (Etapa 0, indisponiveis): ready_depth={rep.get('ready_depth', None) if rep.get('ready_depth', None) is not None else 'n/a'}, "
+          f"drop_oldest={rep.get('drop_oldest', None) if rep.get('drop_oldest', None) is not None else 'n/a'}, "
+          f"credit={rep.get('credit', None) if rep.get('credit', None) is not None else 'n/a'}, "
+          f"promote_ms={rep.get('promote_ms', None) if rep.get('promote_ms', None) is not None else 'n/a'}")
     print(f"frame-step transitions: {', '.join(rep['steps']) if rep['steps'] else 'none'}")
     for r in rep["red"][:10]:
         print(f"RED: {r}")

@@ -140,50 +140,102 @@ drop_stale_newfiles() {   # --force only: remove add-file targets of unapplied p
 
 WANT="$(hash_state)"
 
-# Append-only upgrade from the installed VFR v2 stack. Preserve unrelated
-# local core edits (for example PSO warm-demand) by applying only the new
-# trailing ratio-load correction when the exact v2 marker and full prefix
-# sentinels match. The fixed hash also prevents this path from adopting a
-# different or partially upgraded series.
+# Exact append-only upgrades for the installed VFR v2 stack. These paths
+# preserve local core edits outside the named patch hunk (notably PSO warm
+# demand) and are enabled only for known prefix hashes plus full sentinels.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
+VFR_RATIO_PREFIX_COUNT=10
+VFR_RATIO_PREFIX_HASH="08aa37472c9ef5e5"
 VFR_RATIO_FIX="dm_vfr_ratio_load_fix.patch"
-hash_vfr_v2_prefix() {
-    { sed -n "1,${VFR_V2_PREFIX_COUNT}p" "$SERIES"
-      for p in $(sed -n "1,${VFR_V2_PREFIX_COUNT}p" "$SERIES"); do cat "$HERE/$p"; done
+PRESENT_WORKER="dm_present_worker.patch"
+PRESENT_WORKER_OLD="compat/dm_present_worker-v1.patch"
+hash_series_prefix() {
+    n="$1"
+    { sed -n "1,${n}p" "$SERIES"
+      for p in $(sed -n "1,${n}p" "$SERIES"); do cat "$HERE/$p"; done
     } | shasum -a 256 | cut -c1-16
 }
-apply_vfr_ratio_append() (
-    if [ "$(hash_vfr_v2_prefix)" != "$VFR_V2_PREFIX_HASH" ] ||
-       [ "$(sed -n "$((VFR_V2_PREFIX_COUNT + 1))p" "$SERIES")" != "$VFR_RATIO_FIX" ] ||
-       [ -n "$(sed -n "$((VFR_V2_PREFIX_COUNT + 2))p" "$SERIES")" ]; then
-        exit 1
-    fi
-    i=0
+verify_series_prefix() {
+    n="$1"; i=0
     for p in $PATCHES; do
-        i=$((i + 1))
-        [ "$i" -le "$VFR_V2_PREFIX_COUNT" ] || break
-        is_applied "$p" || exit 1
+        i=$((i + 1)); [ "$i" -le "$n" ] || break
+        is_applied "$p" || return 1
     done
-    [ "$i" -eq "$((VFR_V2_PREFIX_COUNT + 1))" ] || exit 1
-    if is_applied "$VFR_RATIO_FIX"; then
-        stack_verified || exit 1
-    else
-        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
-        patch --batch -V none -p1 -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
-        is_applied "$VFR_RATIO_FIX" || exit 1
-        stack_verified || exit 1
+    [ "$i" -eq "$((n + 1))" ]
+}
+append_vfr_ratio_and_worker() (
+    [ "$(hash_series_prefix "$VFR_V2_PREFIX_COUNT")" = "$VFR_V2_PREFIX_HASH" ] || exit 1
+    [ "$(hash_series_prefix "$VFR_RATIO_PREFIX_COUNT")" = "$VFR_RATIO_PREFIX_HASH" ] || exit 1
+    [ "$(sed -n '11p' "$SERIES")" = "$PRESENT_WORKER" ] || exit 1
+    [ -z "$(sed -n '12p' "$SERIES")" ] || exit 1
+    if [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ]; then
+        verify_series_prefix "$VFR_V2_PREFIX_COUNT" || exit 1
+        if ! is_applied "$VFR_RATIO_FIX"; then
+            patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
+            patch --batch -V none -p1 -d "$CORE" < "$HERE/$VFR_RATIO_FIX" >/dev/null || exit 1
+            is_applied "$VFR_RATIO_FIX" || exit 1
+        fi
+    elif [ "$(cat "$MARKER")" = "$VFR_RATIO_PREFIX_HASH" ]; then
+        verify_series_prefix "$VFR_RATIO_PREFIX_COUNT" || exit 1
+    else exit 1
     fi
+    if ! is_applied "$PRESENT_WORKER"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
+        is_applied "$PRESENT_WORKER" || exit 1
+    fi
+    stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
-if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
-   [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ] &&
-   [ "$(hash_vfr_v2_prefix)" = "$VFR_V2_PREFIX_HASH" ]; then
-    if ! apply_vfr_ratio_append; then
-        echo "[ERROR] append-only VFR ratio upgrade failed preflight/apply; core left otherwise untouched." >&2
+hash_present_worker_state() {
+    old_patch="$1"
+    { cat "$SERIES"
+      for p in $PATCHES; do
+          if [ "$p" = "$PRESENT_WORKER" ]; then cat "$HERE/$old_patch"; else cat "$HERE/$p"; fi
+      done
+    } | shasum -a 256 | cut -c1-16
+}
+apply_present_worker_migration() (
+    CORE="$1"; old_patch="$2"
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$old_patch" >/dev/null || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$old_patch" >/dev/null || exit 1
+    ! is_applied "$old_patch" || exit 1
+    patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
+    patch --batch -V none -p1 -d "$CORE" < "$HERE/$PRESENT_WORKER" >/dev/null || exit 1
+    is_applied "$PRESENT_WORKER"
+)
+migrate_present_worker() (
+    old_patch="$1"
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/swx-present-worker.XXXXXX")"
+    trap 'rm -rf "$stage"' EXIT
+    sed -n -e 's|^--- a/||p' -e 's|^+++ b/||p' "$HERE/$old_patch" "$HERE/$PRESENT_WORKER" | sort -u |
+        while IFS= read -r f; do
+            if [ -f "$CORE/$f" ]; then mkdir -p "$stage/$(dirname "$f")"; cp -p "$CORE/$f" "$stage/$f"; fi
+        done
+    apply_present_worker_migration "$stage" "$old_patch"
+)
+OLD_WORKER_PATCH=""
+if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$(hash_present_worker_state "$PRESENT_WORKER_OLD")" ] && is_applied "$PRESENT_WORKER_OLD"; then
+    OLD_WORKER_PATCH="$PRESENT_WORKER_OLD"
+fi
+if [ "$FORCE" -eq 0 ] && [ -n "$OLD_WORKER_PATCH" ] &&
+   [ "$(hash_series_prefix "$VFR_RATIO_PREFIX_COUNT")" = "$VFR_RATIO_PREFIX_HASH" ] && verify_series_prefix "$VFR_RATIO_PREFIX_COUNT"; then
+    if ! migrate_present_worker "$OLD_WORKER_PATCH" || ! apply_present_worker_migration "$CORE" "$OLD_WORKER_PATCH" || ! stack_verified; then
+        echo "[ERROR] present-worker patch upgrade failed preflight/apply; core left unchanged where possible." >&2
         exit 1
     fi
-    echo "patches: appended VFR ratio-load fix ($WANT)."
+    echo "$WANT" > "$MARKER"
+    echo "patches: upgraded present worker ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] &&
+   { [ "$(cat "$MARKER")" = "$VFR_V2_PREFIX_HASH" ] || [ "$(cat "$MARKER")" = "$VFR_RATIO_PREFIX_HASH" ]; }; then
+    if ! append_vfr_ratio_and_worker; then
+        echo "[ERROR] append-only VFR present-worker update failed preflight/apply; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: appended VFR ratio and present-worker fixes ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$WANT" ]; then

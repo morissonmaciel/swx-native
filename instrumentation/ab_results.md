@@ -156,3 +156,62 @@ luneta's continuous GPU cost; the ≥20% residency-commit perf gate is not
 formally closed and an anomalous off-run is not used as quantitative proof,
 so the flag stays default off. Extra margin before flicker observed, not
 claimed as a flicker cure.
+
+## Present worker FIFO — two VFR-on gameplay runs (2026-11-18)
+
+Player observation on the same route and gameplay: frame pacing felt almost
+perfect, with a flat frame-time line. The player also reported that the
+flickering textures in the scope (luneta) UI, a recurring glitch on the stock
+path when using the graphics- and texture-heavy scope overlay, became nearly
+absent with VFR and the present worker active.
+
+Both runs used `SWX_VFR=relaxed` and `SWX_VFR_HZ=auto` on a 60 Hz link with
+a 2560×1440 drawable. Each logged 2,700 presents in 45 s and an on-screen
+p99 of 16.67 ms in every window. Late intervals and discarded presents were
+3 / 6 in run 1 and 2 / 5 in run 2, all by the frame-900 window. Both runs
+logged zero empty link ticks, zero merged frames and zero `[RED]` events.
+
+The flicker observation is qualitative. These logs do not count flicker or
+show how many frames were ready in the FIFO at each refresh.
+
+The available VFR-off run used the same 2560×1440 drawable. Both VFR entries
+were absent from `env.txt`, and boot selected the stock 60 fps path. It logged
+5,400 presents, with an on-screen p99 of 16.67 ms in every window, three late
+intervals, five discarded frames and no `[RED]`. All late and discarded counts
+were in the first 2,700 presents. In the common gameplay windows through frame
+2,700, the per-window median enqueue-to-screen time was 59.4–59.8 ms stock and
+60.5–61.1 ms with the worker. This comparison shows similar display cadence at
+60 Hz. Visual flicker and the comparison with the previous VFR build remain open.
+
+The second stock run also used a 2560×1440 drawable and logged 4,800
+presents. The player reported very good frame pacing, two noticeable
+hitches and a few episodes of scope UI texture flicker. The log showed an
+on-screen p99 of 16.67 ms in every window, four late intervals and five
+discarded presents by frame 1,500, zero `[RED]`, and no `[longframe]`
+entries. Enqueue-to-screen p50 rose from 59.8 ms at ticket 1,506 to
+76.3 ms at ticket 1,806, and remained between 76.1 and 76.6 ms through the
+end. That is roughly one additional refresh of latency during otherwise
+steady presentation. The logs do not identify the exact moments of the
+two hitches or the flicker.
+
+### Extra VFR-on run and Gate 1 decision (2026-11-18)
+
+The extra `relaxed/auto` run logged 4,500 presents in 75 s at 60/60 and
+2560×1440. On-screen p99 was 16.67 ms in all 15 windows, with zero empty
+link ticks, zero merges and zero `[RED]`. All on-screen drops and discards
+were in the windows through frame 1,200. The sole `[longframe]` was 24.6 ms
+at startup. The player reported one micro-hitch and one episode of scope UI
+flicker. From frame 1,500 onward, enqueue-to-screen p50 stayed at
+77.4–78.0 ms, about one refresh higher than the earlier VFR-on runs over
+the shared windows, while the screen cadence stayed steady.
+
+The player also reports that under sustained drops, stock can settle at
+30 fps on a 60 Hz panel and take time to recover. Both archived stock
+runs from 2026-11-17 show this fallback at startup, entering the two-vsync
+hold at present 12 and returning to one vsync at present 43. Neither of
+the two stock runs on 2026-11-18 entered that hold.
+
+Gate 1 is accepted for advancing to Stage 2 based on the reproducible
+60/60 result and player approval. Full protocol validation remains open,
+including the matched previous VFR baseline, an isolated producer stall
+with one ready frame in reserve, and display-link pause and recovery.

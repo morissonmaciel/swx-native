@@ -18,6 +18,7 @@ opt-in via `ab_test.py`).
 | 8 | `dm_residency_ub_ring.patch` | `SWX_RESIDENCY_UB_RING` | promoted (install pins `=1`) | hot UB rotation 0 vs 34–41 MB/window; residency commits 0.1–1.3 vs 3.1–5.2 ms; frame p95 unchanged; not a fix for the 20–24 ms luneta GPU cost | 2×2 luneta A/B, `ab_results.md` + `docs/residency_ub_ring.md` |
 | 9 | `dm_rt_heap_reserve.patch` | `SWX_RT_HEAP_RESERVE` | experimental, in main, default off | automatic-MTLHeap arenas (16 MB min, 64 MB/arena, 256 MB total) for private RenderTarget heaps; mechanism pass (87–100% stock RT creations eliminated hot, 0 fallback); perf gate open | `ab_results.md` |
 | 10 | `dm_vfr_ratio_load_fix.patch` | `SWX_VFR` | VFR guest timing fix | BOTW delta-time and UI-step VFR stubs load the published ratio at state `+0xA0`; gameplay A/B pending | `docs/vfr_framepace.md` |
+| 11 | `dm_present_worker.patch` | `SWX_VFR` | experimental (active whenever VFR armed; no new flags) | worker waits for source-safe completion, keeps cancellation observable without advancing `g_pq_done` over unfinished reads, and blocks promotion after purge; ready FIFO of 2; `SWX_VFR=0` stock untouched; gameplay A/B pending | `docs/vfr_framepace.md` |
 
 ## Out of tree (frozen, not in `series`)
 

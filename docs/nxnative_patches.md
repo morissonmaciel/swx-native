@@ -58,6 +58,12 @@ application walks in order and `--force` reverts walk in reverse.
    patch's context depends on the earlier ones, so forward-order revert
    fails), then a normal run. The way out of half-applied or hand-edited
    trees.
+
+   During the present-worker review, a local `swb_stats` edit shifted the
+   context for patch #7 and the forced pass failed. Targeted reapplication
+   restored the stack, and a normal invocation verified the marker and all
+   sentinels. The incident concerns forced normalization of a locally edited
+   core. Use a clean copy to verify a full reverse and reapply.
 5. A conflict (upstream changed the same lines) fails the check with the
    `.rej` hunks left for manual rebase: update the `.patch` file, never the
    core directly. Direct core edits are invisible to this mechanism and will

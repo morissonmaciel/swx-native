@@ -39,3 +39,64 @@ previous implementation.
 
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
+
+## Etapa 1 — present worker + ready FIFO (`dm_present_worker.patch`)
+
+Active whenever VFR is armed (`SWX_VFR=relaxed`/`uncapped` with a resolved
+rate); `SWX_VFR=0` keeps the stock take/wait/present path byte-for-byte.
+No new flags, no new log lines (the Etapa 0 parser needs no change).
+
+- A worker thread (`nvn-present-worker`) takes `g_pq[]` tickets in order
+  through `g_pq_wk`, separate from `g_pq_read`, which still means taken for
+  presentation. Per ticket, it waits until the GPU finished the producer
+  work it depends on: snapshot copy via `g_snap_ev` (after
+  `snap_commit_wait`), external producer via `g_ext_ev`, and the game's own
+  draws via `mtl_wait` on the submission fence. It promotes only when that
+  wait is source-safe and discard is off. The ready FIFO is capped at 2;
+  the worker retains its pin while waiting for space.
+  A nonzero producer token without its completion event is a fatal invariant
+  failure; the worker never treats a missing event as proof that the source is
+  safe to reuse.
+- The display-link callback loses `ext_wait`/`snap_commit_wait`/
+  `sub_commit_wait`: it pops the oldest ready ticket without blocking and
+  calls `present_now()`; an empty FIFO keeps the last image on screen
+  (`g_link_empty++`, as before). The classic present thread pops ready
+  tickets the same way while the link is silent, rescued, or absent, and
+  otherwise idles exactly as in stock.
+- Ordering across VFR arm/disarm is preserved: ready tickets drain first,
+  stock takes wait for `g_wk_inflight == 0`, and stall/suspend purges mark
+  tickets canceled under `g_pq_mu` before any condition wait releases it.
+  The worker checks cancellation before promotion and during FIFO backpressure;
+  the callback checks it before presentation. Canceled producer work is drained
+  to a source-safe point before `g_pq_done` can cross it.
+- The `g_snap` ticket/ev checks remain in place: a copy is readable only
+  after it completes, and snapshot slots stay busy until their source-safe
+  frontier advances. A canceled ticket is recorded as dropped in presentation
+  history and wakes screen observers, but does not leap `g_pq_done` over an
+  earlier in-flight present or producer read. `RED_ONCE(111)` is kept; the
+  defensive `RED_ONCE(173)` still catches a ready ticket at or below
+  `g_pq_done`. Each enqueue pin has one owner through producer and FIFO waits,
+  then is released once on presentation or cancellation/drop.
+
+## Gameplay gate protocol (user-run; decisive case: link stall)
+
+Triple A/B with the same panel, drawable, save, route, refresh setting
+and input sequence, each condition run twice with a warm cache, steady
+gameplay captured separately from startup/loading/occlusion:
+
+- (a) candidate: this build, `SWX_VFR=relaxed` (then `uncapped`);
+- (b) base: previous host build (VFR without the worker);
+- (c) stock: `SWX_VFR=0`.
+
+Cover 60/60 and 60/120, a lock that does not divide the panel rate,
+uncapped play, a movie, a scripted scene, and recovery from a paused link
+(the stall case decides: drop accounting must match, the picture must
+resume without a hang, and no `RED` may fire). Exercise conflicting stock
+FPS overrides with VFR enabled and disabled.
+
+For each pair run `collect <label>` on both arms then `compare`, and judge
+on on-screen interval p99 and frames held longer than 1.5× their expected
+period, `late`/discarded counts, display-link `empty`/`held`/`merged`,
+enqueue→screen p50/p95, TSV `@link_target_ms` vs `@pres_at_ms`, GPU vs
+present timings, game-time drift in a steady segment, and
+UI/input/physics/cutscene behavior.

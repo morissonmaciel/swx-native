@@ -67,6 +67,52 @@ GPU work and game present timings. Assess game-time drift separately in
 a steady segment and check UI, input, physics and cutscene transitions.
 Gameplay validation is pending.
 
+### Etapa 0 — measurement protocol (instrumentation ready, no host change)
+
+Scope: `log_report.py` only; no new flags, no host/log-format change.
+The VFR path (`SWX_VFR=relaxed`/`uncapped`, rate in `SWX_VFR_HZ`) already
+emits everything Etapa 0 needs; this step only completes the parser and
+marks what does not exist yet.
+
+Observables and where they come from:
+
+- Ticks with no new frame: `empty ticks` in `display link up to tick`.
+- Intermediate ticks holding the frame: `held for the present interval`.
+- Merges dropping old frames: `old frames dropped by merging`.
+- Enqueue→screen time: `game enqueue to target display p50/min/max`
+  (display-link suffix) and `present: game enqueue to screen
+  p50/p95/max over 300 frames` (one entry per 300-frame window in
+  `present_windows`).
+- On-screen health per 300-frame window: `shown` (= frames − discarded),
+  `late` (= dropped − discarded), `discarded`, `p99_ms`.
+- VFR/timing windows: `VFR up to present` parsed to
+  `{present, policy, hz, display_hz, avg_present_ms, applied_ms, ratio,
+  steps, ring/ticket waits, queued, dropped/window, guest_interval}`
+  (legacy `vfr frame pace`/`cadence` lines kept as `{raw}`); `timing up
+  to frame` keeps `frame_p95_ms`, `gpu_p50/p95_ms`.
+
+Legacy compatibility: the display-link latency/drain suffix and the
+`present:` line are optional — a legacy line with only the five base
+counters still parses, missing fields report `null` (text: `n/a`), never
+a fabricated number.
+
+Future counters (`ready_depth`, `drop_oldest`, `credit`, `promote_ms`)
+are NOT emitted by the host in Etapa 0. The report carries them as
+`null`/`n/a` — never `0`, which would look like a measurement. If a
+future log ever contains them, the parser picks them up; otherwise they
+stay unavailable.
+
+User-run gameplay gates (out of scope for this agent — real runs by the
+user): fixed save/route from the fixed-variables section, two runs per
+condition with a warm cache, covering 60/60, 60/120, a lock that does
+not divide the panel rate, uncapped play, a movie, a scripted scene and
+recovery from a paused link, plus conflicting stock FPS overrides with
+VFR on/off. For each pair run `collect <label>` on both arms then
+`compare`, and judge on on-screen p99, `late` counts, display-link
+`empty`/`held`/`merged`, enqueue→screen p50/p95, TSV
+`@link_target_ms` vs `@pres_at_ms`, GPU vs present timings, game-time
+drift in a steady segment, and UI/input/physics/cutscene behavior.
+
 ## Bind-once gate (experimental, default off)
 
 `bind_once on` sets `SWX_GPU_BIND_ONCE=1`. It suppresses only redundant
