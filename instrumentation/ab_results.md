@@ -373,3 +373,53 @@ submit time. In a separate run-1 burst, 11 uploads totaling 56.7 MB took
 bucket (8.03 ms). Run 2 logged two eligible empty ticks in the burst window
 and nine in two later windows. The TSV gives frame 692 a 16.667 ms presented
 interval; the empty ticks describe its surrounding window.
+
+## Upload blit recorder — same-build A/B (2026-11-18)
+
+Both arms used the same installed build with `DM_NVN_ENC_THREAD=1`,
+`SWX_VFR=relaxed`, `SWX_VFR_HZ=auto`, and
+`SWX_GPU_TEXTURE_POOL=1`; only `SWX_NVN_UP_BLIT_REC` changed. The OFF
+measurements below were verified in the earlier A/B review, but their source
+logs are no longer available in the current launcher log rotation. They are
+therefore recorded as verified results, not represented as newly archived
+captures. ON logs are preserved under the BOTW install's
+`.swx-history/ab-up-blit-rec-on-01` and `ab-up-blit-rec-on-02`; each includes
+the original log, parser report, and provenance derived from launcher lines.
+No current `env.txt` snapshot was taken while the environment was being
+restored in parallel.
+
+| Arm / run | uploads / MB | whole / submit+present (ms) | on-screen p99 | User observation |
+|---|---:|---:|---:|---|
+| OFF 1 | 127 / 28.4 | 29.5 / 22.7 | 16.67 ms in all windows | Control |
+| OFF 2 | 127 / 28.4 | 23.8 / 19.7 | 16.67 ms in all windows | Control |
+| ON 1, frame 623 | 149 / 39.6 | 30.2 / 17.5 | 16.67 ms in all windows | Seemed steadier; luneta texture flicker not observed |
+| ON 2, frame 584 | 137 / 29.3 | 25.2 / 12.4 | 16.67 ms in all windows | One spike; luneta texture flicker returned |
+
+The recorder reduced submit+present time in both ON bursts, including the
+closely matched OFF 1 / ON 2 upload volumes. Whole-frame time did not improve
+consistently: ON 1 was slower than either OFF run, while ON 2 was close to OFF
+2. The perceived hitch and luneta result also did not repeat consistently,
+and every arm retained 16.67 ms on-screen p99. This is evidence that the
+recorder can shorten the measured submit path, but not that it reliably
+improves the end-to-end hitch or presentation experience.
+
+Gate 1 (correctness / launch with recorder enabled): **PASS**. Gate 2
+(promotion for burst hitch reduction): **NOT PASSED**; keep
+`SWX_NVN_UP_BLIT_REC` experimental and off by default. Patch #17 remains
+available for further work, but these runs do not justify promotion. Capture
+provenance is per-run launcher output; the OFF source logs were unavailable
+to re-archive, and no env snapshot is claimed for those runs.
+
+### Post-A/B run with the restored environment (2026-11-18)
+
+The player reported no visible texture glitches or spikes. The launcher
+confirmed effective `DM_NVN_ENC_THREAD=0`, the blit recorder opt-in absent,
+and `SWX_GPU_TEXTURE_POOL=1`. The host exited normally with no `[RED]`.
+It reported 3,600 game presents in 60 s, with 16.67 ms on-screen p99 in all
+12 windows and one eligible empty tick in the initial 300-refresh window.
+Frame 595 logged 137 first uploads / 29.3 MB, 27.2 ms whole frame and
+24.5 ms submit+present, without an eligible empty tick in its window. The
+counts and volume match ON 2, which logged 25.2 / 12.4 ms while the player
+reported a hitch and flicker. This follow-up changes the recorder setting
+as well as the prototype setting and does not isolate either one's effect.
+Preserved capture: `/tmp/swx-texture-burst-20261118/post-blit-ab-170259.log`.
