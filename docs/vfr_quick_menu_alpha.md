@@ -64,4 +64,19 @@ policy. The installer supports an append-only upgrade from the worker-only
 stack and from the corrected queue-policy stack, while retaining the
 historical display-rate migration when its credit-fix preconditions hold.
 
-No gameplay result has been recorded yet.
+## First gameplay result (2026-11-18)
+
+The player reported that the guard fixed the quick-menu black flash on the
+first try. The candidate log confirms `SWX_VFR=relaxed`, `SWX_VFR_HZ=auto`,
+and a normal host exit. The visual result is the player's observation;
+the log does not record individual quick-menu openings. This capture covers
+the initial VFR visual check. The full selector matrix and stock control
+remain unrecorded.
+
+The player repeated the VFR check and again observed no black flash. They
+felt one hitch. The strongest upload-burst candidate was frame 776
+(15.68 s): 275 first uploads totaling 37.8 MB in a 53.6 ms frame, with
+5.5 ms measured in uploads. The same reporting window contained two eligible
+empty ticks and one oldest drop. The log cannot tie the felt hitch to a
+specific frame or to a quick-menu opening. Preserved run log:
+`/tmp/swx-vfr-gameplay-20261118/alpha-on-130740.log`.
