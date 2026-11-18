@@ -1,0 +1,5 @@
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -18307,1 +18307,1 @@
+-        int rate = swx_link_target(), link_rate = mtl_display_hz();
++        int rate = swx_link_target(), link_rate = atomic_load(&g_swx_link_hz);

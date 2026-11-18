@@ -63,40 +63,84 @@ def _parse_vfr_window(line):
     """Janela VFR estruturada; tolera linhas legadas sem todos os campos."""
     raw = line.strip()
     m = re.search(
-        r"VFR up to present (\d+): (\S+) (\S+) (\d+) Hz, (\S+) clock, display (\d+) Hz, "
-        r"average present ([\d.]+) ms, applied ([\d.]+) ms, sampled time ([\d.]+) s, "
-        r"ratio ([\d.]+) \((\d+) VFR steps\), ring waits ([\d.]+) / ticket waits ([\d.]+) ms, "
-        r"queued (\d+), (\d+) of last (\d+) dropped, guest interval (\d+)", raw)
+        r"VFR up to present (?P<present>\d+): (?P<policy>\S+) (?P<clock>\S+) (?P<hz>\d+) Hz, "
+        r"(?P<clock_source>\S+) clock, display (?P<display_hz>\d+) Hz, "
+        r"average present (?P<avg_present_ms>[\d.]+) ms, applied (?P<applied_ms>[\d.]+) ms, "
+        r"sampled time (?P<sampled_s>[\d.]+) s, "
+        r"(?:window game (?P<game_delta_s>[\d.]+) s / wall (?P<wall_delta_s>[\d.]+) s, )?"
+        r"ratio (?P<ratio>[\d.]+) \((?P<steps>\d+) VFR steps\), "
+        r"ring waits (?P<ring_wait_ms>[\d.]+) / ticket waits (?P<ticket_wait_ms>[\d.]+) ms, "
+        r"queued (?P<queued>\d+), (?P<dropped>\d+) of last (?P<window>\d+) dropped, "
+        r"guest interval (?P<guest_interval>\d+)", raw)
     if not m:
         return {"raw": raw}
-    return {
-        "raw": raw,
-        "present": int(m.group(1)),
-        "policy": m.group(2),
-        "clock": m.group(3),
-        "hz": int(m.group(4)),
-        "clock_source": m.group(5),
-        "display_hz": int(m.group(6)),
-        "avg_present_ms": float(m.group(7)),
-        "applied_ms": float(m.group(8)),
-        "sampled_s": float(m.group(9)),
-        "ratio": float(m.group(10)),
-        "steps": int(m.group(11)),
-        "ring_wait_ms": float(m.group(12)),
-        "ticket_wait_ms": float(m.group(13)),
-        "queued": int(m.group(14)),
-        "dropped": int(m.group(15)),
-        "window": int(m.group(16)),
-        "guest_interval": int(m.group(17)),
+    fields = m.groupdict()
+    for key in ("present", "hz", "display_hz", "steps", "queued", "dropped", "window", "guest_interval"):
+        fields[key] = int(fields[key])
+    for key in ("avg_present_ms", "applied_ms", "sampled_s", "ratio", "ring_wait_ms", "ticket_wait_ms"):
+        fields[key] = float(fields[key])
+    game_s, wall_s = fields.pop("game_delta_s"), fields.pop("wall_delta_s")
+    fields["game_delta_s"] = float(game_s) if game_s is not None else None
+    fields["wall_delta_s"] = float(wall_s) if wall_s is not None else None
+    # The initial window has no prior endpoint; a logged 0/0 is unavailable.
+    fields["window_delta_available"] = game_s is not None and wall_s is not None
+    if fields["game_delta_s"] == 0 and fields["wall_delta_s"] == 0:
+        fields["game_delta_s"] = fields["wall_delta_s"] = None
+        fields["window_delta_available"] = False
+    fields["raw"] = raw
+    return fields
+
+
+def _parse_present_queue_window(line):
+    """Parse the worker/ready-FIFO gate line without inventing old data."""
+    raw = line.strip()
+    m = re.search(r"VFR present queue up to tick (\d+):", raw, re.I)
+    if not m:
+        return None
+    out = {
+        "raw": raw, "tick": int(m.group(1)), "ready_depth": None,
+        "drop_oldest": None, "credit": None, "queue_ms_p95": None,
+        "queue_pops": None, "promote_ms_p95": None, "promote_count": None,
+        "window": None, "held": None,
+        "empty": None,
     }
+    tail = raw[m.end():]
+    # Accept both `name value` and `name=value`; p95 labels are emitted as
+    # `queue_ms p95 X` / `promote_ms p95 X` in the current contract.
+    patterns = {
+        "ready_depth": r"ready[ _-]depth(?:\s+max)?\s*(?:=|:)?\s*(\d+)",
+        "drop_oldest": r"drop[ _-]oldest\s*(?:=|:)?\s*(\d+)",
+        "credit": r"credit\s*(?:=|:)?\s*(\d+)",
+        "window": r"window\s*(?:=|:)?\s*(\d+)",
+        "held": r"held\s*(?:=|:)?\s*(\d+)",
+        "empty": r"empty\s*(?:=|:)?\s*(\d+)",
+    }
+    for key, pattern in patterns.items():
+        mm = re.search(pattern, tail, re.I)
+        if mm:
+            val = float(mm.group(1))
+            out[key] = int(val) if val.is_integer() else val
+    for value_key, count_key, name, unit in (
+            ("queue_ms_p95", "queue_pops", r"queue[ _-]ms", "pops"),
+            ("promote_ms_p95", "promote_count", r"promote[ _-]ms", "promotions")):
+        mm = re.search(
+            rf"(?:{name})\s*(?:p95\s*)?(?:=|:)?\s*([\d.]+|n/a|null)\s*ms"
+            rf"(?:\s+from\s+(\d+)\s+{unit})?", tail, re.I)
+        if mm:
+            value, count = mm.groups()
+            if count is not None:
+                out[count_key] = int(count)
+            if value.lower() not in ("n/a", "null") and count != "0":
+                out[value_key] = float(value)
+    return out
 
 
 def report(path):
     rep = {"log": path, "longframes": [], "steps": [], "red": [],
-           "display_windows": [], "display_link": {}, "vfr_windows": [], "timing_windows": [],
+           "display_windows": [], "display_link": {}, "vfr_windows": [],
+           "vfr_queue_windows": [], "timing_windows": [],
            "present_windows": [],
-           # Etapa 0: contadores futuros ainda nao emitidos pelo host.
-           # None = indisponivel (nunca 0, que pareceria medicao).
+           # Optional queue metrics. None means absent from this log, not 0.
            "ready_depth": None, "drop_oldest": None,
            "credit": None, "promote_ms": None,
            "keepalive": False, "synclag": False, "prewarm": {}, "frames": 0,
@@ -174,7 +218,7 @@ def report(path):
             if ("[nvn] vfr frame pace" in line.lower() or "[nvn] vfr cadence" in line.lower()
                     or "[nvn] vfr up to present" in line.lower()):
                 rep["vfr_windows"].append(_parse_vfr_window(line))
-                # Contadores futuros da Etapa 1+: opcionais; ausentes = None (indisponivel).
+                # Optional fields in older VFR formats; absent values stay None.
                 for key, pat in (("ready_depth", r"ready[ _-]depth (\d+)"),
                                   ("drop_oldest", r"drop[ _-]oldest (\d+)"),
                                   ("credit", r"credit ([\d.]+)"),
@@ -182,6 +226,14 @@ def report(path):
                     m = re.search(pat, line)
                     if m:
                         rep[key] = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+            queue_window = _parse_present_queue_window(line)
+            if queue_window:
+                rep["vfr_queue_windows"].append(queue_window)
+                for key in ("ready_depth", "drop_oldest", "credit"):
+                    if queue_window[key] is not None:
+                        rep[key] = queue_window[key]
+                if queue_window["promote_ms_p95"] is not None:
+                    rep["promote_ms"] = queue_window["promote_ms_p95"]
             timing = re.search(
                 r"timing up to frame (\d+): frame time p50 [\d.]+ / p95 ([\d.]+).*?;"
                 r" GPU p50 ([\d.]+) / p95 ([\d.]+)", line)
@@ -313,12 +365,25 @@ def main(argv=None):
                   f"avg present {last.get('avg_present_ms'):.2f} ms, ratio {last.get('ratio'):.3f} "
                   f"({last.get('steps')} steps), queued {last.get('queued')}, "
                   f"dropped {last.get('dropped')}/{last.get('window')}")
+            gd, wd = last.get("game_delta_s"), last.get("wall_delta_s")
+            print(f"  VFR window delta: game {gd if gd is not None else 'n/a'} s / "
+                  f"wall {wd if wd is not None else 'n/a'} s")
         else:
             print(f"vfr: {len(vw)} legacy window(s)")
-    print(f"future counters (Etapa 0, indisponiveis): ready_depth={rep.get('ready_depth', None) if rep.get('ready_depth', None) is not None else 'n/a'}, "
-          f"drop_oldest={rep.get('drop_oldest', None) if rep.get('drop_oldest', None) is not None else 'n/a'}, "
-          f"credit={rep.get('credit', None) if rep.get('credit', None) is not None else 'n/a'}, "
-          f"promote_ms={rep.get('promote_ms', None) if rep.get('promote_ms', None) is not None else 'n/a'}")
+    if qw := rep.get("vfr_queue_windows"):
+        last = qw[-1]
+        def show(value):
+            return "n/a" if value is None else value
+        print(f"vfr present queue (last tick {last['tick']}): ready_depth={show(last['ready_depth'])}, "
+              f"drop_oldest={show(last['drop_oldest'])}, credit={show(last['credit'])}, "
+              f"queue_ms p95={show(last['queue_ms_p95'])} from {show(last['queue_pops'])} pops, "
+              f"promote_ms p95={show(last['promote_ms_p95'])} from {show(last['promote_count'])} promotions, "
+              f"window={show(last['window'])}, held={show(last['held'])}, empty={show(last['empty'])}")
+    elif rep.get("ready_depth") is not None or rep.get("drop_oldest") is not None or rep.get("credit") is not None:
+        print(f"optional queue counters: ready_depth={rep.get('ready_depth') if rep.get('ready_depth') is not None else 'n/a'}, "
+              f"drop_oldest={rep.get('drop_oldest') if rep.get('drop_oldest') is not None else 'n/a'}, "
+              f"credit={rep.get('credit') if rep.get('credit') is not None else 'n/a'}, "
+              f"promote_ms={rep.get('promote_ms') if rep.get('promote_ms') is not None else 'n/a'}")
     print(f"frame-step transitions: {', '.join(rep['steps']) if rep['steps'] else 'none'}")
     for r in rep["red"][:10]:
         print(f"RED: {r}")

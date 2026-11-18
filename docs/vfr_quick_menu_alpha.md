@@ -59,9 +59,9 @@ persists independently of the alpha transition. If that occurs, investigate
 the quick-menu scene-capture production and sampling path as a separate cause.
 
 Repeat a stock control with `SWX_VFR=0` to verify the original equality path.
-The current branch is based on commit `343bf05` and places this patch after
-the present worker. When the separate queue-policy patch is integrated, keep
-the alpha guard after that patch and update the installer prefix migration
-from the queue-policy build before using the combined series.
+The integrated series places this patch after the present worker and queue
+policy. The installer supports an append-only upgrade from the worker-only
+stack and from the corrected queue-policy stack, while retaining the
+historical display-rate migration when its credit-fix preconditions hold.
 
 No gameplay result has been recorded yet.

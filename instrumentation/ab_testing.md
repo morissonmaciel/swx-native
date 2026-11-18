@@ -87,7 +87,10 @@ Observables and where they come from:
   `late` (= dropped − discarded), `discarded`, `p99_ms`.
 - VFR/timing windows: `VFR up to present` parsed to
   `{present, policy, hz, display_hz, avg_present_ms, applied_ms, ratio,
-  steps, ring/ticket waits, queued, dropped/window, guest_interval}`
+  steps, ring/ticket waits, queued, dropped/window, guest_interval,
+  game_delta_s, wall_delta_s}`. The game/wall deltas are emitted in the
+  optional `window game <s> s / wall <s> s` suffix; the first `0/0` is
+  unavailable. `sampled_s` remains cumulative game time.
   (legacy `vfr frame pace`/`cadence` lines kept as `{raw}`); `timing up
   to frame` keeps `frame_p95_ms`, `gpu_p50/p95_ms`.
 
@@ -96,13 +99,12 @@ Legacy compatibility: the display-link latency/drain suffix and the
 counters still parses, missing fields report `null` (text: `n/a`), never
 a fabricated number.
 
-Future counters (`ready_depth`, `drop_oldest`, `credit`, `promote_ms`)
-are NOT emitted by the host in Etapa 0. The report carries them as
-`null`/`n/a` — never `0`, which would look like a measurement. If a
-future log ever contains them, the parser picks them up; otherwise they
-stay unavailable.
+Ready-FIFO metrics are parsed from the separate `VFR present queue up to
+tick` line when present. `credit` may be omitted if that counter is unavailable.
+Older host logs that predate either the queue line or the game/wall suffix keep
+those values `null`/`n/a`, never fabricated as zero.
 
-User-run gameplay gates (out of scope for this agent — real runs by the
+User-run gameplay gates (real runs by the
 user): fixed save/route from the fixed-variables section, two runs per
 condition with a warm cache, covering 60/60, 60/120, a lock that does
 not divide the panel rate, uncapped play, a movie, a scripted scene and
@@ -112,6 +114,15 @@ VFR on/off. For each pair run `collect <label>` on both arms then
 `empty`/`held`/`merged`, enqueue→screen p50/p95, TSV
 `@link_target_ms` vs `@pres_at_ms`, GPU vs present timings, game-time
 drift in a steady segment, and UI/input/physics/cutscene behavior.
+
+## VFR present queue — Gate 2 (planned)
+
+The ready-FIFO gameplay gate is defined in
+[`vfr_present_gate.md`](vfr_present_gate.md). It covers the game-rate/display
+matrix, non-divisor and uncapped rates, movies, opening, isolated stalls, and
+link-silent recovery. The parser preserves absent counters as `null`/`n/a` in
+older logs. Planned criteria and coverage are not evidence of a completed run;
+Gate 2 remains unevaluated until real captures are reviewed.
 
 ## Bind-once gate (experimental, default off)
 

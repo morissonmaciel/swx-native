@@ -14,8 +14,11 @@ present, independently of whether a frame reaches the screen.
 The install supplies `relaxed` and `auto` where no player override exists.
 An existing numeric `SWX_VFR_HZ` now sets game rate in lock mode or the
 ceiling in uncapped mode. The physical link separately requests the panel
-rate, up to 240 Hz, and returns the newest eligible frame on each callback.
-At 60 fps on a 120 Hz link, two ticks pace one game frame. VI still signals
+rate, up to 240 Hz. VFR presents from a two-ready FIFO in ticket order,
+consuming the oldest ready frame at each eligible callback; if a third frame
+becomes ready while both slots are occupied, it drops the oldest queued frame
+and records that drop. At 60 fps on a 120 Hz link, two ticks pace one game
+frame. VI still signals
 physical retraces. A silent or unavailable link hands pacing to the
 monotonic clock. Texture tickets, snapshot capacity and GPU fences
 retain their existing lifetime rules.
@@ -33,12 +36,30 @@ the stock timing path. The VFR link owns its range and queue selection.
 The existing render-scale, dynamic resolution and Metal safety mechanisms
 continue to apply.
 
-See [the presentation A/B protocol](../instrumentation/ab_testing.md#vfr-presentation-gate)
-for the measurements required before judging the new cadence against the
-previous implementation.
+See the [Gate 2 present-queue protocol](../instrumentation/vfr_present_gate.md)
+for planned coverage and interpretation. It is not a report of completed
+gameplay runs or an approval of the cadence.
 
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
+
+## Etapa 2 — four snapshots and two ready frames (`dm_vfr_queue_policy.patch`)
+
+With VFR active, the host uses four physical snapshot slots and targets two
+GPU-safe ready frames. The display callback consumes the oldest ready ticket;
+when the ready FIFO is full, a newly promoted frame replaces the oldest queued
+one and increments `drop_oldest`. Priming after start or resume can wait up to
+one target period for the second ready frame. The game cadence remains governed
+by `SWX_VFR_HZ`; the acquire signal is consumed only as a punctual recovery
+poll and does not alter the simulation ratio or pacing deadline. The callback
+does not wait for GPU completion. `SWX_VFR=0` remains on the stock path.
+
+The queue-policy patch also records queue depth, enqueue-to-display timing,
+drop/hold/empty counts, and game-time versus wall-time windows. These values
+support the pair-by-pair Gate 2 protocol in
+[`vfr_present_gate.md`](../instrumentation/vfr_present_gate.md). The long
+60/60 production gate remains open; the 30 fps movie and return-to-gameplay
+transition have separate passing evidence below.
 
 The VFR-only quick-menu capture alpha guard is documented in
 [`vfr_quick_menu_alpha.md`](vfr_quick_menu_alpha.md). It preserves the stock
@@ -49,7 +70,8 @@ fractional UI frames when VFR owns the clock. Its visual A/B remains pending.
 
 Active whenever VFR is armed (`SWX_VFR=relaxed`/`uncapped` with a resolved
 rate); `SWX_VFR=0` keeps the stock take/wait/present path byte-for-byte.
-No new flags, no new log lines (the Etapa 0 parser needs no change).
+No new flags. Gate 2 observability is documented in the linked protocol and
+the parser keeps those counters nullable for older logs.
 
 - A worker thread (`nvn-present-worker`) takes `g_pq[]` tickets in order
   through `g_pq_wk`, separate from `g_pq_read`, which still means taken for
@@ -105,3 +127,19 @@ period, `late`/discarded counts, display-link `empty`/`held`/`merged`,
 enqueue→screen p50/p95, TSV `@link_target_ms` vs `@pres_at_ms`, GPU vs
 present timings, game-time drift in a steady segment, and
 UI/input/physics/cutscene behavior.
+
+## Gate evidence (approved 2026-11-18: 30 fps movie + return to gameplay)
+
+One long `relaxed/auto` session on a 60 Hz link confirmed the 60 → 30 →
+60 fps sequence (`instrumentation/ab_results.md`, preserved capture
+`stage2-fixed-new-save-121839.log`):
+
+- 30 fps movie on the 60 Hz panel: 150 new frames + 150 intentional
+  repeats per 300-refresh window, zero eligible empty ticks and zero
+  full-queue drops; on-screen p99 33.33 ms.
+- Return to gameplay: target back to 60 fps as soon as the decoder
+  stopped; the transition window had zero eligible empty ticks and zero
+  full-queue drops; the first full 60 fps window returned to p99
+  16.67 ms. No route repetition needed for these two cases.
+- Steady-rate 60/60 production (300 presents ≈ 5 s, `drop_oldest ≈ 0`
+  in regime) remains the open Gate 2 item.

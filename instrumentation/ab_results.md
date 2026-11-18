@@ -215,3 +215,65 @@ Gate 1 is accepted for advancing to Stage 2 based on the reproducible
 60/60 result and player approval. Full protocol validation remains open,
 including the matched previous VFR baseline, an isolated producer stall
 with one ready frame in reserve, and display-link pause and recovery.
+
+## Present queue — corrected Stage 2, first 60/60 run (2026-11-18)
+
+`SWX_VFR=relaxed`, `SWX_VFR_HZ=auto`, 60 Hz display-link clock,
+2560×1440 drawable and four physical snapshot slots. The host reported
+18,900 game presents over 315 s. After the first VFR report, each batch of
+300 game presents took 4.970–5.030 s of wall time. In the first 4,500 link
+ticks the fixed build dropped 3 oldest ready frames, versus 2,684 before
+the cadence fix. Across all 18,900 reported link ticks the fixed build
+recorded 7 oldest drops, 7 eligible empty ticks, 18,893 ready pops, zero
+credits applied and zero intentional holds. Five eligible empty ticks
+occurred after tick 900, across three windows.
+
+All 63 on-screen windows had p99 of 16.67 ms. There were no `[RED]` events.
+Excluding windows through game present 2,100, the VFR time deltas sum to
+280.016 s of game time and 280.017 s of wall time. Per-window ready-to-pop
+p95 ranged from 20.194 to 32.464 ms. The median of the per-window
+enqueue-to-screen p50 values was 60.5 ms, compared with 54.2 ms in the
+uncorrected run. These are separate latency metrics.
+
+The 60/60 production-rate and oldest-drop checks pass in this capture.
+The full Gate 2 remains open, including attribution of the isolated empty
+ticks and coverage of the other refresh/rate and recovery cases. Preserved
+capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-on-115748.log`.
+
+The second `relaxed/auto` 60/60 run used the same drawable and four slots.
+It logged 9,000 game presents over 150 s, with 5.000–5.017 s per complete
+300-present window after the first report. It recorded two oldest drops,
+zero applied credits, one intentional hold and two eligible empty ticks.
+Both empty ticks were in the window ending at tick 7,200, which also
+contains three consecutive long frames (GPU 20.0, 24.0 and 16.9 ms).
+The window-level log cannot assign individual empty ticks to those frames.
+All 30 on-screen windows had p99 of 16.67 ms, and no `[RED]` was logged.
+After present 2,100 the game and wall deltas both sum to 115.017 s.
+The 60/60 cadence fix is reproducible across two runs. The strict
+zero-eligible-empty check and the full Gate 2 remain open. Preserved
+capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-on-120211.log`.
+
+### New save — engine cutscenes and 30 fps movie recovery (2026-11-18)
+
+In one long `relaxed/auto` session on a 60 Hz link, the player exercised
+engine-rendered cutscenes and video playback, reported satisfactory behavior,
+and accepted this single pass for advancing. The trace has no markers for
+individual engine cutscenes. It confirms that the VP9 movie switched the
+target from 60 to 30 fps at present 32,165. At a steady 30/60, each
+300-refresh window had 150 ready pops, 150 intentional holds, zero eligible
+empty ticks and zero oldest drops. On-screen p99 was 33.33 ms during playback.
+After the decoder stopped, the target returned to 60 fps at present 33,377.
+The transition window had zero eligible empty ticks and zero oldest drops;
+the next full 60 fps on-screen window returned to 16.67 ms p99. The host
+exited normally. The player attributed the earlier audio callback timeout
+to switching from AirPods to speakers. This capture verifies playback recovery, while
+display-link silence recovery and other untested rates remain separate cases.
+Preserved capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-new-save-121839.log`.
+
+The player felt one hitch. Frame 3,085 (54.33 s) is the strongest matching
+texture burst: 146 first uploads, 28.5 MB and 3.7 ms of upload time in a
+36.9 ms frame (33.3 ms submit+present, 8.5 ms GPU). Its reporting window
+contains the only eligible empty tick and oldest drop in the capture.
+Window aggregation prevents exact attribution to that frame. An earlier
+56.7 MB burst at frame 463 had zero eligible empty ticks and no on-screen
+losses in its reporting window.
