@@ -83,7 +83,8 @@ save all funnel into `commit_mount_locked` (4 entry points,
 Promoted: code default ON + install pins `DM_SAVE_ASYNC=1`
 (`=0` restores stock). Gate 2 left open: no save-attributed ≥20 ms spike
 occurred in either condition to compare (settings/manual writes showed
-only sub-detector ripples).
+only sub-detector ripples). (Key since renamed `SWX_SAVE_ASYNC=1`,
+`DM_SAVE_ASYNC` kept as legacy alias; see the save cleanup worker A/B below.)
 
 ## Gate — keep-alive yield (luneta): PASS, promoted to install default
 
