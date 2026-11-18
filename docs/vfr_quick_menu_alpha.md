@@ -64,19 +64,20 @@ policy. The installer supports an append-only upgrade from the worker-only
 stack and from the corrected queue-policy stack, while retaining the
 historical display-rate migration when its credit-fix preconditions hold.
 
-## First gameplay result (2026-11-18)
+## Gameplay result (2026-11-18)
 
-The player reported that the guard fixed the quick-menu black flash on the
-first try. The candidate log confirms `SWX_VFR=relaxed`, `SWX_VFR_HZ=auto`,
-and a normal host exit. The visual result is the player's observation;
-the log does not record individual quick-menu openings. This capture covers
-the initial VFR visual check. The full selector matrix and stock control
-remain unrecorded.
-
-The player repeated the VFR check and again observed no black flash. They
-felt one hitch. The strongest upload-burst candidate was frame 776
-(15.68 s): 275 first uploads totaling 37.8 MB in a 53.6 ms frame, with
-5.5 ms measured in uploads. The same reporting window contained two eligible
-empty ticks and one oldest drop. The log cannot tie the felt hitch to a
-specific frame or to a quick-menu opening. Preserved run log:
+The player completed two gameplay runs with `SWX_VFR=relaxed` and
+`SWX_VFR_HZ=auto`, reporting that the recurring quick-menu black flash was
+absent in both. This is a pass for the observed VFR use case. The logs confirm
+the settings and normal host exits, but do not identify individual quick-menu
+openings. The second run included one perceived hitch. Its strongest logged
+candidate is an upload burst at frame 776 (15.68 s): 275 first uploads totaling
+37.8 MB in a 53.6 ms frame, with 5.5 ms measured in uploads. The log cannot
+prove that burst caused the perceived hitch or link it to a quick-menu
+opening. Its reporting window also contained two eligible empty ticks and one
+oldest drop. Preserved second-run log:
 `/tmp/swx-vfr-gameplay-20261118/alpha-on-130740.log`.
+
+These two runs validate the reported alpha-guard behavior in this setup; they
+do not complete the broader VFR steady-rate Gate 2, the full selector matrix,
+or the stock-control comparison described above.
