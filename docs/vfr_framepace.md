@@ -101,3 +101,19 @@ period, `late`/discarded counts, display-link `empty`/`held`/`merged`,
 enqueue→screen p50/p95, TSV `@link_target_ms` vs `@pres_at_ms`, GPU vs
 present timings, game-time drift in a steady segment, and
 UI/input/physics/cutscene behavior.
+
+## Gate evidence (approved 2026-11-18: 30 fps movie + return to gameplay)
+
+One long `relaxed/auto` session on a 60 Hz link confirmed the 60 → 30 →
+60 fps sequence (`instrumentation/ab_results.md`, preserved capture
+`stage2-fixed-new-save-121839.log`):
+
+- 30 fps movie on the 60 Hz panel: 150 new frames + 150 intentional
+  repeats per 300-refresh window, zero eligible empty ticks and zero
+  full-queue drops; on-screen p99 33.33 ms.
+- Return to gameplay: target back to 60 fps as soon as the decoder
+  stopped; the transition window had zero eligible empty ticks and zero
+  full-queue drops; the first full 60 fps window returned to p99
+  16.67 ms. No route repetition needed for these two cases.
+- Steady-rate 60/60 production (300 presents ≈ 5 s, `drop_oldest ≈ 0`
+  in regime) remains the open Gate 2 item.

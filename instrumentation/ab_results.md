@@ -252,3 +252,28 @@ After present 2,100 the game and wall deltas both sum to 115.017 s.
 The 60/60 cadence fix is reproducible across two runs. The strict
 zero-eligible-empty check and the full Gate 2 remain open. Preserved
 capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-on-120211.log`.
+
+### New save — engine cutscenes and 30 fps movie recovery (2026-11-18)
+
+In one long `relaxed/auto` session on a 60 Hz link, the player exercised
+engine-rendered cutscenes and video playback, reported satisfactory behavior,
+and accepted this single pass for advancing. The trace has no markers for
+individual engine cutscenes. It confirms that the VP9 movie switched the
+target from 60 to 30 fps at present 32,165. At a steady 30/60, each
+300-refresh window had 150 ready pops, 150 intentional holds, zero eligible
+empty ticks and zero oldest drops. On-screen p99 was 33.33 ms during playback.
+After the decoder stopped, the target returned to 60 fps at present 33,377.
+The transition window had zero eligible empty ticks and zero oldest drops;
+the next full 60 fps on-screen window returned to 16.67 ms p99. The host
+exited normally. The player attributed the earlier audio callback timeout
+to switching from AirPods to speakers. This capture verifies playback recovery, while
+display-link silence recovery and other untested rates remain separate cases.
+Preserved capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-new-save-121839.log`.
+
+The player felt one hitch. Frame 3,085 (54.33 s) is the strongest matching
+texture burst: 146 first uploads, 28.5 MB and 3.7 ms of upload time in a
+36.9 ms frame (33.3 ms submit+present, 8.5 ms GPU). Its reporting window
+contains the only eligible empty tick and oldest drop in the capture.
+Window aggregation prevents exact attribution to that frame. An earlier
+56.7 MB burst at frame 463 had zero eligible empty ticks and no on-screen
+losses in its reporting window.
