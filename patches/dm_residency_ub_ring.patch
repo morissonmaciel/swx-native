@@ -107,11 +107,10 @@
      if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
-@@ -2164,7 +2164,9 @@
+@@ -2164,6 +2164,9 @@
          void swx_keepalive_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pkn, pku, pks; uint64_t kn, ku, kx, ks, kq; swx_keepalive_stats(&kn, &ku, &kx, &ks, &kq);
          if (kn != pkn) LOG("[nvn] keep-alive up to frame %llu: %llu kernels, %.1f GPU ms, max %.2f ms, %llu stopped, stop-cb max %.3f ms", frame, (unsigned long long)(kn - pkn), (ku - pku) / 1e3, kx / 1e3, (unsigned long long)(ks - pks), kq / 1e6);
          pkn = kn; pku = ku; pks = ks;
--
 +        void mtl_ubr_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pru, prw, prf, prb; uint64_t ru, rw, ri, rp, rf, rb; mtl_ubr_stats(&ru, &rw, &ri, &rp, &rf, &rb);
 +        if (ru != pru || rw != prw || rf != prf) LOG("[nvn] ub-ring up to frame %llu: %llu reuse, %llu new, %llu inflight (peak %llu), %llu fallback, %.0f KB reused", frame, (unsigned long long)(ru - pru), (unsigned long long)(rw - prw), (unsigned long long)ri, (unsigned long long)rp, (unsigned long long)(rf - prf), (rb - prb) / 1024.0);
 +        pru = ru; prw = rw; prf = rf; prb = rb;

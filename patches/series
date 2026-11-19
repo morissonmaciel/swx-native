@@ -17,3 +17,4 @@ dm_texture_burst_attribution_host_lifetime.patch
 dm_up_blit_rec.patch
 swx_save_cleanup_worker.patch
 swx_botw_render_scale.patch
+swx_botw_disable_drs.patch

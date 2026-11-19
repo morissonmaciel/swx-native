@@ -1,0 +1,183 @@
+# SWX_DISABLE_DRS=1 for BOTW 1.9.0 on macOS: fixes the scene views at the validated DM_RENDER_SCALE, including 1.0 (1600x900 docked).
+# The dynamic-resolution method keeps computing its scale; the two stubs ignore it when the flag is set. In main+0x1266880 the flag
+# forces the apply path even for a factor of 1.0 (x8-only: the flag load reuses the state-page base, clobbered after the scale is in s0);
+# in main+0x126686c it jumps straight to the apply branch (one extra ADRP to re-materialize the base for the scale load). The rewriter
+# declares RENDER_SCALE_DRS in the fixups table; the loader writes the SWX_DISABLE_DRS boolean to state +0x14 at boot (only for builds
+# declaring the capability; default 0 keeps the game's dynamic resolution). Canvas, HUD and MetalFX are untouched.
+# verify: dm/games/01007EF00011E000/patches.py:ctx.render_scale_drs = 1
+# verify: dm/games/01007EF00011E000/patches.py:0x350000c8
+# verify: dm/games/01007EF00011E000/patches.py:ldr w8,[x8,#0x14]
+# verify: dm/tools/patch_nso.py:RENDER_SCALE_DRS = 0
+# verify: dm/tools/patch_nso.py:render_scale_drs=0
+# verify: dm/tools/patch_nso.py:RENDER_SCALE_DRS = fs.render_scale_drs
+# verify: dm/tools/patch_nso.py:# RENDER_SCALE_DRS
+# verify: dm/host/dm.h:uint32_t render_scale_drs;
+# verify: dm/host/loader.c:else if (!strcmp(key, "RENDER_SCALE_DRS"))
+# verify: dm/host/loader.c:dm_fps_state + 0x14
+# verify: dm/host/loader.c:SWX_DISABLE_DRS
+# verify: dm/host/loader.c:g_render_scale_drs
+# verify: dm/host/hle.h:+0x14 u32 disable-DRS flag
+# verify: dm/games/settings.tsv:SWX_DISABLE_DRS
+# verify: docs/env_switches.tsv:SWX_DISABLE_DRS
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -269,34 +269,42 @@
+         emit(w)
+     emit(B(here(), 0xeb0f8c))   # back
+     fs_put(0xeb0f88, [B(0xeb0f88, start)], 'held-button counts step by the VFR ratio (menu repeat in game time at any frame step)')
+-    # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default; independent of the frame step). The dynamic-resolution method (main+0x12666e4) keeps a
++    # Render scale (state +0x10, float written by the loader: DM_RENDER_SCALE, 1.0 by default; +0x14 u32 disable-DRS flag, SWX_DISABLE_DRS, written only for stubs
++    # declaring RENDER_SCALE_DRS; independent of the frame step). The dynamic-resolution method (main+0x12666e4) keeps a
+     # scale in 0.8–1.0 rounded to 0.05 steps (+0x1218, main+0x1266818), or the game's forced 0.75 / 0.5 (+0x284 & 0x1800), in s8; from main+0x1266880 it applies s8: each view's
+     # scale (+0x28a0 / +0x28a4 = s8 × base width (+0x1214: 1600 docked, 1280 handheld) / output width), from which the scene buffers are sized each frame (main+0x106340c), the
+     # shader ratio uking_dynamic_resolution_ratio and the other readers (main+0xc3c3f4, an LOD check at main+0x14126b4). Setting s8 there keeps them all consistent (a multiply in the
+     # size function, TOTK's way, would leave the ratio and those readers at the old scale). The apply block runs only when the dynamic path has just recomputed the scale (+0x280 bit 4,
+     # set at main+0x1266830) or in a forced mode, else main+0x126686c skips it; with a factor it is taken every frame, as in the dynamic mode, so the factor holds with dynamic
+-    # resolution off too. Factors above 1.0 are refused by the loader: the per-frame texture pool's size is unknown. x8, s0, s1 and the flags are dead at both sites
++    # resolution off too. With the disable-DRS flag set, both sites take the apply path unconditionally (the engine still recomputes its scale; the stubs ignore it): a factor of
++    # 1.0 then fixes the views at 1600×900 docked instead of following the game's dynamic resolution. Factors above 1.0 are refused by the loader: the per-frame texture pool's size is unknown. x8, s0, s1 and the flags are dead at both sites
+     fs_site(0x1266880, '88ae40f9'); fs_site(0x126686c, struct.pack('<I', B(0x126686c, 0x1266950)).hex())
+     apply = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+     for w in (0xbd401100,   # ldr s0,[x8,#0x10]      render scale
+               0x1e202008,   # fcmp s0,#0.0
+-              0x540000ad,   # b.le orig (+5)         not set
++              0x540000ed,   # b.le orig (+7)         not set
++              0xb9405108,   # ldr w8,[x8,#0x14]      disable-DRS flag
++              0x35000088,   # cbnz w8,apply_scale (+4)  flag set: apply even when 1.0
+               0x1e2e1001,   # fmov s1,#1.0
+               0x1e212000,   # fcmp s0,s1
+               0x54000040,   # b.eq orig (+2)         1.0: the game's own scale
+-              0x1e204008,   # fmov s8,s0             the host's scale
++              0x1e204008,   # apply_scale: fmov s8,s0  the host's scale
+               0xf940ae88):  # orig: ldr x8,[x20,#0x158]
+         emit(w)
+     emit(B(here(), 0x1266884))
+-    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s dynamic resolution)'); ctx.render_scale = 1; ctx.render_scale_max_pct = 0x78
++    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s dynamic resolution)'); ctx.render_scale = 1; ctx.render_scale_max_pct = 0x78; ctx.render_scale_drs = 1
+     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
++    for w in (0xb9405108,   # ldr w8,[x8,#0x14]      disable-DRS flag
++              0x350000c8):  # cbnz w8,do_apply (+6)  flag set: take the apply block
++        emit(w)
++    emit(ADRP(8, here(), FS_STATE_OFF))
+     for w in (0xb9401108,   # ldr w8,[x8,#0x10]      render scale (float bits)
+               0x34000088,   # cbz w8,skip (+4)       not set
+               0x52091908,   # eor w8,w8,#0x3f800000
+               0x34000048):  # cbz w8,skip (+2)       1.0
+         emit(w)
+-    emit(B(here(), 0x1266880)); emit(B(here(), 0x1266950))   # apply the host's scale; skip: the original branch
+-    fs_put(0x126686c, [B(0x126686c, start)], 'scale apply block taken every frame when the host render scale is not 1.0')
++    emit(B(here(), 0x1266880)); emit(B(here(), 0x1266950))   # do_apply: the host's scale; skip: the original branch
++    fs_put(0x126686c, [B(0x126686c, start)], 'scale apply block taken every frame when the host render scale is not 1.0, or always with disable-DRS')
+     # Screen shape: a screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched
+     # or cut one. The game's sizes are constants: the output size static [main+0x1e43dc0] (1920x1080; set in nnMain and by its getter main+0x1261880) that sizes the
+     # framework's window textures, the layout size static [main+0x1e43dd0] (1280x720; nnMain, getter main+0x12618dc), and the display mode switch main+0x1266074, which
+--- a/dm/tools/patch_nso.py
++++ b/dm/tools/patch_nso.py
+@@ -1395,6 +1395,7 @@
+ STEP_MAX = 0   # n = the stubs give the game steps of at most n vsyncs (ctx.step_max): the fixups table says so (STEP_MAX n), and the host holds frames at most n vsyncs (nvn_fstep.h smax)
+ RENDER_SCALE = 0   # n = the build has a render-scale stub (state +0x10) that takes scales up to n: the fixups table says so (RENDER_SCALE n), the loader holds DM_RENDER_SCALE to it and the launcher offers the setting up to it (dm/games/settings.tsv)
+ RENDER_SCALE_MAX_PCT = 0   # percent: the macOS ceiling of a render-scale stub that otherwise only lowers the size (the fixups table says so as RENDER_SCALE_MAX_PCT, hex); 0 = none
++RENDER_SCALE_DRS = 0   # 1 = the render-scale stub reads state +0x14 as SWX_DISABLE_DRS (the fixups table says so as RENDER_SCALE_DRS): 1 fixes the views at DM_RENDER_SCALE, including 1.0
+ FS_CAPABILITIES = set()   # capabilities the frame step stubs declare (ctx.capabilities)
+ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
+     FS_STATE_OFF = KEY_PAGE_OFF + 0x4000
+@@ -1428,9 +1429,9 @@
+ if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those placed by their function (MATCH_FRAME_STEP: ctx.base is its start)
+     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
+                                             put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
+-                                            state=FS_STATE_OFF, render_scale=0, render_scale_max_pct=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
++                                            state=FS_STATE_OFF, render_scale=0, render_scale_max_pct=0, render_scale_drs=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
+                                             found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off, lo_off=None: stub_address(off, 'frame step', lo_off))
+-    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; RENDER_SCALE_MAX_PCT = fs.render_scale_max_pct; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
++    (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; RENDER_SCALE_MAX_PCT = fs.render_scale_max_pct; RENDER_SCALE_DRS = fs.render_scale_drs; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
+ 
+ # ---- Stubs (the modules whose patch file has STUBS of their build) ----
+ # A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from
+@@ -1810,6 +1811,9 @@
+     if RENDER_SCALE_MAX_PCT:   # a macOS ceiling (percent) for a stub that otherwise only lowers the size; iOS keeps the legacy ceiling
+         assert RENDER_SCALE and isinstance(RENDER_SCALE_MAX_PCT, int) and 1 <= RENDER_SCALE_MAX_PCT <= 255, f'render scale stub: ctx.render_scale_max_pct is a whole percent, 1 to 255: {RENDER_SCALE_MAX_PCT!r}'
+         f.write(f'# RENDER_SCALE_MAX_PCT\t{RENDER_SCALE_MAX_PCT:X}\n')
++    if RENDER_SCALE_DRS:   # the stub reads state +0x14 as SWX_DISABLE_DRS (1: fix the views at DM_RENDER_SCALE, including 1.0)
++        assert RENDER_SCALE and RENDER_SCALE_DRS == 1, f'render scale stub: ctx.render_scale_drs is 1 when the stub reads the disable-DRS flag: {RENDER_SCALE_DRS!r}'
++        f.write(f'# RENDER_SCALE_DRS\t{RENDER_SCALE_DRS}\n')
+     if STEP_MAX:   # the largest step the frame step stubs give the game (the host holds frames and pays back within it)
+         assert isinstance(STEP_MAX, int) and 1 <= STEP_MAX <= 3, f'frame step stub: ctx.step_max is a whole step, 1 to 3: {STEP_MAX!r}'
+         f.write(f'# STEP_MAX\t{STEP_MAX}\n')
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -80,6 +80,7 @@
+     uint32_t vfr_framepace;  // the frame step stubs declared VFR_FRAMEPACE (the fixups table's VFR_FRAMEPACE); 0 = none
+     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
+     uint32_t render_scale_max_pct; // a render-scale stub's macOS ceiling, percent (the fixups table's RENDER_SCALE_MAX_PCT, patch_nso.py): 0 = none, iOS keeps the legacy ceiling
++    uint32_t render_scale_drs; // the render-scale stub reads state +0x14 as SWX_DISABLE_DRS (the fixups table's RENDER_SCALE_DRS, patch_nso.py): 0 = no such stub
+     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
+     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -279,6 +279,7 @@
+         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+         else if (!strcmp(key, "RENDER_SCALE_MAX_PCT")) m->render_scale_max_pct = (uint32_t)v;
++        else if (!strcmp(key, "RENDER_SCALE_DRS")) m->render_scale_drs = (uint32_t)v;
+         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+         else if (!strcmp(key, "VFR_FRAMEPACE")) m->vfr_framepace = (uint32_t)v;
+         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
+@@ -326,9 +327,11 @@
+ int dm_vfr_capable;   // a loaded module's frame step stubs declared VFR_FRAMEPACE and its state page fits the vfr words (install_fps_state): the host may route the game through the steady beat
+ static const char *g_fps_mod;   // the module holding the state page (for the log)
+ static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
++static int g_render_scale_drs = 0;   // the render-scale stub reads state +0x14 as SWX_DISABLE_DRS (RENDER_SCALE_DRS in its fixups table); 0 = no such stub
+ static void install_fps_state(module_t *m) {
+     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
++    g_render_scale_drs = (int)m->render_scale_drs;
+     // A stub that otherwise only lowers the size takes the macOS ceiling (RENDER_SCALE_MAX_PCT, percent); iOS keeps the legacy ceiling. No field: the legacy ceiling on both.
+ #if TARGET_OS_IPHONE
+     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+@@ -368,6 +371,15 @@
+     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
+     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
++    // Fixed internal resolution (state +0x14 u32, Breath of the Wild 1.9.0's render-scale stubs): SWX_DISABLE_DRS=1 applies DM_RENDER_SCALE every
++    // frame, including 1.0 (1600x900 docked); 0 (the default) keeps the game's dynamic resolution at 1.0. Written only for builds whose stubs read
++    // it (RENDER_SCALE_DRS in their fixups table); other builds ignore the slot, which stays 0
++    if (g_render_scale_drs) {
++        const char *dd = getenv("SWX_DISABLE_DRS"); uint32_t nodrs = dd && !strcmp(dd, "1");
++        if (dd && strcmp(dd, "0") && strcmp(dd, "1")) LOG("[RED] SWX_DISABLE_DRS=%s: must be 0 or 1; keeping dynamic resolution", dd);
++        memcpy(dm_fps_state + 0x14, &nodrs, sizeof nodrs);
++        if (nodrs) LOG("%s: 3D views fixed at DM_RENDER_SCALE %.2f (SWX_DISABLE_DRS)", g_fps_mod, sc);
++    }
+     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
+     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
+     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -113,7 +113,7 @@
+ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
+ #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
+ // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
+-extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
++extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x14 u32 disable-DRS flag (SWX_DISABLE_DRS; only builds whose render-scale stubs declare RENDER_SCALE_DRS), +0x18 double game seconds stepped; +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
+ extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+ extern int dm_vfr_capable;   // loader.c install_fps_state: a loaded profile declared VFR_FRAMEPACE and its state page fits the vfr words
+ void dm_fps_lock_tick_vfr(void);  // dynamic-resolution update without stock FPS-limit writes
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -17,6 +17,7 @@
+ DM_FPS_TARGET	choice	30=30 fps,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
+ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
++SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+--- a/docs/env_switches.tsv
++++ b/docs/env_switches.tsv
+@@ -440,5 +440,6 @@
+ DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
+ DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+ DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
++SWX_DISABLE_DRS	player	`1` fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including `1.0` (1600x900 docked); `0` (the default) keeps the game's dynamic resolution. Only on builds whose render-scale stubs declare RENDER_SCALE_DRS; the installer leaves it unset (armed per run via the harness or launcher).
+ SWX_VFR	switch	BOTW 1.9.0 on macOS: relaxed locks to SWX_VFR_HZ and follows display ticks at exact divisors; uncapped uses a monotonic ceiling; 0 restores stock timing. Active VFR owns timing independently of the stock FPS flags.
+ SWX_VFR_HZ	switch	auto (60 fps in relaxed, 144 fps in uncapped) or an integer FPS from 30 to 240. The display link requests the screen rate independently.

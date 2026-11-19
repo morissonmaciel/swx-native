@@ -28,6 +28,7 @@ installation environment, not the vendored core's compiled default.
 | 17 | `dm_up_blit_rec.patch` | `SWX_NVN_UP_BLIT_REC` | experimental (default 0, never pinned by installer) | defers whole buffer→texture upload batches to the encode thread as one `RO_COMMIT_UBATCH`; GPU executes the same copies in the same order; A/B recorded | `instrumentation/ab_results.md` |
 | 18 | `swx_save_cleanup_worker.patch` | `SWX_SAVE_ASYNC` | promoted (default ON) | persistent `QOS_CLASS_BACKGROUND` cleanup worker, FIFO depth 4, per-generation `mkdtemp` staging, orphan recovery on mount; single-install A/B: 5.47–5.97 ms/commit off vs 1.10–1.18 ms on (≈4–5 ms sync-path saving); isolated 74.6 ms frame shows no commit link | `instrumentation/ab_results.md` |
 | 19 | `swx_botw_render_scale.patch` | `DM_RENDER_SCALE` | promoted as opt-in on macOS for BOTW 1.9.0; default `1.0` | raises the internal render-scale ceiling to `1.2`; both `1.2` gameplay runs held 16.67 ms on-screen p99 in every reported window | `instrumentation/ab_results.md` |
+| 20 | `swx_botw_disable_drs.patch` | `SWX_DISABLE_DRS` | experimental opt-in (default off; never pinned by the installer) | fixes the 3D views at `DM_RENDER_SCALE`, including `1.0` (1600×900 docked); compatibility gate passed 2026-11-19 (M4 Pro): 1.0+flag → 1600×900 scene, 1.2 → 1920×1080, no cadence regression; effect under load unproven | `instrumentation/ab_results.md` |
 
 ## Out of tree (frozen, not in `series`)
 
@@ -41,7 +42,8 @@ installation environment, not the vendored core's compiled default.
 `~/Library/Application Support/nxnative/01007EF00011E000/env.txt`; the
 launcher logs each line at boot (`launcher: env K=V`). Experimental keys
 (`DM_NVN_ENC_THREAD`, `SWX_NVN_UP_BLIT_REC`, `SWX_GPU_BIND_ONCE`,
-`DM_NVN_TSV*`, `DM_NVN_WAITS*`, `SWX_RT_HEAP_RESERVE`) stay absent:
+`DM_NVN_TSV*`, `DM_NVN_WAITS*`, `SWX_RT_HEAP_RESERVE`,
+`SWX_DISABLE_DRS`) stay absent:
 compiled defaults apply.
 
 | Key | Value | Status |

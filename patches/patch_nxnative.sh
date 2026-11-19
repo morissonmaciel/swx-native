@@ -144,7 +144,8 @@ WANT="$(hash_state)"
 # currently ends with ratio (#10), worker (#11), queue policy (#12), alpha
 # guard (#13), texture-pool correctness repair (#14), burst attribution
 # (#15), burst host lifetime (#16), upload batch blit prototype (#17), save
-# cleanup worker (#18), and BOTW render scale ceiling (#19).
+# cleanup worker (#18), BOTW render scale ceiling (#19), and BOTW
+# disable-DRS flag (#20).
 # Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
@@ -178,6 +179,9 @@ SAVE_WORKER_PREFIX_HASH="2e8ec3cfb8de1dfb"
 BOTW_RENDER_SCALE="swx_botw_render_scale.patch"
 BOTW_RENDER_SCALE_PREFIX_COUNT=18
 BOTW_RENDER_SCALE_PREFIX_HASH="e0ca96f9fb6d2422"
+DISABLE_DRS="swx_botw_disable_drs.patch"
+DISABLE_DRS_PREFIX_COUNT=19
+DISABLE_DRS_PREFIX_HASH="75e74f5d4d5f73a6"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -291,6 +295,18 @@ append_botw_render_scale() (
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
         is_applied "$BOTW_RENDER_SCALE" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_disable_drs() (
+    [ "$(hash_series_prefix "$DISABLE_DRS_PREFIX_COUNT")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$DISABLE_DRS_PREFIX_COUNT" || exit 1
+    if ! is_applied "$DISABLE_DRS"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
+        is_applied "$DISABLE_DRS" || exit 1
     fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
@@ -504,6 +520,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$DISABLE_DRS_PREFIX_HASH" ]; then
+    if ! append_disable_drs; then
+        echo "[ERROR] append-only BOTW disable-DRS flag failed preflight/apply; core left unchanged where possible." >&2
+        exit 1
+    fi
+    echo "patches: appended BOTW disable-DRS flag ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ]; then

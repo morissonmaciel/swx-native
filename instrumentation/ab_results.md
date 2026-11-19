@@ -460,3 +460,31 @@ pool reported zero misses in both `1.2` runs. The logs do not record the
 dimensions of the scene render targets, so this acceptance covers launch,
 playability and observed presentation cadence. A controlled performance
 delta against `1.0` and the exact internal dimensions remain unverified.
+
+## BOTW disable-DRS flag — compatibility gate (2026-11-19)
+
+Patch #20 adds `SWX_DISABLE_DRS`: with the flag set, both render-scale
+stubs take the apply path unconditionally, fixing the 3D views at
+`DM_RENDER_SCALE` — including `1.0` (1600×900 docked). Flag off keeps the
+game's dynamic resolution. Experimental opt-in, default off, never pinned
+by the installer (armed per run via `ab_test.py set disable-drs` or the
+launcher toggle, gated by the `RENDER_SCALE_DRS` fixups capability).
+
+M4 Pro, same route, `DM_RENDER_SCALE=1.0`, `DM_NVN_PASSDUMP=1200`:
+- Control (`SWX_DISABLE_DRS=0`): scene RTs at 1600×900 in the F1200 dump
+  (P 117776 c0/c1/c3/c5); GPU p50 7.01 / p95 8.77 / max 12.85 ms over
+  frames 600–900. Nothing near the ~29 ms average the game needs before
+  lowering scale — this route cannot demonstrate the override under load
+  on this machine.
+- Flag on (`SWX_DISABLE_DRS=1`): loader logs
+  `3D views fixed at DM_RENDER_SCALE 1.00 (SWX_DISABLE_DRS)`; scene RTs
+  at 1600×900 in the F1200 dump (49 P-lines at 1600×900); GPU max
+  11.18 ms (frames 600–900), 9.29 ms (900–1200). No cadence regression
+  vs control; HUD and luneta clean (player-reported).
+- `DM_RENDER_SCALE=1.2` with the flag on still renders the scene at
+  1920×1080 (player-confirmed; that run's log rotated away).
+
+Verdict: compatibility approved — the flag is inert on unloaded scenes
+at 1.0 and preserves 1.2. Preventing a real DRS dip stays unproven in
+gameplay; revisit when a load or a machine makes the control dip. Player
+env keeps `SWX_DISABLE_DRS=1`; the installer default stays off.
