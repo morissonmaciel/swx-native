@@ -1,0 +1,420 @@
+# SWX_RES_BYPASS=1440p preset for BOTW 1.9.0 on macOS, stage 1: canvas, swapchain and heaps at 2560x1440.
+# The docked display routine stores {screen, render} widths to gfx+0x1210; with the 1440p mode the movk site main+0x12660c8
+# produces {2560.0f, 1920.0f} instead of {1920.0f, 1600.0f} (x8-only stub reading state +0xB4: 0 = off, 1 = 1080p, 2 = 1440p;
+# handheld never reaches the site). The canvas lows, TV width, viewport width and the four heap immediates are rewritten
+# by mode-2-only stubs; the high halves and the viewport height ride the screen-shape stub (one stub per address, chosen
+# at boot): with 0 or 1080p every site keeps its validated behaviour. The loader validates the value, the
+# SWX_NATIVE_1440P capability and docked mode, keeps the request host-side and initializes +0xB4 to zero; the macOS
+# frontend activates mode 2 at boot (window: only with a fitting 2560x1440 drawable; fullscreen: early, drawable follows)
+# and publishes the +512 MiB memory headroom before the first guest reservation (refused if already fixed). Memory and
+# root heaps grow by 512 MiB (3632/3600), display heap to 80 MiB, GPU heap to 192 MiB (MNG-tested values for 2560x1440).
+# Stage 1 keeps the 1920 render width, so the scene stays 1920x1080 in a 2560x1440 canvas; stage 2 flips the render half.
+# verify: dm/games/01007EF00011E000/patches.py:ctx.capabilities.add('SWX_NATIVE_1440P')
+# verify: dm/games/01007EF00011E000/patches.py:0xd2a8a408
+# verify: dm/games/01007EF00011E000/patches.py:RES1440
+# verify: dm/games/01007EF00011E000/patches.py:res1440=None
+# verify: dm/host/dm.h:uint32_t native_1440p;
+# verify: dm/host/loader.c:SWX_NATIVE_1440P
+# verify: dm/host/loader.c:g_native_1440p
+# verify: dm/host/loader.c:swx_res_bypass_mem_extra
+# verify: dm/host/loader.c:swx_mem_reserve_fixed
+# verify: dm/host/hle.h:0 = off, 1 = 1080p, 2 = 1440p
+# verify: dm/host/hle.h:swx_res_bypass_mem_1440
+# verify: dm/host/front_mac.m:g_bp_mode
+# verify: dm/host/front_mac.m:2560x1440
+# verify: dm/host/front_mac.m:internal %dx%d
+# verify: dm/host/front_mac.m:SWX_RES_BYPASS
+# verify: dm/host/hle_svc.c:g_app_pool_eff
+# verify: dm/host/hle_svc.c:+512 MiB
+# verify: dm/host/hle_svc.c:swx_mem_reserve_fixed
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -317,27 +317,58 @@
+     for site, orig in ((0x12660bc, '089ea8d2'), (0x12660c0, 'e2030091'), (0x12660c4, 'e1031f2a'),
+                        (0x12660c8, '0899e8f2'), (0x12660cc, '680a09f9')):
+         fs_site(site, orig)
+-    bypass = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+-    for w in (0xb940b508,   # ldr w8,[x8,#0xB4]      bypass request (the low half it clobbers is the constant below)
+-              0x34000088,   # cbz w8,stock (+4)      not set: the game's own pair
+-              0xd2a89e08,   # movz x8,#0x44F0,lsl#16 low = 1920.0f (as shipped)
+-              0xf2e89e08):  # movk x8,#0x44F0,lsl#48 high = 1920.0f (preset on)
+-        emit(w)
+-    emit(B(here(), 0x12660cc))
+-    for w in (0xd2a89e08,   # stock: movz (as shipped; the original at 0x12660bc already ran, rebuilt identically)
+-              0xf2e89908):  # movk x8,#0x44C8,lsl#48 high = 1600.0f (as shipped)
+-        emit(w)
+-    emit(B(here(), 0x12660cc))   # preset on / stock: the original store
++    # Bypass mode (+0xB4 u32: 0 = off, 1 = 1080p, 2 = 1440p). cbz/lsr never touch the flags and the scratch
++    # register is each site's own destination, so no guest state leaks into the check. Stage 1 renders 1920 wide in
++    # both presets (scene 1920x1080); the 1440p half only widens the screen half to 2560.0f
++    def cbz_w(r, words): return 0x34000000 | (r & 31) | ((words & 0x7ffff) << 5)
++    def lsr1_w(r): return 0x53000000 | (1 << 16) | (31 << 10) | ((r & 31) << 5) | (r & 31)   # lsr wR,wR,#1: 1 -> 0, 2 -> 1
++    def ldr_b4(r): return 0xB9400000 | (45 << 10) | ((r & 31) << 5) | (r & 31)   # ldr wR,[xR,#0xB4]
++    def leword(hexstr): return struct.unpack('<I', bytes.fromhex(hexstr))[0]   # LE-hex (fs_site form) to word
++    bypass = here(); emit(ADRP(8, here(), FS_STATE_OFF))
++    emit(ldr_b4(8)); emit(cbz_w(8, 9)); emit(lsr1_w(8)); emit(cbz_w(8, 4))
++    emit(0xd2a8a408); emit(0xf2e89e08); emit(B(here(), 0x12660cc))   # path1440: {2560.0f, 1920.0f} (stage 1)
++    emit(0xd2a89e08); emit(0xf2e89e08); emit(B(here(), 0x12660cc))   # path1080: {1920.0f, 1920.0f}
++    emit(0xd2a89e08); emit(0xf2e89908); emit(B(here(), 0x12660cc))   # stock: {1920.0f, 1600.0f} as shipped
+     fs_put(0x12660c8, [B(0x12660c8, bypass)], 'docked render width = 1920 with the 1080p bypass, 1600 as shipped'); ctx.capabilities.add('SWX_NATIVE_1080P')
++    # 1440p canvas lows, viewport width and heaps (stage 1): each site branches to a mode-2-only stub; with 0 or
++    # 1080p the original words run and every validated behaviour stays. The high halves and the viewport height ride
++    # the screen-shape stub below (a single stub per address). Words confirmed against the MNG port's table.
++    def cond1(site, orig, new, rd, why):
++        fs_site(site, orig)
++        o = leword(orig)
++        h = here(); emit(ADRP(rd, here(), FS_STATE_OFF)); emit(ldr_b4(rd))
++        emit(cbz_w(rd, 5)); emit(lsr1_w(rd)); emit(cbz_w(rd, 3))
++        emit(new); emit(B(here(), site + 4))
++        emit(o); emit(B(here(), site + 4))
++        fs_put(site, [B(site, h)], why)
++    for site, orig, new, rd, why in (
++            (0xc61ee8, '09f080d2', 0xd2814009, 9, '1440p canvas 2560 wide'),
++            (0xc61f1c, '09f080d2', 0xd2814009, 9, '1440p canvas 2560 wide (second path)'),
++            (0x12618b8, '09f080d2', 0xd2814009, 9, '1440p canvas 2560 wide (getter)'),
++            (0x12660d0, '08f080d2', 0xd2814008, 8, '1440p TV width 2560'),
++            (0x1266104, '03f08052', 0x52814003, 3, '1440p viewport width 2560'),
++            (0x1261704, '0ae6a052', 0x52a1800a, 10, '1440p GPU heap 192 MiB'),
++            (0x71c, '0060b852', 0x52bc6000, 0, '1440p memory heap 3632 MiB'),
++            (0xc617c0, '0820b852', 0x52bc2008, 8, '1440p RootHeap 3600 MiB'),
++            (0xc61b14, '0060a052', 0x52a0a000, 0, '1440p display heap 80 MiB')):
++        cond1(site, orig, new, rd, why)
++    ctx.capabilities.add('SWX_NATIVE_1440P')
+     # Screen shape: a screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched
+     # or cut one. The game's sizes are constants: the output size static [main+0x1e43dc0] (1920x1080; set in nnMain and by its getter main+0x1261880) that sizes the
+     # framework's window textures, the layout size static [main+0x1e43dd0] (1280x720; nnMain, getter main+0x12618dc), and the display mode switch main+0x1266074, which
+     # sets the display size and viewport for docked (1920x1080) and handheld (1280x720, and the 720.0 of its scaled case). Each height becomes the host's when it set one
+     # (state +0x48 u32 output height, +0x4c u32 layout height, +0x50 float layout height; loader.c from DM_SCREEN_ASPECT; 0 = the game's own). The widths stay, so the
+     # 3D views (1600 wide docked, scaled from the output size) grow in height too. x16 is free at every site: nnMain's sites follow a call through the PLT
+-    def taller(site, orig, load, apply, why):
++    RES1440 = {0xc61ef4: 0xf2c0b409, 0xc61f28: 0xf2c0b409, 0x12618c4: 0xf2c0b409,   # mode-2 high halves / heights
++               0x12660d4: 0xf2c0b408, 0x12660f0: 0x5280b404}   # (a single stub per address)
++    def taller(site, orig, load, apply, why, res1440=None):
+         fs_site(site, orig)
+-        start = here(); emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
++        start = here()
++        if res1440 is not None:   # 1440p owns this size; other modes keep the DM_SCREEN_ASPECT behaviour below
++            emit(ADRP(16, here(), FS_STATE_OFF)); emit(ldr_b4(16))
++            emit(cbz_w(16, 5)); emit(lsr1_w(16)); emit(cbz_w(16, 3))
++            emit(res1440); emit(B(here(), site + 4))
++        emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
+         emit(ADRP(16, here(), FS_STATE_OFF))
+         for w in (load, 0x34000050, apply):   # ldr w16,[x16,#off]; cbz w16,+8 (0: the game's size); the host's height
+             emit(w)
+@@ -356,7 +387,7 @@
+             (0x1266124, '085ac0f2', LAY, HI8, 'handheld display size 1280x720'),
+             (0x1266188, '045a8052', LAY, W4, 'handheld viewport height 720'),
+             (0x1266134, '8986a852', LAYF, W9, 'scaled display height 720.0')):
+-        taller(site, orig, load, apply, why)
++        taller(site, orig, load, apply, why, RES1440.get(site))
+     # The game's conversions between output pixels and the 1280x720 layout space, and the layout objects built with that size: each takes the layout height too, while
+     # its bit of state +0x54 is set (loader.c DM_SCREEN_ASPECT_SITES, all by default), so one build can try them one by one. 720.0 constants: main+0xdf19ac divides the
+     # output size by (1280, 720) for the layout scale; the others pair 720.0 with 1280.0 the same way. 1280x720 pairs: layout objects' defaults
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -82,6 +82,7 @@
+     uint32_t render_scale_max_pct; // a render-scale stub's macOS ceiling, percent (the fixups table's RENDER_SCALE_MAX_PCT, patch_nso.py): 0 = none, iOS keeps the legacy ceiling
+     uint32_t render_scale_drs; // the render-scale stub reads state +0x14 as SWX_DISABLE_DRS (the fixups table's RENDER_SCALE_DRS, patch_nso.py): 0 = no such stub
+     uint32_t native_1080p; // the scene stub reads state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_1080P capability, patch_nso.py): 0 = no such stub
++    uint32_t native_1440p; // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_1440P capability, patch_nso.py): 0 = no such stub
+     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
+     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -281,6 +281,7 @@
+         else if (!strcmp(key, "RENDER_SCALE_MAX_PCT")) m->render_scale_max_pct = (uint32_t)v;
+         else if (!strcmp(key, "RENDER_SCALE_DRS")) m->render_scale_drs = (uint32_t)v;
+         else if (!strcmp(key, "SWX_NATIVE_1080P")) m->native_1080p = (uint32_t)v;
++        else if (!strcmp(key, "SWX_NATIVE_1440P")) m->native_1440p = (uint32_t)v;
+         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+         else if (!strcmp(key, "VFR_FRAMEPACE")) m->vfr_framepace = (uint32_t)v;
+         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
+@@ -330,13 +331,24 @@
+ static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+ static int g_render_scale_drs = 0;   // the render-scale stub reads state +0x14 as SWX_DISABLE_DRS (RENDER_SCALE_DRS in its fixups table); 0 = no such stub
+ static int g_native_1080p = 0;   // the scene stub reads state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_1080P in its fixups table); 0 = no such stub
++static int g_native_1440p = 0;   // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_1440P in its fixups table); 0 = no such stub
++static int g_bypass_mem_1440 = 0;   // the frontend confirmed a 1440p boot: the guest heap reservation grows by 512 MiB
++int swx_mem_reserve_fixed(void);   // hle_svc.c: nonzero once the guest address space is reserved
++int swx_res_bypass_mem_1440(int on) {   // front_mac.m: accepted at boot, before the first guest reservation (0 = refused, already fixed)
++    if (on && swx_mem_reserve_fixed()) { LOG("[RED] SWX_RES_BYPASS=1440p: the guest reservation is already fixed; using the stock path"); return 0; }
++    g_bypass_mem_1440 = on ? 1 : 0;
++    return 1;
++}   // (hle_svc.c: headroom for heap, stack and alias regions)
++size_t swx_res_bypass_mem_extra(void) { return g_bypass_mem_1440 ? (size_t)512 << 20 : 0; }   // hle_svc.c: headroom for heap, stack and alias regions
+ static int g_bypass_req = 0;   // host-side 1080p request (validated env + capability + docked); state +0xB4 stays 0 until the macOS front end confirms it
+ int swx_res_bypass_requested(void) { return g_bypass_req; }   // loader.c: the frontend asks before forcing the scale
+ static void install_fps_state(module_t *m) {
+     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
+     g_render_scale_drs = (int)m->render_scale_drs;
+-    if ((g_native_1080p = (int)m->native_1080p)) {   // the bypass slot (+0xB4 u32) lives past the VFR words
++    g_native_1080p = (int)m->native_1080p;
++    g_native_1440p = (int)m->native_1440p;
++    if (g_native_1080p || g_native_1440p) {   // the bypass slot (+0xB4 u32) lives past the VFR words
+         if (m->fps_state_off + 0xB8 > m->size) die("%s: frame step state page too small for the bypass word", m->name);
+     }
+     // A stub that otherwise only lowers the size takes the macOS ceiling (RENDER_SCALE_MAX_PCT, percent); iOS keeps the legacy ceiling. No field: the legacy ceiling on both.
+@@ -387,7 +399,7 @@
+         memcpy(dm_fps_state + 0x14, &nodrs, sizeof nodrs);
+         if (nodrs) LOG("%s: 3D views fixed at DM_RENDER_SCALE %.2f (SWX_DISABLE_DRS)", g_fps_mod, sc);
+     }
+-    // Native 1080p bypass request (SWX_RES_BYPASS=1080p, Breath of the Wild 1.9.0's scene stub): the request stays host-side
++    // Native bypass request (SWX_RES_BYPASS=1080p/1440p, Breath of the Wild 1.9.0's stubs): the request stays host-side
+     // (swx_res_bypass_requested). State +0xB4 is initialized to zero here and forced to 1 by the macOS frontend at boot,
+     // in window and fullscreen alike, before the guest thread starts — the stub already treats +0xB4 as active, so the
+     // loader never writes 1 (an iOS run without that frontend check would otherwise change the render base). Absent, 0 or
+@@ -395,17 +407,18 @@
+     {
+         uint32_t zero = 0;
+         const char *bp = getenv("SWX_RES_BYPASS");
+-        g_bypass_req = 0;
++        g_bypass_req = 0; g_bypass_mem_1440 = 0;
+         if (bp && *bp && strcmp(bp, "0")) {
+-            if (!g_native_1080p) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_1080P scene stub; using the stock path", bp);
+-            else if (strcmp(bp, "1080p")) LOG("[RED] SWX_RES_BYPASS=%s: 1080p or 0; using the stock path", bp);
+-#if TARGET_OS_IPHONE
+-            else LOG("SWX_RES_BYPASS=1080p needs macOS (no drawable check on this platform); using the stock path");
++            if (!strcmp(bp, "1080p") && !g_native_1080p) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_1080P scene stub; using the stock path", bp);
++            else if (!strcmp(bp, "1440p") && !g_native_1440p) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_1440P canvas stub; using the stock path", bp);
++            else if (strcmp(bp, "1080p") && strcmp(bp, "1440p")) LOG("[RED] SWX_RES_BYPASS=%s: 1080p, 1440p or 0; using the stock path", bp);
++#if TARGET_OS_IPHONE
++            else LOG("SWX_RES_BYPASS=%s needs macOS (no drawable check on this platform); using the stock path", bp);
+ #else
+-            else { const char *om = getenv("DM_OPMODE"); if (om && !strcmp(om, "0")) LOG("%s: SWX_RES_BYPASS=1080p needs docked mode; using the stock path", g_fps_mod); else g_bypass_req = 1; }
++            else { const char *om = getenv("DM_OPMODE"); if (om && !strcmp(om, "0")) LOG("%s: SWX_RES_BYPASS=%s needs docked mode; using the stock path", g_fps_mod, bp); else g_bypass_req = !strcmp(bp, "1440p") ? 2 : 1; }
+ #endif
+         }
+-        if (g_native_1080p) memcpy(dm_fps_state + 0xB4, &zero, sizeof zero);
++        if (g_native_1080p || g_native_1440p) memcpy(dm_fps_state + 0xB4, &zero, sizeof zero);
+     }
+     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
+     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -113,8 +113,10 @@
+ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
+ #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
+ // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
+-extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x14 u32 disable-DRS flag (SWX_DISABLE_DRS; only builds whose render-scale stubs declare RENDER_SCALE_DRS), +0x18 double game seconds stepped, +0xB4 u32 1080p bypass active (forced by the macOS front end at boot; the loader keeps it 0, the request stays host-side); +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
++extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x14 u32 disable-DRS flag (SWX_DISABLE_DRS; only builds whose render-scale stubs declare RENDER_SCALE_DRS), +0x18 double game seconds stepped, +0xB4 u32 bypass mode (0 = off, 1 = 1080p, 2 = 1440p; forced by the macOS front end at boot, the loader keeps it 0, the request stays host-side); +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
+ int swx_res_bypass_requested(void);   // loader.c: the host-side 1080p request (validated env + capability + docked); the macOS front end asks before forcing the scale
++int swx_res_bypass_mem_1440(int on);   // loader.c: the frontend offers a 1440p boot before the first guest reservation (0 = refused, already fixed)
++size_t swx_res_bypass_mem_extra(void);   // loader.c: +512 MiB headroom when a 1440p boot was confirmed, else 0 (hle_svc.c)
+ extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+ extern int dm_vfr_capable;   // loader.c install_fps_state: a loaded profile declared VFR_FRAMEPACE and its state page fits the vfr words
+ void dm_fps_lock_tick_vfr(void);  // dynamic-resolution update without stock FPS-limit writes
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -696,7 +696,7 @@
+ - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
+ @end
+ 
+-// Native 1080p bypass (SWX_RES_BYPASS=1080p, BOTW 1.9.0): scene, canvas and VFR snapshots at 1920x1080.
++// Native bypass (SWX_RES_BYPASS=1080p/1440p, BOTW 1.9.0): internal resolution fixed at boot (1920x1080 or 2560x1440), drawable follows the mode.
+ // The loader keeps the request host-side after validating the env value, the SWX_NATIVE_1080P capability and docked
+ // mode; the frontend forces the internal resolution (+0x10 = 1.0f / +0x14 = 1, state +0xB4 = 1) at boot before the guest
+ // thread starts, in window and fullscreen alike. Window mode fixes the content at 1920x1080 pixels and re-verifies across
+@@ -704,31 +704,41 @@
+ // DM_PRESENT_UPSCALE, picked by the presenter from the drawable). A lost 1:1 falls back to the normal present with the
+ // scene and canvas staying 1080p. Main thread only
+ static NSWindow *g_bp_win; static int g_bp_on; static int g_bp_fixed; static int g_bp_trans; static NSUInteger g_bp_screen; static NSRect g_bp_frame;
++static int g_bp_mode; static int g_bp_w = 1920; static int g_bp_h = 1080;   // the boot mode and its internal size
+ static int bp_requested(void) {
+     const char *e = getenv("SWX_RES_BYPASS");
+-    return e && !strcmp(e, "1080p") && swx_res_bypass_requested();
++    return e && (!strcmp(e, "1080p") || !strcmp(e, "1440p")) && swx_res_bypass_requested();
+ }
+ static void bp_reject(NSWindow *win, NSSize was, const char *why) {
+     if (dm_fps_state) *(uint32_t *)(dm_fps_state + 0xB4) = 0;
+     if (win && was.width > 0 && was.height > 0) [win setContentSize:was];
+     LOG("front end: 1080p bypass off (%s); stock path", why);
+ }
+-// Force the internal 1080p resolution before the guest thread starts (window and fullscreen alike)
+-static void bp_force_internal(void) {
+-    float one = 1.0f; uint32_t on = 1;
++// Force the internal resolution before the guest thread starts (window and fullscreen alike).
++// 1 = published, 0 = the 1440p reservation was already fixed (the loader refused it): nothing is
++// published and the caller falls back to the stock path
++static int bp_force_internal(void) {
++    if (g_bp_mode == 2 && !swx_res_bypass_mem_1440(1)) {
++        uint32_t zero = 0;
++        if (dm_fps_state) memcpy(dm_fps_state + 0xB4, &zero, sizeof zero);
++        LOG("front end: 1080p bypass off (guest reservation already fixed); stock path");
++        return 0;
++    }
++    float one = 1.0f; uint32_t on = 1, mode = (uint32_t)g_bp_mode;
+     memcpy(dm_fps_state + 0x10, &one, sizeof one); memcpy(dm_fps_state + 0x14, &on, sizeof on);
+-    memcpy(dm_fps_state + 0xB4, &on, sizeof on);   // confirmed active: only now may the scene stub use the 1920 base
++    memcpy(dm_fps_state + 0xB4, &mode, sizeof mode);   // confirmed active: only now may the scene stub use the wide base
+     g_bp_on = 1;
++    return 1;
+ }
+-// Size the content for exactly 1920x1080 pixels on the current screen; 1 = fixed 1:1, 0 = fallback (internal stays 1080p)
++// Size the content for exactly WxH pixels on the current screen; 1 = fixed 1:1, 0 = fallback (internal stays)
+ static int bp_enforce_windowed(void) {
+     if (!g_bp_win) return 0;
+     NSScreen *screen = g_bp_win.screen ?: NSScreen.mainScreen;
+     if (!screen) return 0;
+     CGFloat s = screen.backingScaleFactor; if (s < 1) s = 1;
+-    [g_bp_win setContentSize:NSMakeSize(1920.0 / s, 1080.0 / s)];
++    [g_bp_win setContentSize:NSMakeSize(g_bp_w / s, g_bp_h / s)];
+     [(DmGameView *)g_bp_win.contentView fitDrawable];
+-    if (CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(1920, 1080)) && NSContainsRect(screen.visibleFrame, g_bp_win.frame)) {
++    if (CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(g_bp_w, g_bp_h)) && NSContainsRect(screen.visibleFrame, g_bp_win.frame)) {
+         g_bp_screen = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue]; g_bp_frame = g_bp_win.frame;
+         g_bp_win.styleMask &= ~NSWindowStyleMaskResizable;   // fixed-window policy holds whenever the 1:1 is confirmed
+         return g_bp_fixed = 1;
+@@ -745,23 +755,28 @@
+     if (sa && *sa && strcmp(sa, "0") && strcmp(sa, "auto")) { bp_reject(win, NSZeroSize, "screen aspect incompatible"); return 0; }
+     NSScreen *screen = win.screen ?: NSScreen.mainScreen;
+     if (!screen) { bp_reject(win, NSZeroSize, "no screen"); return 0; }
++    const char *e = getenv("SWX_RES_BYPASS");
++    g_bp_mode = !strcmp(e, "1440p") ? 2 : 1; g_bp_w = g_bp_mode == 2 ? 2560 : 1920; g_bp_h = g_bp_mode == 2 ? 1440 : 1080;
+     g_bp_win = win;
+     const char *fs = getenv("DM_FULLSCREEN");
+     if (fs && strcmp(fs, "0")) {
+-        bp_force_internal();   // fullscreen boot: internal now, the drawable follows the AppKit transition
+-        LOG("front end: 1080p bypass active: internal 1920x1080, fullscreen boot (drawable follows the view; SWX_RES_BYPASS=1080p)");
++        if (!bp_force_internal()) return 0;   // fullscreen boot: internal now, the drawable follows the AppKit transition
++        LOG("front end: 1080p bypass active: internal %dx%d, fullscreen boot (drawable follows the view; SWX_RES_BYPASS=%s)", g_bp_w, g_bp_h, e);
+         return 1;
+     }
+     NSSize was = win.contentView.bounds.size;
+     if (!bp_enforce_windowed()) {   // windowed boot: validate first, only a fitting drawable activates the preset
+         if (was.width > 0 && was.height > 0) { [win setContentSize:was]; [(DmGameView *)win.contentView fitDrawable]; }
+-        bp_reject(win, NSZeroSize, "window does not fit 1920x1080");
++        bp_reject(win, NSZeroSize, "window does not fit the internal size");
+         return 0;
+     }
+     CGFloat s = screen.backingScaleFactor; if (s < 1) s = 1;
+-    NSSize pts = NSMakeSize(1920.0 / s, 1080.0 / s);
+-    bp_force_internal();
+-    LOG("front end: 1080p bypass active: content %.0fx%.0f pt on scale %.0f, drawable 1920x1080 (SWX_RES_BYPASS=1080p)", pts.width, pts.height, s);
++    NSSize pts = NSMakeSize(g_bp_w / s, g_bp_h / s);
++    if (!bp_force_internal()) {   // reservation refused: restore the window, stock path
++        if (was.width > 0 && was.height > 0) { [win setContentSize:was]; [(DmGameView *)win.contentView fitDrawable]; }
++        return 0;
++    }
++    LOG("front end: 1080p bypass active: content %.0fx%.0f pt on scale %.0f, drawable %dx%d (SWX_RES_BYPASS=%s)", pts.width, pts.height, s, g_bp_w, g_bp_h, e);
+     return 1;
+ }
+ // A screen or fullscreen transition with the preset internal active: in fullscreen the drawable follows the view
+@@ -772,29 +787,29 @@
+     if (g_bp_trans) { [(DmGameView *)g_bp_win.contentView fitDrawable]; return; }   // transition in flight: drawable follows, policy suspended
+     if (g_fullscreen || (g_bp_win.styleMask & NSWindowStyleMaskFullScreen)) {
+         [(DmGameView *)g_bp_win.contentView fitDrawable];
+-        LOG("front end: 1080p bypass fullscreen: internal 1920x1080, drawable %.0fx%.0f", g_layer.drawableSize.width, g_layer.drawableSize.height);
++        LOG("front end: 1080p bypass fullscreen: internal %dx%d, drawable %.0fx%.0f", g_bp_w, g_bp_h, g_layer.drawableSize.width, g_layer.drawableSize.height);
+         return;
+     }
+     {
+         NSScreen *screen = g_bp_win.screen;
+         if (screen && g_bp_fixed && [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == g_bp_screen &&
+-            CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(1920, 1080))) return;   // unchanged
++            CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(g_bp_w, g_bp_h))) return;   // unchanged
+     }
+     if (bp_enforce_windowed()) {
+-        LOG("front end: 1080p bypass windowed: internal 1920x1080, drawable 1920x1080");
++        LOG("front end: 1080p bypass windowed: internal %dx%d, drawable %dx%d", g_bp_w, g_bp_h, g_bp_w, g_bp_h);
+         return;
+     }
+     for (NSScreen *old in NSScreen.screens) {   // back to the last compatible monitor
+         if ([old.deviceDescription[@"NSScreenNumber"] unsignedIntValue] != g_bp_screen) continue;
+         [g_bp_win setFrame:g_bp_frame display:YES];
+         [(DmGameView *)g_bp_win.contentView fitDrawable];
+-        if (CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(1920, 1080))) {
+-            LOG("front end: 1080p bypass back on its screen (drawable 1920x1080)");
++        if (CGSizeEqualToSize(g_layer.drawableSize, CGSizeMake(g_bp_w, g_bp_h))) {
++            LOG("front end: 1080p bypass back on its screen (drawable %dx%d)", g_bp_w, g_bp_h);
+             g_bp_fixed = 1;
+             return;
+         }
+     }
+-    LOG("front end: 1080p bypass lost its 1:1 output (scene and canvas stay 1080p); normal present until restart");
++    LOG("front end: 1080p bypass lost its 1:1 output (scene and canvas stay at the boot mode); normal present until restart");
+ }
+ 
+ // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
+--- a/dm/host/hle_svc.c
++++ b/dm/host/hle_svc.c
+@@ -29,6 +29,7 @@
+ #define RESERVE DM_GAME_MEM_RESERVE   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+ static uint8_t *g_as;              // ASLR region base = the whole block
+ static size_t g_reserve;           // its size: RESERVE less the profile's alias region plus the one in use (mem_init_once)
++static size_t g_app_pool_eff;      // the application pool in force: APP_POOL, +512 MiB on a confirmed 1440p boot
+ static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
+ static size_t g_heap_seen;        // the largest heap opened so far: with the guest in files, SetHeapSize zeroes a heap that grows back below it
+ // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
+@@ -49,6 +50,8 @@
+ static _Atomic uint64_t g_alias_hw;   // how far into the alias region the game has mapped (its end's offset)
+ // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
+ int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < g_reserve; }
++int swx_mem_reserve_fixed(void) { return g_as != NULL; }   // nonzero once mem_init_once reserved the guest block
++size_t swx_res_bypass_mem_extra(void);   // loader.c: +512 MiB headroom when a 1440p boot was confirmed, else 0
+ 
+ // A size switch: bytes (decimal or 0x hex), or whole K / M / G (DM_GUEST_FILE_CHUNK=1G); 0 when unset. At least min, in whole units of align
+ static size_t env_size(const char *name, size_t min, size_t align) {
+@@ -330,7 +333,8 @@
+ #endif
+     const char *as = getenv("DM_ALIAS_SIZE");
+     if (as && *as) { alias = (size_t)strtoull(as, NULL, 0); if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as); }
+-    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
++    size_t mem_extra = swx_res_bypass_mem_extra();   // 1440p: +512 MiB headroom, published by the frontend at boot
++    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias + mem_extra;
+     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+     if (g_as == MAP_FAILED) die("reserve guest AS");
+     guest_file_init();
+@@ -343,13 +347,14 @@
+     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
+     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
+     // The alias and stack sizes come from the game profile (mem_alias / mem_stack, the Mac's alias region as above), the heap takes the rest of mem_reserve
+-    g_heap  = g_as + 0x10000000; g_heap_cap = RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000;
++    g_heap  = g_as + 0x10000000; g_heap_cap = RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000 + mem_extra;
+     g_stack = g_heap + g_heap_cap; g_stack_cap = DM_GAME_MEM_STACK;
+     g_alias = g_stack + g_stack_cap; g_alias_cap = alias;
+     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
+     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
+     if (!(g_alias_rel = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_rel)) || !(g_alias_aged = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_aged))) die("alias release bitmap calloc");
+-    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
++    g_app_pool_eff = DM_GAME_APP_POOL + mem_extra;
++    LOG("guest AS %p +%#llx  heap %p alias %p stack %p (heap region %.2f GB, application pool %.2f GB)", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack, g_heap_cap / 1073741824.0, g_app_pool_eff / 1073741824.0);
+     if ((uint64_t)(uintptr_t)g_alias > UINT64_C(1) << 39) LOG("[mem] the heap and stacks reach past 2^39, which a Switch's addresses never do: a crash on a cut-off pointer points here (DM_ALIAS_SIZE=<profile's mem_alias> keeps them lower)");
+     const char *aw = getenv("DM_ALIAS_WINDOWS");
+     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
+@@ -830,14 +835,14 @@
+         size_t size = regs[1];
+         // Larger than the heap region: ResultOutOfMemory (0xD001), as Horizon's KPageTable::SetHeapSize returns. nn::os::SetMemoryHeapSize turns only that, 103 and LimitReached into
+         // os::ResultOutOfMemory and aborts on anything else; Donkey Kong Country: Tropical Freeze finds its heap size by a binary search between 3 and 6 GB, which needs the error back
+-        if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD001; return 0; }
++        if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx (1440p headroom %s)", size, g_heap_cap, swx_res_bypass_mem_extra() ? "on" : "off"); regs[0] = 0xD001; return 0; }
+         pthread_mutex_lock(&g_map_lock);
+         size_t previous = g_heap_cur;
+         if (size < previous && (map_source_busy((uintptr_t)g_heap + size, previous - size) || device_shared((uintptr_t)g_heap + size, previous - size, "SetHeapSize shrinking over"))) {
+             pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0;
+         }
+         uint64_t used = used_beside_heap();
+-        if (used > APP_POOL || size > APP_POOL - used) {   // ResultLimitReached: more than the total less the used memory GetInfo reports; games retry in 2 MB decrements
++        if (used > g_app_pool_eff || size > g_app_pool_eff - used) {   // ResultLimitReached: more than the total less the used memory GetInfo reports; games retry in 2 MB decrements
+             // Logged once (Mario's retries would repeat it)
+             static int once; if (!once++) LOG("[mem] SetHeapSize %#zx > app pool %#llx less used memory %#llx", size, (unsigned long long)APP_POOL, (unsigned long long)used);
+             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
+@@ -987,7 +992,7 @@
+         // UnmapPhysicalMemory of the 3.15 GB block and the same map again). Without the limit the mapped total went past the pool in the first minute and the freed block stayed mapped.
+         // Off by default: Ace Attorney Investigations Collection maps a little more than the 1 GB pool its profile reports
+         if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) {
+-            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + used_beside_heap());   // used_beside_heap holds the mapped pages with mem_map_limit
++            int64_t room = (int64_t)g_app_pool_eff - (int64_t)(g_heap_cur + used_beside_heap());   // used_beside_heap holds the mapped pages with mem_map_limit
+             if (need && need > room) {
+                 pthread_mutex_unlock(&g_map_lock);
+                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
+@@ -1060,7 +1065,7 @@
+         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
+         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
+         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
+-        case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
++        case I_TotalMem: case I_TotalNonSys: v = g_app_pool_eff; break;
+         case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);
+                                              // profile mem_used (64 MB unless the game's hardware heap needs more: mem_used in dm/games/README.md) and the giant bss; with mem_map_limit the pages
+                                              // mapped in the alias region count too, as on Horizon. SetHeapSize and MapPhysicalMemory charge the same figure

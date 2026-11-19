@@ -30,6 +30,7 @@ installation environment, not the vendored core's compiled default.
 | 19 | `swx_botw_render_scale.patch` | `DM_RENDER_SCALE` | promoted as opt-in on macOS for BOTW 1.9.0; default `1.0` | raises the internal render-scale ceiling to `1.2`; both `1.2` gameplay runs held 16.67 ms on-screen p99 in every reported window | `instrumentation/ab_results.md` |
 | 20 | `swx_botw_disable_drs.patch` | `SWX_DISABLE_DRS` | experimental opt-in (default off; never pinned by the installer) | fixes the 3D views at `DM_RENDER_SCALE`, including `1.0` (1600×900 docked); compatibility gate passed 2026-11-19 (M4 Pro): 1.0+flag → 1600×900 scene, 1.2 → 1920×1080, no cadence regression; effect under load unproven | `instrumentation/ab_results.md` |
 | 21 | `swx_botw_native_1080p.patch` | `SWX_RES_BYPASS` | experimental opt-in (default absent; never pinned by the installer) | scene, canvas and VFR snapshots at 1920×1080 docked. v2 gameplay accepted on M4 Pro, with windowed 1:1 and fullscreen MetalFX verified in retained logs. Fullscreen without MetalFX passed by player report. | `instrumentation/ab_results.md` |
+| 22 | `swx_botw_native_1440p.patch` | `SWX_RES_BYPASS=1440p` | experimental stage 1, not exposed (no launcher option; env-armed only) | canvas, swapchain, TV and viewport at 2560×1440 with scene held at 1920×1080; +512 MiB heap headroom gated on confirmed boot; stage 2 flips the render half to 2560.0f. Gate 1 pending. | `instrumentation/ab_results.md` |
 
 ## Out of tree (frozen, not in `series`)
 

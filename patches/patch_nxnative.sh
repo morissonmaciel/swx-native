@@ -145,7 +145,8 @@ WANT="$(hash_state)"
 # guard (#13), texture-pool correctness repair (#14), burst attribution
 # (#15), burst host lifetime (#16), upload batch blit prototype (#17), save
 # cleanup worker (#18), BOTW render scale ceiling (#19), BOTW
-# disable-DRS flag (#20), and BOTW native 1080p bypass (#21).
+# disable-DRS flag (#20), BOTW native 1080p bypass (#21), and BOTW native
+# 1440p stage 1 (#22).
 # Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
@@ -187,6 +188,9 @@ BYPASS_1080P_PREFIX_COUNT=20
 BYPASS_1080P_PREFIX_HASH="42192787b15ac8d3"
 BYPASS_1080P_V1_PATCH="compat/swx_botw_native_1080p-v1.patch"
 BYPASS_1080P_V1_HASH="ebcdf58608533833"
+BYPASS_1080P_V2_PATCH="compat/swx_botw_native_1080p-v2.patch"
+BYPASS_1080P_V2_HASH="a608e974eaf95453"
+BYPASS_1440P="swx_botw_native_1440p.patch"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -304,6 +308,15 @@ append_botw_render_scale() (
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
+append_bypass_1440p_tip() (
+    # The current tip (#22, stage 1): apply it when missing, so every append
+    # path lands on the verified full stack instead of stranding at #21.
+    if ! is_applied "$BYPASS_1440P"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1440P" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1440P" >/dev/null || exit 1
+        is_applied "$BYPASS_1440P" || exit 1
+    fi
+)
 append_disable_drs() (
     [ "$(hash_series_prefix "$DISABLE_DRS_PREFIX_COUNT")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
@@ -313,7 +326,7 @@ append_disable_drs() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
         is_applied "$DISABLE_DRS" || exit 1
     fi
-    # Chained: a #19 tree upgrades straight to the current tip (#21). The
+    # Chained: a #19 tree upgrades straight to the current tip (#22). The
     # marker is written only after the whole stack verifies, never between
     # patches, so a #19 install cannot strand itself at #20.
     if ! is_applied "$BYPASS_1080P"; then
@@ -321,6 +334,7 @@ append_disable_drs() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
         is_applied "$BYPASS_1080P" || exit 1
     fi
+    append_bypass_1440p_tip || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -333,6 +347,7 @@ append_bypass_1080p() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
         is_applied "$BYPASS_1080P" || exit 1
     fi
+    append_bypass_1440p_tip || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -350,6 +365,24 @@ migrate_bypass_1080p_fullscreen() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
         is_applied "$BYPASS_1080P" || exit 1
     fi
+    append_bypass_1440p_tip || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+migrate_bypass_1080p_v2() (
+    # Live v2 (fullscreen 1080p, #21 tip) to the current tip (#22): revert the
+    # exact v2 file (no add-file hunks, so -R cannot truncate), apply #21, #22.
+    [ "$(cat "$MARKER")" = "$BYPASS_1080P_V2_HASH" ] || exit 1
+    verify_series_prefix "$BYPASS_1080P_PREFIX_COUNT" || exit 1
+    is_applied "$BYPASS_1080P_V2_PATCH" || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$BYPASS_1080P_V2_PATCH" >/dev/null || exit 1
+    ! is_applied "$BYPASS_1080P_V2_PATCH" || exit 1
+    if ! is_applied "$BYPASS_1080P"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        is_applied "$BYPASS_1080P" || exit 1
+    fi
+    append_bypass_1440p_tip || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -564,12 +597,20 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
     exit 0
 fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_V2_HASH" ]; then
+    if ! migrate_bypass_1080p_v2; then
+        echo "[ERROR] BOTW native 1080p v2 to 1440p-capable tip migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native 1080p v2 to 1440p-capable tip ($WANT)."
+    exit 0
+fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_V1_HASH" ]; then
     if ! migrate_bypass_1080p_fullscreen; then
         echo "[ERROR] BOTW native 1080p v1 to fullscreen-capable v2 migration failed; core left otherwise untouched." >&2
         exit 1
     fi
-    echo "patches: migrated BOTW native 1080p to fullscreen-capable v2 ($WANT)."
+    echo "patches: migrated BOTW native 1080p v1 to 1440p-capable tip ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_PREFIX_HASH" ]; then
