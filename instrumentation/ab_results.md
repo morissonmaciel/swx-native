@@ -531,3 +531,25 @@ cost). Zero `[RED]`.
 Precedence proven: with 0.95 in env, the scene stays 1920 (not 1824 or
 1520). Open: player-observable HUD/luneta/teleport/combat pass and the
 fallback runs (handheld, incompatible build, small screen).
+
+### Fullscreen-capable v2 revalidation (2026-11-19)
+
+Rebuild, packaging and signing completed. The installed host contains the
+v2 fullscreen path and the installer preserved `SWX_RES_BYPASS=1080p`.
+The player reported clean gameplay in windowed and fullscreen sessions,
+with `DM_RENDER_SCALE` at `1.0` and `1.2`, and with MetalFX enabled and
+absent. The two retained logs both have `DM_RENDER_SCALE=1.2` and MetalFX
+enabled. The other settings combinations are player-reported.
+
+| Retained session | Evidence |
+|---|---|
+| Fullscreen boot | Internal resolution and VFR snapshots at 1920×1080. Drawable at 3840×2160. MetalFX created a 1920×1080 → 3840×2160 scaler and ran for displayed frames. Normal exit. |
+| Window boot and transition | Starts with a 1920×1080 drawable. During the reported maximize interaction, the recorded drawable was 1920×1144, which keeps the fitted 16:9 viewport at 1920×1080. The presenter used its standard pass and the drawable returned to 1920×1080. Normal exit. |
+
+The current behavior of centering the picture when maximizing the window
+is accepted for this release. Making maximize behave like fullscreen is
+deferred. No new `PASSDUMP` or matched fullscreen capture with MetalFX
+disabled was retained for v2.
+
+Local captures: `/tmp/swx-native-1080p-gates.tyffPJ/fullscreen-metalfx.log`
+and `/tmp/swx-native-1080p-gates.tyffPJ/window-and-transition.log`.

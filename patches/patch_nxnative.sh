@@ -181,10 +181,12 @@ BOTW_RENDER_SCALE_PREFIX_COUNT=18
 BOTW_RENDER_SCALE_PREFIX_HASH="e0ca96f9fb6d2422"
 DISABLE_DRS="swx_botw_disable_drs.patch"
 DISABLE_DRS_PREFIX_COUNT=19
-DISABLE_DRS_PREFIX_HASH="75e74f5d4d5f73a6"
+DISABLE_DRS_PREFIX_HASH="910e19c811ed7f2a"
 BYPASS_1080P="swx_botw_native_1080p.patch"
 BYPASS_1080P_PREFIX_COUNT=20
 BYPASS_1080P_PREFIX_HASH="42192787b15ac8d3"
+BYPASS_1080P_V1_PATCH="compat/swx_botw_native_1080p-v1.patch"
+BYPASS_1080P_V1_HASH="ebcdf58608533833"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -326,6 +328,23 @@ append_bypass_1080p() (
     [ "$(hash_series_prefix "$BYPASS_1080P_PREFIX_COUNT")" = "$BYPASS_1080P_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$BYPASS_1080P_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_1080P_PREFIX_COUNT" || exit 1
+    if ! is_applied "$BYPASS_1080P"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        is_applied "$BYPASS_1080P" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+migrate_bypass_1080p_fullscreen() (
+    # v1 (windowed-only, rejects DM_FULLSCREEN) to v2 (internal 1080p in window
+    # and fullscreen, drawable follows): revert the exact v1 file, apply v2.
+    # v1 has no add-file hunks, so -R cannot truncate; sentinels prove both sides.
+    [ "$(cat "$MARKER")" = "$BYPASS_1080P_V1_HASH" ] || exit 1
+    verify_series_prefix "$BYPASS_1080P_PREFIX_COUNT" || exit 1
+    is_applied "$BYPASS_1080P_V1_PATCH" || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$BYPASS_1080P_V1_PATCH" >/dev/null || exit 1
+    ! is_applied "$BYPASS_1080P_V1_PATCH" || exit 1
     if ! is_applied "$BYPASS_1080P"; then
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
@@ -543,6 +562,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_V1_HASH" ]; then
+    if ! migrate_bypass_1080p_fullscreen; then
+        echo "[ERROR] BOTW native 1080p v1 to fullscreen-capable v2 migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native 1080p to fullscreen-capable v2 ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_PREFIX_HASH" ]; then
