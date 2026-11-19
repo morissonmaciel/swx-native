@@ -623,3 +623,26 @@ max 18.63 ms; to 1500: p50 14.35 / p95 16.19 / max 17.29 ms), consistent
 with the MNG limit the reviewer noted. A 1440p-vs-4K performance
 comparison would need the same route and configuration. 4K development
 ends here with no sustained-60 fps certification.
+
+## BOTW Graphics section + render-scale select — Gate 2 (validated 2026-11-19)
+
+Patch #25 Etapa 2 keeps the #25 host behavior and reorganizes the Mac
+window: a single **Graphics** section right after **Game** with Display
+mode → Native resolution → Frame rate → Render scale → Upscaling → Fixed
+internal resolution → Picture shape, every row basic, Console mode staying
+in Game. Render scale on macOS is a percent select (50/75/100/110/120 %
+writing `0.5`–`1.2`) filtered by the stub ceiling (Breath of the Wild
+offers all five; a ceiling-`1.0` build offers up to 100 %). A saved `1.00`
+reads as `1.0`, an off-list saved choice falls back to 100 %, and an
+env-fixed `0.95` still applies and shows **95 %** on its greyed-out row.
+The iPhone keeps the slider and its sections. Code gates green
+(`test_launcher_settings` 19, Swift launcher storage check, `clang
+-fsyntax-only`, installer `--force` + idempotent); the window layout,
+`120%` arriving as `1.2`, the locked `95 %` row, the ceiling-`1.0`
+omission of 110/120 % and the unchanged iPhone catalog confirmed on
+the gameplay run. Review corrections (validated on the corrected tip
+`b127aa64e21e45ac`): the locked percent uses `Int(exactly:)` so a
+gigantic env-fixed value keeps the picker's control instead of
+trapping, and saved-choice matching uses exact numeric equality on
+both the Swift and the no-window boot paths. A `v3` compat patch +
+migration covers installs of the first Graphics tip (`304324774d5b604a`).
