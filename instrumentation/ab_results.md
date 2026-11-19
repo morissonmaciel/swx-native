@@ -624,7 +624,7 @@ with the MNG limit the reviewer noted. A 1440p-vs-4K performance
 comparison would need the same route and configuration. 4K development
 ends here with no sustained-60 fps certification.
 
-## BOTW Graphics section + render-scale select — Gate 2 (pending gameplay)
+## BOTW Graphics section + render-scale select — Gate 2 (validated 2026-11-19)
 
 Patch #25 Etapa 2 keeps the #25 host behavior and reorganizes the Mac
 window: a single **Graphics** section right after **Game** with Display
@@ -639,5 +639,10 @@ The iPhone keeps the slider and its sections. Code gates green
 (`test_launcher_settings` 19, Swift launcher storage check, `clang
 -fsyntax-only`, installer `--force` + idempotent); the window layout,
 `120%` arriving as `1.2`, the locked `95 %` row, the ceiling-`1.0`
-omission of 110/120 % and the unchanged iPhone catalog await the
-gameplay run.
+omission of 110/120 % and the unchanged iPhone catalog confirmed on
+the gameplay run. Review corrections (validated on the corrected tip
+`b127aa64e21e45ac`): the locked percent uses `Int(exactly:)` so a
+gigantic env-fixed value keeps the picker's control instead of
+trapping, and saved-choice matching uses exact numeric equality on
+both the Swift and the no-window boot paths. A `v3` compat patch +
+migration covers installs of the first Graphics tip (`304324774d5b604a`).

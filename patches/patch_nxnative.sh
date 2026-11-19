@@ -170,8 +170,8 @@ WANT="$(hash_state)"
 # cleanup worker (#18), BOTW render scale ceiling (#19), BOTW
 # disable-DRS flag (#20), BOTW native 1080p bypass (#21), BOTW native
 # 1440p stage 1 (#22), BOTW native 1440p scene (#23), BOTW native 4K (#24),
-# and BOTW native resolution rename (#25). Historical markers are retained
-# for append-only upgrades.
+# and BOTW native resolution rename (#25, with its corrected Graphics tip).
+# Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
 VFR_RATIO_PREFIX_COUNT=10
@@ -228,6 +228,8 @@ NATIVE_RES_V1_PATCH="compat/swx_botw_native_res-v1.patch"
 NATIVE_RES_V1_HASH="5c311e3ac3b7834c"
 NATIVE_RES_V2_PATCH="compat/swx_botw_native_res-v2.patch"
 NATIVE_RES_V2_HASH="f4d3e691770818dc"
+NATIVE_RES_V3_PATCH="compat/swx_botw_native_res-v3.patch"
+NATIVE_RES_V3_HASH="304324774d5b604a"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -434,6 +436,28 @@ migrate_native_res_v2() (
     patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$NATIVE_RES_V2_PATCH" >/dev/null || exit 1
     patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$NATIVE_RES_V2_PATCH" >/dev/null || exit 1
     ! is_applied "$NATIVE_RES_V2_PATCH" || exit 1
+    if ! is_applied "$NATIVE_RES"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        is_applied "$NATIVE_RES" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+migrate_native_res_v3() (
+    # First Graphics tip (0d1911a: 1e-6 tolerance, trapping percent) to the
+    # corrected tip: revert the exact v3 file, then apply the current file.
+    # Same sentinel-identity reason as the v1/v2 migrations above: the
+    # sentinels hold on the v3 tree, so -R with the current file would use
+    # Swift hunks that tree never received. v3 has no add-file hunks, so -R
+    # cannot truncate; sentinels prove both sides.
+    [ "$(hash_series_prefix "$NATIVE_RES_PREFIX_COUNT")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$NATIVE_RES_V3_HASH" ] || exit 1
+    verify_series_prefix "$NATIVE_RES_PREFIX_COUNT" || exit 1
+    is_applied "$NATIVE_RES_V3_PATCH" || exit 1
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$NATIVE_RES_V3_PATCH" >/dev/null || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$NATIVE_RES_V3_PATCH" >/dev/null || exit 1
+    ! is_applied "$NATIVE_RES_V3_PATCH" || exit 1
     if ! is_applied "$NATIVE_RES"; then
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
@@ -745,6 +769,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V3_HASH" ]; then
+    if ! migrate_native_res_v3; then
+        echo "[ERROR] native-resolution Graphics v1 to corrected-tip migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated native-resolution Graphics to the corrected tip ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V2_HASH" ]; then
