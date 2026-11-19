@@ -226,6 +226,8 @@ NATIVE_RES_PREFIX_COUNT=24
 NATIVE_RES_PREFIX_HASH="991ae800f1cb6b3c"
 NATIVE_RES_V1_PATCH="compat/swx_botw_native_res-v1.patch"
 NATIVE_RES_V1_HASH="5c311e3ac3b7834c"
+NATIVE_RES_V2_PATCH="compat/swx_botw_native_res-v2.patch"
+NATIVE_RES_V2_HASH="f4d3e691770818dc"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -413,6 +415,25 @@ migrate_native_res_v1() (
     patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$NATIVE_RES_V1_PATCH" >/dev/null || exit 1
     patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$NATIVE_RES_V1_PATCH" >/dev/null || exit 1
     ! is_applied "$NATIVE_RES_V1_PATCH" || exit 1
+    if ! is_applied "$NATIVE_RES"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        is_applied "$NATIVE_RES" || exit 1
+    fi
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+migrate_native_res_v2() (
+    # Current #25 (rename without Graphics) to the Graphics tip: revert the
+    # exact v2 file, then apply the current file. Same sentinel-identity
+    # reason as the v1 migration above.
+    [ "$(hash_series_prefix "$NATIVE_RES_PREFIX_COUNT")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$NATIVE_RES_V2_HASH" ] || exit 1
+    verify_series_prefix "$NATIVE_RES_PREFIX_COUNT" || exit 1
+    is_applied "$NATIVE_RES_V2_PATCH" || exit 1
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$NATIVE_RES_V2_PATCH" >/dev/null || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$NATIVE_RES_V2_PATCH" >/dev/null || exit 1
+    ! is_applied "$NATIVE_RES_V2_PATCH" || exit 1
     if ! is_applied "$NATIVE_RES"; then
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
@@ -724,6 +745,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V2_HASH" ]; then
+    if ! migrate_native_res_v2; then
+        echo "[ERROR] native-resolution rename without Graphics to Graphics-tip migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated native-resolution rename to the Graphics tip ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V1_HASH" ]; then
