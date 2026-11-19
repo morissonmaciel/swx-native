@@ -553,3 +553,50 @@ disabled was retained for v2.
 
 Local captures: `/tmp/swx-native-1080p-gates.tyffPJ/fullscreen-metalfx.log`
 and `/tmp/swx-native-1080p-gates.tyffPJ/window-and-transition.log`.
+
+## BOTW native 1440p scene — Gate 2 (2B approved 2026-11-19, 2C partial, Gate 3 open)
+
+Patch #23 flips the docked stub's 1440p path from `{2560.0f, 1920.0f}` to
+`{2560.0f, 2560.0f}` (stage 2: native 1440p scene), names the effective
+preset in the frontend activation log, offers `1440p` in the launcher on
+macOS builds declaring `SWX_NATIVE_1440P`, and teaches the harness
+`ab_test set res-bypass 1440p` (`on` stays `1080p`, `off` is `0`).
+Heaps, pool headroom (+512 MiB) and the reserve-before-publish contract
+are unchanged from #22. Gate 2 measures correctness and regressions;
+sustaining 60 fps is Gate 3.
+
+| Gate | Execution | Approval |
+|---|---|---|
+| 2A · Installation | fixture stacks (DRS-only, 1080p, installed stage 1) re-applied; real `main` rewritten; host compiled and linked | same marker on all three routes; 2nd apply idempotent; `main.fixups.tsv` declares `SWX_NATIVE_1440P=1`; launcher offers 1440p only on macOS with the capability; reinstall preserves an explicit choice, fresh install leaves the key absent |
+| 2B · Native 1440p + precedence | same save, windowed boot, `SWX_RES_BYPASS=1440p`, `DM_FULLSCREEN=0`, `DM_RENDER_SCALE=0.95`, `SWX_DISABLE_DRS=0`, `DM_PRESENT_UPSCALE=metalfx`; 1–3 gameplay frames via `DM_CTL` `passdump 3`; menu, spyglass, teleport, quit | main color/depth attachments at **2560×1440** despite conflicting flags; canvas, swapchain, crop, snapshots and drawable at **2560×1440**; 3632 MiB heap; image and HUD intact; zero `[RED]`; exit 0; MetalFX armed, no scaler for the 1:1 present |
+| 2C · Regressions + fallback | same binary: `1080p` smoke, preset `0`, `1440p` with `DM_OPMODE=0`, `1440p` with `DM_FULLSCREEN=1`; scale 1.0 on the controls | `1080p` keeps scene/swapchain **1920×1080**; `0` keeps stock docked sizes; handheld refuses before the extra reserve; fullscreen keeps scene/swapchain **2560×1440**, logs the real drawable, returns to the fixed 1440p window on exit |
+
+Prerequisite (Gate 1 evidence): capture a short gameplay `PASSDUMP` at
+1920×1080 on the stage-1 build before replacing it — main color/depth
+targets at 1920×1080 are the missing direct evidence.
+
+### Gate 2B run (fullscreen, approved 2026-11-19)
+
+Deviation from the protocol above: the run booted fullscreen, not
+windowed, with `DM_PRESENT_UPSCALE=metalfx`. Swapchain, crop and VFR
+snapshots at **2560×1440**; MetalFX created a 2560×1440 → 3840×2160
+scaler for the drawable and ran for displayed frames; total present cost
+with MetalFX 1.23–1.26 ms p95. VFR: average present 16.67 ms over
+255.0 s sampled, 0 of last 300 dropped. Zero `[RED]`, exit 0.
+2B approved on this evidence; the windowed leg was not run.
+
+### Remainder (deferred, not regressions)
+
+2C: fullscreen smoke PASS (same binary). Deferred to a later round:
+return to the fixed 1440p window on exit, the `1080p` / `0` / handheld
+(`DM_OPMODE=0`) controls. Gate 3: formal 1080p-vs-1440p A/B still open
+(the run above sustained 16.67 ms mean present, not a comparison).
+
+### Gate 1 — stage-1 output and memory (approved 2026-11-19)
+
+`SWX_RES_BYPASS=1440p` on the stage-1 build (scene held at 1920×1080):
+canvas, swapchain, crop, VFR snapshots and drawable at 2560×1440, pool
+3797 MiB, `SetHeapSize` 3632 MiB accepted, zero allocation errors, normal
+exit. `DM_CTL` `passdump 3` on frame 1421, pass 143733: four color targets
+and one depth target at **1920×1080** — the missing direct scene evidence.
+Capture: `/tmp/swx-1440p-gate1.bc7EkF/stage1-passdump.log:3058`.
