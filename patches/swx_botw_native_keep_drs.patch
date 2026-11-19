@@ -1,0 +1,68 @@
+# SWX_NATIVE_RES presets keep the game's dynamic resolution (BOTW 1.9.0, macOS): the frontend publishes only the base.
+# bp_force_internal() no longer writes state +0x14; that slot stays under the loader's SWX_DISABLE_DRS handling (0 keeps
+# dynamic resolution around the new base, 1 fixes the scene for A/B control). +0x10 stays 1.0f while the preset is active,
+# so DM_RENDER_SCALE remains ignored under the preset, and +0xB4 is still published only after the heap reservation check.
+# Heaps, HUD, VFR snapshots and present keep using the preset size. Docs now call the preset the base and point to Fixed
+# internal resolution for the reduction policy. No new flag, no ARM64 stub change.
+# verify: dm/host/front_mac.m:+0x14 stays under the loader via SWX_DISABLE_DRS
+# verify: dm/host/front_mac.m:uint32_t mode = (uint32_t)g_bp_mode
+# verify: dm/host/front_mac.m:publishes the base resolution
+# verify: dm/games/settings.tsv:Sets the base scene
+# verify: docs/env_switches.tsv:keeps its dynamic resolution around the base unless
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -696,9 +696,9 @@
+ - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
+ @end
+ 
+-// Native resolution (SWX_NATIVE_RES=1080p/1440p/2160p, legacy SWX_RES_BYPASS=1080p/1440p/4k, BOTW 1.9.0): internal resolution fixed at boot (1920x1080, 2560x1440 or 3840x2160), drawable follows the mode.
++// Native resolution (SWX_NATIVE_RES=1080p/1440p/2160p, legacy SWX_RES_BYPASS=1080p/1440p/4k, BOTW 1.9.0): base resolution (1920x1080, 2560x1440 or 3840x2160), drawable follows the mode.
+ // The loader keeps the request host-side after validating the env value, the SWX_NATIVE_1080P capability and docked
+-// mode; the frontend forces the internal resolution (+0x10 = 1.0f / +0x14 = 1, state +0xB4 = 1) at boot before the guest
++// mode; the frontend publishes the base resolution (+0x10 = 1.0f, state +0xB4 = mode) at boot before the guest
+ // thread starts, in window and fullscreen alike. Window mode fixes the content at 1920x1080 pixels and re-verifies across
+ // monitors; fullscreen lets the drawable follow the view and the stock present path scales it (MetalFX or bilinear per
+ // DM_PRESENT_UPSCALE, picked by the presenter from the drawable). A lost 1:1 falls back to the normal present with the
+@@ -718,7 +718,7 @@
+     if (win && was.width > 0 && was.height > 0) [win setContentSize:was];
+     LOG("front end: 1080p bypass off (%s); stock path", why);
+ }
+-// Force the internal resolution before the guest thread starts (window and fullscreen alike).
++// Publish the base resolution before the guest thread starts (window and fullscreen alike).
+ // 1 = published, 0 = the 1440p/4K reservation was already fixed (the loader refused it): nothing is
+ // published and the caller falls back to the stock path
+ static int bp_force_internal(void) {
+@@ -734,9 +734,9 @@
+         LOG("front end: 1080p bypass off (guest reservation already fixed); stock path");
+         return 0;
+     }
+-    float one = 1.0f; uint32_t on = 1, mode = (uint32_t)g_bp_mode;
+-    memcpy(dm_fps_state + 0x10, &one, sizeof one); memcpy(dm_fps_state + 0x14, &on, sizeof on);
+-    memcpy(dm_fps_state + 0xB4, &mode, sizeof mode);   // confirmed active: only now may the scene stub use the wide base
++    float one = 1.0f; uint32_t mode = (uint32_t)g_bp_mode;
++    memcpy(dm_fps_state + 0x10, &one, sizeof one);
++    memcpy(dm_fps_state + 0xB4, &mode, sizeof mode);   // confirmed active: only now may the scene stub use the wide base (+0x14 stays under the loader via SWX_DISABLE_DRS)
+     g_bp_on = 1;
+     return 1;
+ }
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -18,7 +18,7 @@
+ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+ SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
+-SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Renders the scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes.
++SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Sets the base scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes. The game keeps its dynamic resolution around the base; Fixed internal resolution controls whether the scene can drop under load.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+--- a/docs/env_switches.tsv
++++ b/docs/env_switches.tsv
+@@ -441,6 +441,6 @@
+ DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+ DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
+ SWX_DISABLE_DRS	player	`1` fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including `1.0` (1600x900 docked); `0` (the default) keeps the game's dynamic resolution. Only on builds whose render-scale stubs declare RENDER_SCALE_DRS; the installer leaves it unset (armed per run via the harness or launcher).
+-SWX_NATIVE_RES	player	`1080p` renders BOTW 1.9.0 scene, canvas and snapshot at 1920x1080 docked (window 1:1, fullscreen scaled per `DM_PRESENT_UPSCALE`); `1440p` renders them at 2560x1440 (macOS only); `2160p` renders them at 3840x2160 (macOS only); `0` (the default) keeps the stock sizes. `1080p` needs a build whose scene stubs declare SWX_NATIVE_1080P, `1440p` one declaring SWX_NATIVE_1440P, `2160p` one declaring SWX_NATIVE_4K; the frontend forces the scale at boot. The installer leaves it unset (armed per run via the harness or launcher). Legacy alias SWX_RES_BYPASS with 1080p/1440p/4k (4k is 2160p) reads when SWX_NATIVE_RES is absent.
++SWX_NATIVE_RES	player	`1080p` sets BOTW 1.9.0 base scene, canvas and snapshot at 1920x1080 docked (window 1:1, fullscreen scaled per `DM_PRESENT_UPSCALE`); `1440p` sets them at 2560x1440 (macOS only); `2160p` sets them at 3840x2160 (macOS only); `0` (the default) keeps the stock sizes. The game keeps its dynamic resolution around the base unless `SWX_DISABLE_DRS=1` fixes the scene. `1080p` needs a build whose scene stubs declare SWX_NATIVE_1080P, `1440p` one declaring SWX_NATIVE_1440P, `2160p` one declaring SWX_NATIVE_4K; the frontend publishes the base at boot (+0x10 = 1.0f, +0xB4 = mode) and leaves +0x14 to the loader. The installer leaves it unset (armed per run via the harness or launcher). Legacy alias SWX_RES_BYPASS with 1080p/1440p/4k (4k is 2160p) reads when SWX_NATIVE_RES is absent.
+ SWX_VFR	switch	BOTW 1.9.0 on macOS: relaxed locks to SWX_VFR_HZ and follows display ticks at exact divisors; uncapped uses a monotonic ceiling; 0 restores stock timing. Active VFR owns timing independently of the stock FPS flags.
+ SWX_VFR_HZ	switch	auto (60 fps in relaxed, 144 fps in uncapped) or an integer FPS from 30 to 240. The display link requests the screen rate independently.

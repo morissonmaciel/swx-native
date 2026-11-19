@@ -646,3 +646,21 @@ gigantic env-fixed value keeps the picker's control instead of
 trapping, and saved-choice matching uses exact numeric equality on
 both the Swift and the no-window boot paths. A `v3` compat patch +
 migration covers installs of the first Graphics tip (`304324774d5b604a`).
+
+## BOTW keep dynamic resolution under the preset — gameplay gate (validated 2026-11-19)
+
+Patch #26 (`swx_botw_native_keep_drs.patch`) separates the preset from
+the DRS policy: `bp_force_internal()` publishes only the base (`+0x10 =
+1.0f`, `+0xB4 = mode`, reservation check kept) and no longer writes
+`+0x14`, which stays under the loader's `SWX_DISABLE_DRS` handling (`0`
+keeps the game's dynamic resolution around the new base, `1` fixes the
+scene for A/B control). `DM_RENDER_SCALE` stays ignored under the
+preset; heaps, HUD, VFR snapshots and present keep using the preset
+size. Catalog and player docs now call the preset the base and point to
+Fixed internal resolution for the reduction policy. No new flag, no
+ARM64 stub change. Code gates green (sentinels + forward/reverse
+round-trip identical, `sh -n`, `#25→#26` migration `b127aa64e21e45ac` →
+`2ada8887b947ac31` verified on an isolated core copy, full installer run
+with the pairs overlay: prewarm `17,818` rows → `13` files, `787.7 MB`).
+Gameplay (player report, same intense-combat region as the earlier runs,
+`SWX_NATIVE_RES=1440p` with `SWX_DISABLE_DRS=0`): holds stable 60 fps.
