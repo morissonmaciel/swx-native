@@ -311,6 +311,14 @@ append_disable_drs() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
         is_applied "$DISABLE_DRS" || exit 1
     fi
+    # Chained: a #19 tree upgrades straight to the current tip (#21). The
+    # marker is written only after the whole stack verifies, never between
+    # patches, so a #19 install cannot strand itself at #20.
+    if ! is_applied "$BYPASS_1080P"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
+        is_applied "$BYPASS_1080P" || exit 1
+    fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )

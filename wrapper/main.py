@@ -484,7 +484,7 @@ def redirect_saves(cfg, master, phase_log):
                                                  "SWX_GPU_KEEPALIVE=", "SWX_GPU_KEEPALIVE_YIELD=",
                                                  "SWX_RESIDENCY_UB_RING=",
                                                  "SWX_GPU_TEXTURE_POOL=", "SWX_GPU_BIND_ONCE=",
-                                                 "SWX_DISABLE_DRS=", "SWX_RES_BYPASS="))]
+                                                 "SWX_DISABLE_DRS="))]
     # Keep explicit player VFR choices across reinstalls. A new install
     # uses the VFR 60 fps lock and derives display-link rate from the panel.
     # DM_NVN_SYNC_LAG is not pinned either and must stay out of the env.
@@ -498,10 +498,10 @@ def redirect_saves(cfg, master, phase_log):
     # gated by the RENDER_SCALE_DRS fixups capability, exposed in the
     # launcher and armed per run via the harness (ab_test.py disable-drs)
     # or the launcher, never pinned. SWX_RES_BYPASS (native 1080p preset)
-    # follows the same rule: gated by the SWX_NATIVE_1080P fixups
-    # capability, exposed in the launcher and armed per run via the
-    # harness (ab_test.py res-bypass) or the launcher, never pinned.
-    # DM tuning the user set by hand (MAX_TEX, KEEPALIVE_US, …) passes
+    # is gated by the SWX_NATIVE_1080P fixups capability and exposed in
+    # the launcher; an explicit choice passes through via kept and a new
+    # install leaves it absent (default off). DM tuning the user set by
+    # hand (MAX_TEX, KEEPALIVE_US, …) passes
     # through untouched via kept.
     vfr_defaults = {"SWX_VFR": "relaxed", "SWX_VFR_HZ": "auto"}
     for line in kept:
