@@ -497,7 +497,7 @@ def redirect_saves(cfg, master, phase_log):
     # SWX_DISABLE_DRS (fixed internal resolution) follows the same rule:
     # gated by the RENDER_SCALE_DRS fixups capability, exposed in the
     # launcher and armed per run via the harness (ab_test.py disable-drs)
-    # or the launcher, never pinned. SWX_RES_BYPASS (native 1080p/1440p presets)
+    # or the launcher, never pinned. SWX_RES_BYPASS (native 1080p/1440p/4k presets)
     # is gated by the SWX_NATIVE_1080P fixups capability and exposed in
     # the launcher; an explicit choice passes through via kept and a new
     # install leaves it absent (default off). DM tuning the user set by

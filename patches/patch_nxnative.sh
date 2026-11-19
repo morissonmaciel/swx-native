@@ -146,7 +146,7 @@ WANT="$(hash_state)"
 # (#15), burst host lifetime (#16), upload batch blit prototype (#17), save
 # cleanup worker (#18), BOTW render scale ceiling (#19), BOTW
 # disable-DRS flag (#20), BOTW native 1080p bypass (#21), BOTW native
-# 1440p stage 1 (#22), and BOTW native 1440p scene (#23).
+# 1440p stage 1 (#22), BOTW native 1440p scene (#23), and BOTW native 4K (#24).
 # Historical markers are retained for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
@@ -194,6 +194,9 @@ BYPASS_1440P="swx_botw_native_1440p.patch"
 BYPASS_1440P_SCENE="swx_botw_native_1440p_scene.patch"
 BYPASS_1440P_SCENE_PREFIX_COUNT=22
 BYPASS_1440P_SCENE_PREFIX_HASH="627801b07b63d582"
+BYPASS_4K="swx_botw_native_4k.patch"
+BYPASS_4K_PREFIX_COUNT=23
+BYPASS_4K_PREFIX_HASH="8ba3d581d4b32ad6"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -329,14 +332,34 @@ append_bypass_1440p_scene() (
         is_applied "$BYPASS_1440P_SCENE" || exit 1
     fi
 )
+append_bypass_4k() (
+    # #24 (native 4K) on top of the #23 tree: apply it when missing, so every
+    # append path lands on the verified full stack.
+    if ! is_applied "$BYPASS_4K"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_4K" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_4K" >/dev/null || exit 1
+        is_applied "$BYPASS_4K" || exit 1
+    fi
+)
+append_bypass_4k_tip() (
+    # A #23 tree upgrades straight to the current tip (#24). The marker is
+    # written only after the whole stack verifies, never between patches.
+    [ "$(hash_series_prefix "$BYPASS_4K_PREFIX_COUNT")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$BYPASS_4K_PREFIX_COUNT" || exit 1
+    append_bypass_4k || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
 append_bypass_1440p_scene_tip() (
-    # A #22 (stage 1) tree upgrades straight to the current tip (#23). The
+    # A #22 (stage 1) tree upgrades straight to the current tip (#24). The
     # marker is written only after the whole stack verifies, never between
     # patches, so a #22 install cannot strand itself.
     [ "$(hash_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT" || exit 1
     append_bypass_1440p_scene || exit 1
+    append_bypass_4k || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -359,6 +382,7 @@ append_disable_drs() (
     fi
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
+    append_bypass_4k || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -373,6 +397,7 @@ append_bypass_1080p() (
     fi
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
+    append_bypass_4k || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -392,6 +417,7 @@ migrate_bypass_1080p_fullscreen() (
     fi
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
+    append_bypass_4k || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -410,6 +436,7 @@ migrate_bypass_1080p_v2() (
     fi
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
+    append_bypass_4k || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -622,6 +649,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ]; then
+    if ! append_bypass_4k_tip; then
+        echo "[ERROR] BOTW native 1440p scene to native 4K migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native 1440p scene to native 4K ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ]; then
