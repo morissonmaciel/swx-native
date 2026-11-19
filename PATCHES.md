@@ -29,6 +29,7 @@ installation environment, not the vendored core's compiled default.
 | 18 | `swx_save_cleanup_worker.patch` | `SWX_SAVE_ASYNC` | promoted (default ON) | persistent `QOS_CLASS_BACKGROUND` cleanup worker, FIFO depth 4, per-generation `mkdtemp` staging, orphan recovery on mount; single-install A/B: 5.47–5.97 ms/commit off vs 1.10–1.18 ms on (≈4–5 ms sync-path saving); isolated 74.6 ms frame shows no commit link | `instrumentation/ab_results.md` |
 | 19 | `swx_botw_render_scale.patch` | `DM_RENDER_SCALE` | promoted as opt-in on macOS for BOTW 1.9.0; default `1.0` | raises the internal render-scale ceiling to `1.2`; both `1.2` gameplay runs held 16.67 ms on-screen p99 in every reported window | `instrumentation/ab_results.md` |
 | 20 | `swx_botw_disable_drs.patch` | `SWX_DISABLE_DRS` | experimental opt-in (default off; never pinned by the installer) | fixes the 3D views at `DM_RENDER_SCALE`, including `1.0` (1600×900 docked); compatibility gate passed 2026-11-19 (M4 Pro): 1.0+flag → 1600×900 scene, 1.2 → 1920×1080, no cadence regression; effect under load unproven | `instrumentation/ab_results.md` |
+| 21 | `swx_botw_native_1080p.patch` | `SWX_RES_BYPASS` | experimental opt-in (default absent; never pinned by the installer) | scene, canvas, VFR snapshot and drawable at 1920×1080 docked, presented 1:1; Gates 2–3 passed 2026-11-19 (M4 Pro): bypass active at scale 2 (960×540 pt), scene 1920×1080 even with `DM_RENDER_SCALE=0.95`, zero MetalFX-upscaled frames, p99 16.67 ms; player-observable pass + fallback runs open | `instrumentation/ab_results.md` |
 
 ## Out of tree (frozen, not in `series`)
 
@@ -43,7 +44,7 @@ installation environment, not the vendored core's compiled default.
 launcher logs each line at boot (`launcher: env K=V`). Experimental keys
 (`DM_NVN_ENC_THREAD`, `SWX_NVN_UP_BLIT_REC`, `SWX_GPU_BIND_ONCE`,
 `DM_NVN_TSV*`, `DM_NVN_WAITS*`, `SWX_RT_HEAP_RESERVE`,
-`SWX_DISABLE_DRS`) stay absent:
+`SWX_DISABLE_DRS`, `SWX_RES_BYPASS`) stay absent:
 compiled defaults apply.
 
 | Key | Value | Status |

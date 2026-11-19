@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs|res-bypass on|off|clear
   ab_test.py set vfr uncapped
   ab_test.py set vfr-hz auto|30..240|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
@@ -50,10 +50,11 @@ KEYS = {
     "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
     "up-blit-rec": "SWX_NVN_UP_BLIT_REC",
     "disable-drs": "SWX_DISABLE_DRS",
+    "res-bypass": "SWX_RES_BYPASS",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
-ON_VALUES = {"snap": "4", "vfr": "relaxed"}
-OFF_VALUES = {"snap": "2", "vfr": "0"}
+ON_VALUES = {"snap": "4", "vfr": "relaxed", "res-bypass": "1080p"}
+OFF_VALUES = {"snap": "2", "vfr": "0", "res-bypass": "0"}
 
 ENV_ALWAYS_KEEP = ("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=",
                    "DM_PSO_PAIRS=")
