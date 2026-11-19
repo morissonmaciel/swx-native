@@ -488,3 +488,68 @@ Verdict: compatibility approved — the flag is inert on unloaded scenes
 at 1.0 and preserves 1.2. Preventing a real DRS dip stays unproven in
 gameplay; revisit when a load or a machine makes the control dip. Player
 env keeps `SWX_DISABLE_DRS=1`; the installer default stays off.
+
+## BOTW native 1080p bypass — Gates 2 and 3 (2026-11-19)
+
+Patch #21 adds `SWX_RES_BYPASS=1080p`: the scene stub produces a 1920
+render base (site `main+0x12660c8`), the frontend confirms a 1920x1080
+drawable on a fitting screen and only then forces `+0x10 = 1.0f` /
+`+0x14 = 1`, before the guest thread. Experimental opt-in, default
+absent, never pinned by the installer.
+
+Summary of the three gates collected:
+
+| Gate | What was checked | Result |
+|---|---|---|
+| 1 — Installation | `install.sh` end-to-end, incremental migrate + idempotent 2nd apply, `main` fixups regenerated, build green, default env absent | PASS (rewrite ok, `# SWX_NATIVE_1080P 1` in fixups, `env.txt` without `SWX_RES_BYPASS`) |
+| 2 — Real resolution, compatibility | 1080p active at `DM_RENDER_SCALE=1.0`, docked, drawable confirmed | PASS (bypass active at scale 2 = 960×540 pt, drawable 1920×1080, p99 16.67 ms, 0 dropped, no `[RED]`) |
+| 3 — Precedence + 1:1 present | `0.95` + DRS + `metalfx` with the preset; PASSDUMP | PASS (scene 1920×1080 despite 0.95, canvas/snapshot/drawable 1920×1080, zero MetalFX-upscaled frames, no `[RED]`) |
+
+Bottom line: the bypass activates only when the drawable is exactly
+1920×1080, overrides `DM_RENDER_SCALE`/`SWX_DISABLE_DRS`, and presents
+1:1 (MetalFX refused at equal sizes) with stock cadence. Handheld,
+incompatible-build and small-screen fallbacks are not gameplay-tested;
+they fall back to the stock path with a warning by construction.
+
+Gate 2 — compatibility (`SWX_RES_BYPASS=1080p`, `SWX_DISABLE_DRS=1`,
+`DM_RENDER_SCALE=1.0`, `.prev.log`): loader `3D views fixed at
+DM_RENDER_SCALE 1.00`, frontend `1080p bypass active: content 960x540 pt
+on scale 2, drawable 1920x1080`. Frames 1200–1500: p99 16.67 ms
+on-screen, 0 dropped, GPU max 10.80 ms. No `[RED]`. Approved.
+
+Gate 3 — precedence and 1:1 present (`SWX_RES_BYPASS=1080p`,
+`SWX_DISABLE_DRS=1`, `DM_RENDER_SCALE=0.95`,
+`DM_PRESENT_UPSCALE=metalfx`, `DM_NVN_PASSDUMP=1200`, current `.log`):
+loader `rendered at 0.95` + `fixed at 0.95`; frontend bypass active as
+above. F1200 dump: scene attachments at **1920x1080** (42 P-lines),
+half-res at 960x540; canvas/swapchain 1920x1080, VFR snapshot ring
+1920x1080, `picture shape 1920x1080`. MetalFX armed but every present
+went `through the bilinear pass` — zero upscaled frames, as `fx_wanted`
+refuses equal sizes. Frames 900–1200: p99 16.67 ms, 0 dropped; one
+108 ms frame at 1500 with GPU max 8.90 ms (load/teleport, not render
+cost). Zero `[RED]`.
+Precedence proven: with 0.95 in env, the scene stays 1920 (not 1824 or
+1520). Open: player-observable HUD/luneta/teleport/combat pass and the
+fallback runs (handheld, incompatible build, small screen).
+
+### Fullscreen-capable v2 revalidation (2026-11-19)
+
+Rebuild, packaging and signing completed. The installed host contains the
+v2 fullscreen path and the installer preserved `SWX_RES_BYPASS=1080p`.
+The player reported clean gameplay in windowed and fullscreen sessions,
+with `DM_RENDER_SCALE` at `1.0` and `1.2`, and with MetalFX enabled and
+absent. The two retained logs both have `DM_RENDER_SCALE=1.2` and MetalFX
+enabled. The other settings combinations are player-reported.
+
+| Retained session | Evidence |
+|---|---|
+| Fullscreen boot | Internal resolution and VFR snapshots at 1920×1080. Drawable at 3840×2160. MetalFX created a 1920×1080 → 3840×2160 scaler and ran for displayed frames. Normal exit. |
+| Window boot and transition | Starts with a 1920×1080 drawable. During the reported maximize interaction, the recorded drawable was 1920×1144, which keeps the fitted 16:9 viewport at 1920×1080. The presenter used its standard pass and the drawable returned to 1920×1080. Normal exit. |
+
+The current behavior of centering the picture when maximizing the window
+is accepted for this release. Making maximize behave like fullscreen is
+deferred. No new `PASSDUMP` or matched fullscreen capture with MetalFX
+disabled was retained for v2.
+
+Local captures: `/tmp/swx-native-1080p-gates.tyffPJ/fullscreen-metalfx.log`
+and `/tmp/swx-native-1080p-gates.tyffPJ/window-and-transition.log`.

@@ -30,3 +30,7 @@ keys.txt
 shader/
 .DS_Store
 .env
+.dist/
+
+# Agents
+.agents/
