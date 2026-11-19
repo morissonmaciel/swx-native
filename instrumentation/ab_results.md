@@ -600,3 +600,26 @@ canvas, swapchain, crop, VFR snapshots and drawable at 2560×1440, pool
 exit. `DM_CTL` `passdump 3` on frame 1421, pass 143733: four color targets
 and one depth target at **1920×1080** — the missing direct scene evidence.
 Capture: `/tmp/swx-1440p-gate1.bc7EkF/stage1-passdump.log:3058`.
+
+## BOTW native 4K — approved functional (2026-11-19)
+
+Patch #24 adds `SWX_RES_BYPASS=4k` (mode 3, `SWX_NATIVE_4K`): docked stub
+emits `{3840.0f, 3840.0f}`, canvas lows / TV / viewport take 3840, integer
+heights take 2160 (`0xf2c10e09`/`0xf2c10e08`, viewport `0x52810e04`), heaps
+display 112 / GPU 448 / memory 4080 / RootHeap 4048 MiB (+960 MiB heap/pool
+→ 4288/4245 MiB). Mode 3 is split from mode 2 by `tbz` bit tests (no flag
+touch); one stub per address. Windowless fallback logs without writing the
+`+0xB4` slot (the loader already zeroes it on capable builds).
+
+| Gate | Execution | Approval |
+|---|---|---|
+| 1 · Installation | `#23` → `#24` live migrate + `--force` 0→24 + idempotent reapply; `main` rewritten; host compiled/linked | new tip `991ae800f1cb6b3c`, prefix-23 `8ba3d581d4b32ad6` recomputed, sentinels 17/17 (`0xf2c10e09/08` lock the 2160 heights), `test_launcher_settings` 17 ok, `clang -fsyntax-only` clean (pre-existing `activity` warning only), `main.fixups.tsv` declares `SWX_NATIVE_4K=1`, launcher offers 4k only on macOS with the capability, harness `4k/1440p/1080p/on/off/clear` + invalid rejected |
+| 2 · 4K native | fullscreen drawable 3840×2160, `SWX_RES_BYPASS=4k`, `DM_RENDER_SCALE=0.95`, `SWX_DISABLE_DRS=0`, `DM_PRESENT_UPSCALE=metalfx`; save load, `passdump 3`, spyglass, teleport | `4k bypass active: internal 3840x2160`, guest AS heap 4.19 GB / pool 4.15 GB, heap 3.98 GB accepted, swapchain first 3840×2160, drawable 3840×2160, snapshots/crop 3840×2160, frame 1150 pass 107186: 4 color + 1 depth at **3840×2160**, viewport 0,0,3840,2160, 1:1 present through the bilinear pass (MetalFX armed, no scaler), zero `[RED]`. Capture: `/tmp/swx-native-4k-gate.4c3vLG/4k-passdump.log:2358` |
+| 3 · Short regression | same binary: `1440p` fullscreen + MetalFX | `1440p bypass active: internal 2560x1440`, heap 3.55 GB (3632 MiB) / pool 3.71 GB (3797 MiB), swapchain/crop/snapshots 2560×1440, MetalFX scaler 2560×1440 → 3840×2160, exit 0, zero `[RED]`. Current rotation log: `/Users/morissonmaciel/Library/Logs/nxnative/01007EF00011E000.log:215` |
+
+Performance note (not a gate): the first 4K run shows GPU near or above
+16.67 ms in heavy stretches (frames to 1200: GPU p50 14.66 / p95 16.18 /
+max 18.63 ms; to 1500: p50 14.35 / p95 16.19 / max 17.29 ms), consistent
+with the MNG limit the reviewer noted. A 1440p-vs-4K performance
+comparison would need the same route and configuration. 4K development
+ends here with no sustained-60 fps certification.
