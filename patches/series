@@ -19,3 +19,5 @@ swx_save_cleanup_worker.patch
 swx_botw_render_scale.patch
 swx_botw_disable_drs.patch
 swx_botw_native_1080p.patch
+swx_botw_native_1440p.patch
+swx_botw_native_1440p_scene.patch

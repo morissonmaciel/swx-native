@@ -8,6 +8,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 Usage:
   ab_test.py status [--install-dir I]
   ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs|res-bypass on|off|clear
+                   (res-bypass also takes 1080p|1440p explicitly; on stays 1080p)
   ab_test.py set vfr uncapped
   ab_test.py set vfr-hz auto|30..240|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
@@ -104,7 +105,9 @@ def cmd_set(args):
     if len(args) != 2 or args[0] not in KEYS:
         raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
     feature, mode = args
-    if feature == "vfr-hz":
+    if feature == "res-bypass" and mode in ("1080p", "1440p"):
+        value = mode
+    elif feature == "vfr-hz":
         if mode not in ("auto", "clear") and mode not in map(str, range(30, 241)):
             raise SystemExit("usage: ab_test.py set vfr-hz auto|30..240|clear")
         value = mode
@@ -114,7 +117,7 @@ def cmd_set(args):
         values = ON_VALUES if mode == "on" else OFF_VALUES
         value = values.get(feature, "1" if mode == "on" else "0")
     else:
-        raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
+        raise SystemExit("usage: ab_test.py set <feature> on|off|clear (res-bypass also takes 1080p|1440p)")
     key = KEYS[feature]
     drop = (key + "=", "DM_SAVE_ASYNC=") if feature == "save" else (key + "=",)
     lines = [ln for ln in read_env_lines() if not ln.strip().startswith(drop)]

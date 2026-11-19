@@ -9,7 +9,7 @@
 # the normal present with the scene and canvas staying 1080p. Present path untouched: fx_wanted refuses MetalFX at equal sizes.
 # verify: dm/games/01007EF00011E000/patches.py:ctx.capabilities.add('SWX_NATIVE_1080P')
 # verify: dm/games/01007EF00011E000/patches.py:0x12660c8
-# verify: dm/games/01007EF00011E000/patches.py:0xb940b508
+# verify: dm/games/01007EF00011E000/patches.py:emit(ADRP(8, here(), FS_STATE_OFF))
 # verify: dm/games/01007EF00011E000/patches.py:0xf2e89e08
 # verify: dm/tools/patch_nso.py:bypass active flag (SWX_RES_BYPASS
 # verify: dm/host/dm.h:uint32_t native_1080p;
@@ -18,14 +18,14 @@
 # verify: dm/host/loader.c:dm_fps_state + 0xB4
 # verify: dm/host/loader.c:g_native_1080p
 # verify: dm/host/loader.c:swx_res_bypass_requested
-# verify: dm/host/hle.h:+0xB4 u32 1080p bypass active
+# verify: dm/host/hle.h:swx_res_bypass_requested
 # verify: dm/host/front_mac.m:bp_enable(win)
 # verify: dm/host/front_mac.m:bp_screen_changed()
 # verify: dm/host/front_mac.m:bp_force_internal
 # verify: dm/host/front_mac.m:bp_enforce_windowed
 # verify: dm/host/front_mac.m:g_bp_trans
 # verify: dm/host/front_mac.m:fullscreen boot (drawable follows
-# verify: dm/host/front_mac.m:internal 1920x1080, drawable
+# verify: dm/host/front_mac.m:screen_match_apply(); bp_screen_changed();
 # verify: dm/host/front_mac.m:1080p bypass active
 # verify: dm/host/front_mac.m:SWX_RES_BYPASS
 # verify: dm/games/settings.tsv:SWX_RES_BYPASS
