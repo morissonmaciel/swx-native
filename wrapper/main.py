@@ -497,12 +497,42 @@ def redirect_saves(cfg, master, phase_log):
     # SWX_DISABLE_DRS (fixed internal resolution) follows the same rule:
     # gated by the RENDER_SCALE_DRS fixups capability, exposed in the
     # launcher and armed per run via the harness (ab_test.py disable-drs)
-    # or the launcher, never pinned. SWX_RES_BYPASS (native 1080p/1440p/4k presets)
+    # or the launcher, never pinned. SWX_NATIVE_RES (native 1080p/1440p/2160p presets)
     # is gated by the SWX_NATIVE_1080P fixups capability and exposed in
     # the launcher; an explicit choice passes through via kept and a new
-    # install leaves it absent (default off). DM tuning the user set by
+    # install leaves it absent (default off). Legacy SWX_RES_BYPASS
+    # (1080p/1440p/4k, 4k is 2160p) is rewritten to the canonical key on
+    # reinstall so only SWX_NATIVE_RES is ever pinned. Keys compare like the
+    # launcher parses them (dm/mac/launcher.c env_file): split on the first
+    # '=' and trim spaces, so 'SWX_NATIVE_RES =0' counts as canonical. DM tuning the user set by
     # hand (MAX_TEX, KEEPALIVE_US, …) passes
     # through untouched via kept.
+    def _key(line):
+        # Like the launcher (dm/mac/launcher.c env_file): no '=' means no
+        # assignment, so a bare SWX_RES_BYPASS / SWX_NATIVE_RES line is inert
+        # and never counts as either key.
+        return line.split("=", 1)[0].strip() if "=" in line else None
+    canon = []
+    has_native = any(_key(ln) == "SWX_NATIVE_RES" for ln in kept)
+    seen_native = False
+    for ln in kept:
+        if _key(ln) == "SWX_NATIVE_RES":
+            if not seen_native:
+                canon.append(ln)
+                seen_native = True
+            # duplicate canonical lines: first wins (launcher uses first occurrence)
+        elif _key(ln) == "SWX_RES_BYPASS":
+            if has_native:
+                continue  # canonical wins, including 0: never convert legacy
+            v = ln.split("=", 1)[1].strip()
+            t = "2160p" if v == "4k" else v
+            if not seen_native and t in ("1080p", "1440p", "2160p", "0"):
+                canon.append(f"SWX_NATIVE_RES={t}")
+                seen_native = True
+            # legacy key is never re-pinned, even when the canonical one wins
+        else:
+            canon.append(ln)
+    kept = canon
     vfr_defaults = {"SWX_VFR": "relaxed", "SWX_VFR_HZ": "auto"}
     for line in kept:
         vfr_defaults.pop(line.strip().partition("=")[0], None)

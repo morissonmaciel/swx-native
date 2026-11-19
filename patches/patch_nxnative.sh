@@ -86,7 +86,13 @@ is_applied() {   # $1 = patch file name: every # verify: sentinel holds
         case "$spec" in
             *:*)
                 f="${spec%%:*}"; lit="${spec#*:}"
-                grep -qF "$lit" "$CORE/$f" 2>/dev/null || rc=1
+                if grep -qF "$lit" "$CORE/$f" 2>/dev/null; then
+                    :
+                elif sentinel_replaced "$spec"; then
+                    :   # #25 replaces this catalog/doc sentinel with the canonical one (explicit)
+                else
+                    rc=1
+                fi
                 ;;
             *)
                 [ -s "$CORE/$spec" ] || rc=1
@@ -95,6 +101,23 @@ is_applied() {   # $1 = patch file name: every # verify: sentinel holds
     done < "$tmp"
     rm -f "$tmp"
     return $rc
+}
+
+sentinel_replaced() {   # $1 = "<relpath>:<literal>": true when #25 canonically replaces it
+    case "$1" in
+        "dm/games/settings.tsv:SWX_RES_BYPASS")
+            grep -qF "SWX_NATIVE_RES" "$CORE/dm/games/settings.tsv" 2>/dev/null && \
+            grep -qF "2160p=2160p (3840x2160)" "$CORE/dm/games/settings.tsv" 2>/dev/null
+            ;;
+        "dm/games/settings.tsv:4k=4k (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K")
+            grep -qF "2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K" "$CORE/dm/games/settings.tsv" 2>/dev/null
+            ;;
+        "docs/env_switches.tsv:\`4k\` renders them at 3840x2160")
+            grep -qF "SWX_NATIVE_RES" "$CORE/docs/env_switches.tsv" 2>/dev/null && \
+            grep -qF "\`2160p\` renders them at 3840x2160" "$CORE/docs/env_switches.tsv" 2>/dev/null
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 stack_verified() {   # every patch's sentinels hold
@@ -146,8 +169,9 @@ WANT="$(hash_state)"
 # (#15), burst host lifetime (#16), upload batch blit prototype (#17), save
 # cleanup worker (#18), BOTW render scale ceiling (#19), BOTW
 # disable-DRS flag (#20), BOTW native 1080p bypass (#21), BOTW native
-# 1440p stage 1 (#22), BOTW native 1440p scene (#23), and BOTW native 4K (#24).
-# Historical markers are retained for append-only upgrades.
+# 1440p stage 1 (#22), BOTW native 1440p scene (#23), BOTW native 4K (#24),
+# and BOTW native resolution rename (#25). Historical markers are retained
+# for append-only upgrades.
 VFR_V2_PREFIX_COUNT=9
 VFR_V2_PREFIX_HASH="f64de0f41d4008b6"
 VFR_RATIO_PREFIX_COUNT=10
@@ -197,6 +221,11 @@ BYPASS_1440P_SCENE_PREFIX_HASH="627801b07b63d582"
 BYPASS_4K="swx_botw_native_4k.patch"
 BYPASS_4K_PREFIX_COUNT=23
 BYPASS_4K_PREFIX_HASH="8ba3d581d4b32ad6"
+NATIVE_RES="swx_botw_native_res.patch"
+NATIVE_RES_PREFIX_COUNT=24
+NATIVE_RES_PREFIX_HASH="991ae800f1cb6b3c"
+NATIVE_RES_V1_PATCH="compat/swx_botw_native_res-v1.patch"
+NATIVE_RES_V1_HASH="5c311e3ac3b7834c"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -342,12 +371,53 @@ append_bypass_4k() (
     fi
 )
 append_bypass_4k_tip() (
-    # A #23 tree upgrades straight to the current tip (#24). The marker is
+    # A #23 tree upgrades straight to the #24 tip. The marker is
     # written only after the whole stack verifies, never between patches.
     [ "$(hash_series_prefix "$BYPASS_4K_PREFIX_COUNT")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_4K_PREFIX_COUNT" || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_native_res() (
+    # #25 (SWX_NATIVE_RES rename, Etapa 1) on top of the #24 tree: apply it
+    # when missing, so every append path lands on the verified full stack.
+    if ! is_applied "$NATIVE_RES"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        is_applied "$NATIVE_RES" || exit 1
+    fi
+)
+append_native_res_tip() (
+    # A #24 tree upgrades straight to the current tip (#25). The marker is
+    # written only after the whole stack verifies, never between patches.
+    [ "$(hash_series_prefix "$NATIVE_RES_PREFIX_COUNT")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$NATIVE_RES_PREFIX_COUNT" || exit 1
+    append_native_res || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+migrate_native_res_v1() (
+    # First #25 (rename without the launch-legacy capture) to the current
+    # #25: revert the exact v1 file (the sentinels are identical in both
+    # versions, so -R with the current file would use launcher.c hunks the
+    # v1 tree never received), then apply the current file. v1 has no
+    # add-file hunks, so -R cannot truncate; sentinels prove both sides.
+    [ "$(hash_series_prefix "$NATIVE_RES_PREFIX_COUNT")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$NATIVE_RES_V1_HASH" ] || exit 1
+    verify_series_prefix "$NATIVE_RES_PREFIX_COUNT" || exit 1
+    is_applied "$NATIVE_RES_V1_PATCH" || exit 1
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$NATIVE_RES_V1_PATCH" >/dev/null || exit 1
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$NATIVE_RES_V1_PATCH" >/dev/null || exit 1
+    ! is_applied "$NATIVE_RES_V1_PATCH" || exit 1
+    if ! is_applied "$NATIVE_RES"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$NATIVE_RES" >/dev/null || exit 1
+        is_applied "$NATIVE_RES" || exit 1
+    fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -360,6 +430,7 @@ append_bypass_1440p_scene_tip() (
     verify_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT" || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -383,6 +454,7 @@ append_disable_drs() (
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -398,6 +470,7 @@ append_bypass_1080p() (
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -418,6 +491,7 @@ migrate_bypass_1080p_fullscreen() (
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -437,6 +511,7 @@ migrate_bypass_1080p_v2() (
     append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
+    append_native_res || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -651,20 +726,36 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
     exit 0
 fi
-if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ]; then
-    if ! append_bypass_4k_tip; then
-        echo "[ERROR] BOTW native 1440p scene to native 4K migration failed; core left otherwise untouched." >&2
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V1_HASH" ]; then
+    if ! migrate_native_res_v1; then
+        echo "[ERROR] native-resolution rename v1 to current migration failed; core left otherwise untouched." >&2
         exit 1
     fi
-    echo "patches: migrated BOTW native 1440p scene to native 4K ($WANT)."
+    echo "patches: migrated native-resolution rename v1 to current ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_PREFIX_HASH" ]; then
+    if ! append_native_res_tip; then
+        echo "[ERROR] BOTW native 4K to native-resolution rename migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native 4K to native resolution ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ]; then
+    if ! append_bypass_4k_tip; then
+        echo "[ERROR] BOTW native 1440p scene to native resolution migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native 1440p scene to native resolution ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ]; then
     if ! append_bypass_1440p_scene_tip; then
-        echo "[ERROR] BOTW native 1440p stage 1 to native scene migration failed; core left otherwise untouched." >&2
+        echo "[ERROR] BOTW native 1440p stage 1 to native resolution migration failed; core left otherwise untouched." >&2
         exit 1
     fi
-    echo "patches: migrated BOTW native 1440p stage 1 to native scene ($WANT)."
+    echo "patches: migrated BOTW native 1440p stage 1 to native resolution ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_1080P_V2_HASH" ]; then

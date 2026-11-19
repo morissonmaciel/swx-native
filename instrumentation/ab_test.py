@@ -7,8 +7,10 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs|res-bypass on|off|clear
-                   (res-bypass also takes 1080p|1440p|4k explicitly; on stays 1080p)
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs|native-res on|off|clear
+                   (native-res also takes 1080p|1440p|2160p explicitly; on stays 1080p;
+                    res-bypass is a legacy alias for native-res taking 1080p|1440p|4k;
+                    4k reads as 2160p; clear removes both keys)
   ab_test.py set vfr uncapped
   ab_test.py set vfr-hz auto|30..240|clear
   ab_test.py collect <label> [--install-dir I] [--log PATH]
@@ -51,11 +53,12 @@ KEYS = {
     "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
     "up-blit-rec": "SWX_NVN_UP_BLIT_REC",
     "disable-drs": "SWX_DISABLE_DRS",
+    "native-res": "SWX_NATIVE_RES",
     "res-bypass": "SWX_RES_BYPASS",
 }
 # Explicit values for on/off (defaults live in code/profile/install env).
-ON_VALUES = {"snap": "4", "vfr": "relaxed", "res-bypass": "1080p"}
-OFF_VALUES = {"snap": "2", "vfr": "0", "res-bypass": "0"}
+ON_VALUES = {"snap": "4", "vfr": "relaxed", "native-res": "1080p", "res-bypass": "1080p"}
+OFF_VALUES = {"snap": "2", "vfr": "0", "native-res": "0", "res-bypass": "0"}
 
 ENV_ALWAYS_KEEP = ("DM_SAVE=", "DM_PSO_USER=", "DM_PSO_ARCHIVE=",
                    "DM_PSO_PAIRS=")
@@ -105,8 +108,9 @@ def cmd_set(args):
     if len(args) != 2 or args[0] not in KEYS:
         raise SystemExit("usage: ab_test.py set <feature> on|off|clear")
     feature, mode = args
-    if feature == "res-bypass" and mode in ("1080p", "1440p", "4k"):
-        value = mode
+    if feature in ("native-res", "res-bypass") and mode in ("1080p", "1440p", "2160p", "4k"):
+        value = "2160p" if mode == "4k" else mode
+        key = "SWX_NATIVE_RES"
     elif feature == "vfr-hz":
         if mode not in ("auto", "clear") and mode not in map(str, range(30, 241)):
             raise SystemExit("usage: ab_test.py set vfr-hz auto|30..240|clear")
@@ -116,11 +120,23 @@ def cmd_set(args):
     elif mode in ("on", "off", "clear"):
         values = ON_VALUES if mode == "on" else OFF_VALUES
         value = values.get(feature, "1" if mode == "on" else "0")
+        if feature == "res-bypass" and mode != "clear":
+            value = "2160p" if value == "4k" else value
     else:
-        raise SystemExit("usage: ab_test.py set <feature> on|off|clear (res-bypass also takes 1080p|1440p|4k)")
-    key = KEYS[feature]
-    drop = (key + "=", "DM_SAVE_ASYNC=") if feature == "save" else (key + "=",)
-    lines = [ln for ln in read_env_lines() if not ln.strip().startswith(drop)]
+        raise SystemExit("usage: ab_test.py set <feature> on|off|clear (native-res takes 1080p|1440p|2160p; res-bypass is a legacy alias taking 1080p|1440p|4k)")
+    if feature in ("native-res", "res-bypass"):
+        key = "SWX_NATIVE_RES" if mode != "clear" else KEYS[feature]
+    else:
+        key = KEYS[feature]
+    if feature in ("native-res", "res-bypass"):
+        drop_keys = ("SWX_NATIVE_RES", "SWX_RES_BYPASS")
+        # Like the launcher: a line without '=' is no assignment and never
+        # matches either key.
+        lines = [ln for ln in read_env_lines()
+                 if (ln.split("=", 1)[0].strip() if "=" in ln else None) not in drop_keys]
+    else:
+        drop = (key + "=", "DM_SAVE_ASYNC=") if feature == "save" else (key + "=",)
+        lines = [ln for ln in read_env_lines() if not ln.strip().startswith(drop)]
     if mode != "clear":
         lines.append(f"{key}={value}")
     write_env_lines(lines)

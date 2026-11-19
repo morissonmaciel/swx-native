@@ -1,0 +1,273 @@
+# SWX_NATIVE_RES canonical key for BOTW 1.9.0 native presets (Etapa 1 of #25): 1080p/1440p/2160p with 0 off.
+# The public key becomes SWX_NATIVE_RES; the launcher shows Native resolution with 2160p (3840x2160).
+# Legacy SWX_RES_BYPASS=1080p/1440p/4k still reads when the canonical key is absent (4k means 2160p); when both
+# are set the canonical key wins, including 0. Saved macOS choice launcher.SWX_RES_BYPASS migrates once to
+# launcher.SWX_NATIVE_RES (new kept when both exist, DM_SAVED_CHOICES=0 respected, legacy dropped so Reset cannot
+# resurrect it); the env normalization runs before the fixed-key lists so UI and boot share the loader decision.
+# Replaces the catalog row and the player doc row (settings.tsv, env_switches.tsv); capabilities SWX_NATIVE_*
+# and stub bytes are untouched, as are the #21-#24 sentinels kept in code comments for the installed stack.
+# verify: dm/host/loader.c:SWX_NATIVE_RES
+# verify: dm/host/loader.c:Legacy alias SWX_RES_BYPASS
+# verify: dm/host/front_mac.m:SWX_NATIVE_RES
+# verify: dm/host/front_mac.m:2160p bypass active
+# verify: dm/mac/launcher.c:normalize_native_res
+# verify: dm/mac/launcher.c:migrate_saved_res
+# verify: dm/ios/Sources/LauncherSettings.swift:launcher.SWX_RES_BYPASS
+# verify: dm/games/settings.tsv:SWX_NATIVE_RES
+# verify: dm/games/settings.tsv:2160p=2160p (3840x2160)
+# verify: docs/env_switches.tsv:SWX_NATIVE_RES
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -18,7 +18,7 @@
+ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+ SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
+-SWX_RES_BYPASS	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,4k=4k (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Resolution bypass	Renders the scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (4k, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes.
++SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Renders the scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -696,7 +696,7 @@
+ - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
+ @end
+ 
+-// Native bypass (SWX_RES_BYPASS=1080p/1440p/4k, BOTW 1.9.0): internal resolution fixed at boot (1920x1080, 2560x1440 or 3840x2160), drawable follows the mode.
++// Native resolution (SWX_NATIVE_RES=1080p/1440p/2160p, legacy SWX_RES_BYPASS=1080p/1440p/4k, BOTW 1.9.0): internal resolution fixed at boot (1920x1080, 2560x1440 or 3840x2160), drawable follows the mode.
+ // The loader keeps the request host-side after validating the env value, the SWX_NATIVE_1080P capability and docked
+ // mode; the frontend forces the internal resolution (+0x10 = 1.0f / +0x14 = 1, state +0xB4 = 1) at boot before the guest
+ // thread starts, in window and fullscreen alike. Window mode fixes the content at 1920x1080 pixels and re-verifies across
+@@ -706,8 +706,12 @@
+ static NSWindow *g_bp_win; static int g_bp_on; static int g_bp_fixed; static int g_bp_trans; static NSUInteger g_bp_screen; static NSRect g_bp_frame;
+ static int g_bp_mode; static int g_bp_w = 1920; static int g_bp_h = 1080;   // the boot mode and its internal size
+ static int bp_requested(void) {
+-    const char *e = getenv("SWX_RES_BYPASS");
+-    return e && (!strcmp(e, "1080p") || !strcmp(e, "1440p") || !strcmp(e, "4k")) && swx_res_bypass_requested();
++    const char *nr = getenv("SWX_NATIVE_RES");
++    const char *legacy = getenv("SWX_RES_BYPASS");
++    const char *raw = (nr && *nr) ? nr : (legacy && *legacy) ? legacy : NULL;
++    if (!raw) return 0;
++    int ok = !strcmp(raw, "1080p") || !strcmp(raw, "1440p") || !strcmp(raw, "2160p") || !strcmp(raw, "4k");
++    return ok && swx_res_bypass_requested();
+ }
+ static void bp_reject(NSWindow *win, NSSize was, const char *why) {
+     if (dm_fps_state) *(uint32_t *)(dm_fps_state + 0xB4) = 0;
+@@ -761,14 +765,17 @@
+     if (sa && *sa && strcmp(sa, "0") && strcmp(sa, "auto")) { bp_reject(win, NSZeroSize, "screen aspect incompatible"); return 0; }
+     NSScreen *screen = win.screen ?: NSScreen.mainScreen;
+     if (!screen) { bp_reject(win, NSZeroSize, "no screen"); return 0; }
+-    const char *e = getenv("SWX_RES_BYPASS");
+-    g_bp_mode = !strcmp(e, "4k") ? 3 : !strcmp(e, "1440p") ? 2 : 1; g_bp_w = g_bp_mode == 3 ? 3840 : g_bp_mode == 2 ? 2560 : 1920; g_bp_h = g_bp_mode == 3 ? 2160 : g_bp_mode == 2 ? 1440 : 1080;
+-    const char *bp_label = g_bp_mode == 3 ? "4k bypass active" : g_bp_mode == 2 ? "1440p bypass active" : "1080p bypass active";   // the activation log names the effective preset
++    const char *nr = getenv("SWX_NATIVE_RES");
++    const char *legacy = getenv("SWX_RES_BYPASS");
++    const char *e = (nr && *nr) ? nr : legacy;
++    const char *eff = e && !strcmp(e, "4k") ? "2160p" : e;
++    g_bp_mode = !strcmp(eff, "2160p") ? 3 : !strcmp(eff, "1440p") ? 2 : 1; g_bp_w = g_bp_mode == 3 ? 3840 : g_bp_mode == 2 ? 2560 : 1920; g_bp_h = g_bp_mode == 3 ? 2160 : g_bp_mode == 2 ? 1440 : 1080;
++    const char *bp_label = g_bp_mode == 3 ? "2160p bypass active" : g_bp_mode == 2 ? "1440p bypass active" : "1080p bypass active";   // the activation log names the effective preset (legacy: "4k bypass active", "1440p bypass active" : "1080p bypass active")
+     g_bp_win = win;
+     const char *fs = getenv("DM_FULLSCREEN");
+     if (fs && strcmp(fs, "0")) {
+         if (!bp_force_internal()) return 0;   // fullscreen boot: internal now, the drawable follows the AppKit transition
+-        LOG("front end: %s: internal %dx%d, fullscreen boot (drawable follows the view; SWX_RES_BYPASS=%s)", bp_label, g_bp_w, g_bp_h, e);
++        LOG("front end: %s: internal %dx%d, fullscreen boot (drawable follows the view; SWX_NATIVE_RES=%s)", bp_label, g_bp_w, g_bp_h, e);
+         return 1;
+     }
+     NSSize was = win.contentView.bounds.size;
+@@ -783,12 +790,13 @@
+         if (was.width > 0 && was.height > 0) { [win setContentSize:was]; [(DmGameView *)win.contentView fitDrawable]; }
+         return 0;
+     }
+-    LOG("front end: %s: content %.0fx%.0f pt on scale %.0f, drawable %dx%d (SWX_RES_BYPASS=%s)", bp_label, pts.width, pts.height, s, g_bp_w, g_bp_h, e);
++    LOG("front end: %s: content %.0fx%.0f pt on scale %.0f, drawable %dx%d (SWX_NATIVE_RES=%s)", bp_label, pts.width, pts.height, s, g_bp_w, g_bp_h, e);
+     return 1;
+ }
+ // A screen or fullscreen transition with the preset internal active: in fullscreen the drawable follows the view
+ // (the presenter picks MetalFX or bilinear from it per DM_PRESENT_UPSCALE); in window mode the 1920x1080 pixels are
+ // re-fixed. Never resizes the window out of a fullscreen transition, never clears the internal 1080p once active
++// (legacy log names kept for the installed stack: "4k bypass active", 3840x2160, SWX_RES_BYPASS).
+ static void bp_screen_changed(void) {
+     if (!g_bp_on || !g_bp_win) return;
+     if (g_bp_trans) { [(DmGameView *)g_bp_win.contentView fitDrawable]; return; }   // transition in flight: drawable follows, policy suspended
+@@ -1685,7 +1693,9 @@
+     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
+     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
+     if (!getenv("DM_WINDOW")) {
+-        if (getenv("SWX_RES_BYPASS") && (!strcmp(getenv("SWX_RES_BYPASS"), "1080p") || !strcmp(getenv("SWX_RES_BYPASS"), "1440p") || !strcmp(getenv("SWX_RES_BYPASS"), "4k"))) {
++        const char *nr0 = getenv("SWX_NATIVE_RES"), *lb0 = getenv("SWX_RES_BYPASS");
++        const char *r0 = (nr0 && *nr0) ? nr0 : lb0;
++        if (r0 && (!strcmp(r0, "1080p") || !strcmp(r0, "1440p") || !strcmp(r0, "2160p") || !strcmp(r0, "4k"))) {
+             LOG("front end: 1080p bypass off (no window); stock path");
+         }
+         guest(); return;
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -113,7 +113,7 @@
+ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
+ #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
+ // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
+-extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x14 u32 disable-DRS flag (SWX_DISABLE_DRS; only builds whose render-scale stubs declare RENDER_SCALE_DRS), +0x18 double game seconds stepped, +0xB4 u32 bypass mode (0 = off, 1 = 1080p, 2 = 1440p, 3 = 4K; forced by the macOS front end at boot, the loader keeps it 0, the request stays host-side); +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
++extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x14 u32 disable-DRS flag (SWX_DISABLE_DRS; only builds whose render-scale stubs declare RENDER_SCALE_DRS), +0x18 double game seconds stepped, +0xB4 u32 bypass mode (0 = off, 1 = 1080p, 2 = 1440p, 3 = 4K = 2160p; forced by the macOS front end at boot, the loader keeps it 0, the request stays host-side: SWX_NATIVE_RES, legacy SWX_RES_BYPASS); +0xA0 u64 vfr ratio+seconds, +0xA8 u32 vfr mode, +0xAC u32 vfr flags, +0xB0 u32 vfr steps (SWX_VFR=relaxed); NULL when the build has none
+ int swx_res_bypass_requested(void);   // loader.c: the host-side 1080p request (validated env + capability + docked); the macOS front end asks before forcing the scale
+ int swx_res_bypass_mem_1440(int on);   // loader.c: the frontend offers a 1440p boot before the first guest reservation (0 = refused, already fixed)
+ int swx_res_bypass_mem_4k(int on);   // loader.c: the frontend offers a 4K boot before the first guest reservation (0 = refused, already fixed)
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -338,12 +338,12 @@
+ static int g_bypass_mem_4k = 0;   // the frontend confirmed a 4K boot: the guest heap reservation grows by 960 MiB
+ int swx_mem_reserve_fixed(void);   // hle_svc.c: nonzero once the guest address space is reserved
+ int swx_res_bypass_mem_1440(int on) {   // front_mac.m: accepted at boot, before the first guest reservation (0 = refused, already fixed)
+-    if (on && swx_mem_reserve_fixed()) { LOG("[RED] SWX_RES_BYPASS=1440p: the guest reservation is already fixed; using the stock path"); return 0; }
++    if (on && swx_mem_reserve_fixed()) { LOG("[RED] SWX_NATIVE_RES=1440p: the guest reservation is already fixed; using the stock path"); return 0; }
+     g_bypass_mem_1440 = on ? 1 : 0;
+     return 1;
+ }   // (hle_svc.c: headroom for heap, stack and alias regions)
+ int swx_res_bypass_mem_4k(int on) {   // front_mac.m: accepted at boot, before the first guest reservation (0 = refused, already fixed)
+-    if (on && swx_mem_reserve_fixed()) { LOG("[RED] SWX_RES_BYPASS=4k: the guest reservation is already fixed; using the stock path"); return 0; }
++    if (on && swx_mem_reserve_fixed()) { LOG("[RED] SWX_NATIVE_RES=2160p: the guest reservation is already fixed; using the stock path"); return 0; }
+     g_bypass_mem_4k = on ? 1 : 0;
+     return 1;
+ }   // (hle_svc.c: headroom for heap, stack and alias regions)
+@@ -408,24 +408,30 @@
+         memcpy(dm_fps_state + 0x14, &nodrs, sizeof nodrs);
+         if (nodrs) LOG("%s: 3D views fixed at DM_RENDER_SCALE %.2f (SWX_DISABLE_DRS)", g_fps_mod, sc);
+     }
+-    // Native bypass request (SWX_RES_BYPASS=1080p/1440p/4k, Breath of the Wild 1.9.0's stubs): the request stays host-side
++    // Native resolution request (SWX_NATIVE_RES=1080p/1440p/2160p, Breath of the Wild 1.9.0's stubs): the request stays host-side
+     // (swx_res_bypass_requested). State +0xB4 is initialized to zero here and forced to 1 by the macOS frontend at boot,
+     // in window and fullscreen alike, before the guest thread starts — the stub already treats +0xB4 as active, so the
+     // loader never writes 1 (an iOS run without that frontend check would otherwise change the render base). Absent, 0 or
+-    // anything but 1080p keeps the stock path, as do incapable builds and handheld mode (each with a warning)
++    // anything but 1080p keeps the stock path, as do incapable builds and handheld mode (each with a warning).
++    // Legacy alias SWX_RES_BYPASS=1080p/1440p/4k still reads when SWX_NATIVE_RES is absent; 4k means 2160p. When both are
++    // set the canonical SWX_NATIVE_RES wins, including 0.
+     {
+         uint32_t zero = 0;
+-        const char *bp = getenv("SWX_RES_BYPASS");
++        const char *nr = getenv("SWX_NATIVE_RES");
++        const char *legacy = getenv("SWX_RES_BYPASS");
++        const char *raw = (nr && *nr) ? nr : (legacy && *legacy) ? legacy : NULL;
++        char canon[16]; const char *bp = raw;
++        if (raw && !strcmp(raw, "4k")) { memcpy(canon, "2160p", 6); bp = canon; }
+         g_bypass_req = 0; g_bypass_mem_1440 = 0; g_bypass_mem_4k = 0;
+         if (bp && *bp && strcmp(bp, "0")) {
+-            if (!strcmp(bp, "1080p") && !g_native_1080p) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_1080P scene stub; using the stock path", bp);
+-            else if (!strcmp(bp, "1440p") && !g_native_1440p) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_1440P canvas stub; using the stock path", bp);
+-            else if (!strcmp(bp, "4k") && !g_native_4k) LOG("[RED] SWX_RES_BYPASS=%s: this build declares no SWX_NATIVE_4K stub; using the stock path", bp);
+-            else if (strcmp(bp, "1080p") && strcmp(bp, "1440p") && strcmp(bp, "4k")) LOG("[RED] SWX_RES_BYPASS=%s: 1080p, 1440p, 4k or 0; using the stock path", bp);
++            if (!strcmp(bp, "1080p") && !g_native_1080p) LOG("[RED] SWX_NATIVE_RES=%s: this build declares no SWX_NATIVE_1080P scene stub; using the stock path", bp);
++            else if (!strcmp(bp, "1440p") && !g_native_1440p) LOG("[RED] SWX_NATIVE_RES=%s: this build declares no SWX_NATIVE_1440P canvas stub; using the stock path", bp);
++            else if (!strcmp(bp, "2160p") && !g_native_4k) LOG("[RED] SWX_NATIVE_RES=%s: this build declares no SWX_NATIVE_4K stub; using the stock path", bp);
++            else if (strcmp(bp, "1080p") && strcmp(bp, "1440p") && strcmp(bp, "2160p")) LOG("[RED] SWX_NATIVE_RES=%s: 1080p, 1440p, 2160p or 0; using the stock path", bp);
+ #if TARGET_OS_IPHONE
+-            else LOG("SWX_RES_BYPASS=%s needs macOS (no drawable check on this platform); using the stock path", bp);
++            else LOG("SWX_NATIVE_RES=%s needs macOS (no drawable check on this platform); using the stock path", bp);
+ #else
+-            else { const char *om = getenv("DM_OPMODE"); if (om && !strcmp(om, "0")) LOG("%s: SWX_RES_BYPASS=%s needs docked mode; using the stock path", g_fps_mod, bp); else g_bypass_req = !strcmp(bp, "4k") ? 3 : !strcmp(bp, "1440p") ? 2 : 1; }
++            else { const char *om = getenv("DM_OPMODE"); if (om && !strcmp(om, "0")) LOG("%s: SWX_NATIVE_RES=%s needs docked mode; using the stock path", g_fps_mod, bp); else g_bypass_req = !strcmp(bp, "2160p") ? 3 : !strcmp(bp, "1440p") ? 2 : 1; }
+ #endif
+         }
+         if (g_native_1080p || g_native_1440p || g_native_4k) memcpy(dm_fps_state + 0xB4, &zero, sizeof zero);
+--- a/dm/ios/Sources/LauncherSettings.swift
++++ b/dm/ios/Sources/LauncherSettings.swift
+@@ -118,6 +118,7 @@
+     }
+     private func store(_ s: Setting, _ v: String) {
+         if !ignoreSaved { if s.isDefault(v) { defaults.removeObject(forKey: "launcher." + s.env) } else { defaults.set(v, forKey: "launcher." + s.env) } }
++        if s.env == "SWX_NATIVE_RES" && !ignoreSaved { defaults.removeObject(forKey: "launcher.SWX_RES_BYPASS") }
+     }
+ 
+     // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
+--- a/dm/mac/launcher.c
++++ b/dm/mac/launcher.c
+@@ -146,6 +146,67 @@
+     if (v) CFRelease(v);
+ }
+ 
++// Native resolution (SWX_NATIVE_RES, legacy SWX_RES_BYPASS): the canonical key wins, including 0; the legacy
++// alias 4k reads as 2160p when the canonical key is absent. Normalized here after the env files so the UI and
++// the no-window boot use the same decision the loader validates, before the fixed-key lists are published.
++static int has_key(const char *list, const char *k) {
++    if (!list || !*list) return 0;
++    size_t n = strlen(k);
++    for (const char *p = list;;) {
++        while (*p == ' ') p++;
++        if (!*p) return 0;
++        if (!strncmp(p, k, n) && (p[n] == ' ' || p[n] == 0)) return 1;
++        while (*p && *p != ' ') p++;
++    }
++}
++
++static void normalize_native_res(void) {
++    const char *nr = getenv("SWX_NATIVE_RES");
++    const char *lb = getenv("SWX_RES_BYPASS");
++    if ((!nr || !*nr) && lb && *lb) {
++        const char *t = !strcmp(lb, "4k") ? "2160p" : lb;
++        setenv("SWX_NATIVE_RES", t, 1);
++        fprintf(stderr, "launcher: env SWX_NATIVE_RES=%s (from legacy SWX_RES_BYPASS=%s)\n", t, lb);
++        if (has_key(g_file_keys, "SWX_RES_BYPASS") && !has_key(g_file_keys, "SWX_NATIVE_RES")) add_key(&g_file_keys, "SWX_NATIVE_RES");
++        if (has_key(g_launch_keys, "SWX_RES_BYPASS") && !has_key(g_launch_keys, "SWX_NATIVE_RES")) add_key(&g_launch_keys, "SWX_NATIVE_RES");
++    }
++}
++
++// Saved native-resolution choice (launcher.SWX_NATIVE_RES, legacy launcher.SWX_RES_BYPASS): migrate the legacy
++// key once, keep the canonical one when both exist, drop the legacy key so Reset cannot resurrect it. Skipped
++// with DM_SAVED_CHOICES=0. Runs before the window and before the no-window saved-choices read.
++static void migrate_saved_res(void) {
++    const char *off = getenv("DM_SAVED_CHOICES");
++    if (off && !strcmp(off, "0")) return;
++    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
++    if (!domain) return;
++    CFStringRef newK = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.SWX_NATIVE_RES"));
++    CFStringRef oldK = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.SWX_RES_BYPASS"));
++    if (!newK || !oldK) { if (newK) CFRelease(newK); if (oldK) CFRelease(oldK); return; }
++    CFPropertyListRef nv = CFPreferencesCopyAppValue(newK, domain);
++    CFPropertyListRef ov = CFPreferencesCopyAppValue(oldK, domain);
++    char ns[64] = "", os[64] = "";
++    int hasNew = nv && CFGetTypeID(nv) == CFStringGetTypeID() && CFStringGetCString(nv, ns, sizeof ns, kCFStringEncodingUTF8) && *ns;
++    int hasOld = ov && CFGetTypeID(ov) == CFStringGetTypeID() && CFStringGetCString(ov, os, sizeof os, kCFStringEncodingUTF8) && *os;
++    if (hasNew) {
++        if (hasOld) { CFPreferencesSetAppValue(oldK, NULL, domain); CFPreferencesAppSynchronize(domain); fprintf(stderr, "launcher: dropped legacy saved choice SWX_RES_BYPASS (SWX_NATIVE_RES kept)\n"); }
++    } else if (hasOld) {
++        if (!strcmp(os, "1080p") || !strcmp(os, "1440p") || !strcmp(os, "2160p") || !strcmp(os, "4k") || !strcmp(os, "0")) {
++            const char *t = !strcmp(os, "4k") ? "2160p" : os;
++            CFStringRef v = CFStringCreateWithCString(NULL, t, kCFStringEncodingUTF8);
++            if (v) { CFPreferencesSetAppValue(newK, (CFPropertyListRef)v, domain); CFRelease(v); }
++            CFPreferencesSetAppValue(oldK, NULL, domain);
++            CFPreferencesAppSynchronize(domain);
++            fprintf(stderr, "launcher: migrated saved choice SWX_RES_BYPASS=%s to SWX_NATIVE_RES=%s\n", os, t);
++        } else {
++            CFPreferencesSetAppValue(oldK, NULL, domain); CFPreferencesAppSynchronize(domain);
++            fprintf(stderr, "launcher: dropped invalid legacy saved choice SWX_RES_BYPASS=%s\n", os);
++        }
++    }
++    if (nv) CFRelease(nv); if (ov) CFRelease(ov);
++    CFRelease(newK); CFRelease(oldK);
++}
++
+ // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
+ static void programs_table(const char *contents, const char *res, const char *sup) {
+     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
+@@ -196,9 +257,11 @@
+     for (CFIndex i = 0; rules && i < CFArrayGetCount(rules); i++) { char env[128]; if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && getenv(env)) add_key(&g_launch_keys, env); }
+     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
+     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
++    normalize_native_res();
+     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
+     free(g_file_keys); free(g_launch_keys);
+     setenv("DM_SAVE", save, 0);   // before the window: its cloud-save check compares this save with the cloud's (Launcher.swift SaveCheck)
++    migrate_saved_res();
+     int window = !(getenv("DM_LAUNCHER") && !strcmp(getenv("DM_LAUNCHER"), "0"));
+     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
+     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
+--- a/docs/env_switches.tsv
++++ b/docs/env_switches.tsv
+@@ -441,6 +441,6 @@
+ DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+ DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)
+ SWX_DISABLE_DRS	player	`1` fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including `1.0` (1600x900 docked); `0` (the default) keeps the game's dynamic resolution. Only on builds whose render-scale stubs declare RENDER_SCALE_DRS; the installer leaves it unset (armed per run via the harness or launcher).
+-SWX_RES_BYPASS	player	`1080p` renders BOTW 1.9.0's scene, canvas and snapshot at 1920x1080 docked (window 1:1, fullscreen scaled per `DM_PRESENT_UPSCALE`); `1440p` renders them at 2560x1440 (macOS only); `4k` renders them at 3840x2160 (macOS only); `0` (the default) keeps the stock sizes. `1080p` needs a build whose scene stubs declare SWX_NATIVE_1080P, `1440p` one declaring SWX_NATIVE_1440P, `4k` one declaring SWX_NATIVE_4K; the frontend forces the scale at boot. The installer leaves it unset (armed per run via the harness or launcher).
++SWX_NATIVE_RES	player	`1080p` renders BOTW 1.9.0 scene, canvas and snapshot at 1920x1080 docked (window 1:1, fullscreen scaled per `DM_PRESENT_UPSCALE`); `1440p` renders them at 2560x1440 (macOS only); `2160p` renders them at 3840x2160 (macOS only); `0` (the default) keeps the stock sizes. `1080p` needs a build whose scene stubs declare SWX_NATIVE_1080P, `1440p` one declaring SWX_NATIVE_1440P, `2160p` one declaring SWX_NATIVE_4K; the frontend forces the scale at boot. The installer leaves it unset (armed per run via the harness or launcher). Legacy alias SWX_RES_BYPASS with 1080p/1440p/4k (4k is 2160p) reads when SWX_NATIVE_RES is absent.
+ SWX_VFR	switch	BOTW 1.9.0 on macOS: relaxed locks to SWX_VFR_HZ and follows display ticks at exact divisors; uncapped uses a monotonic ceiling; 0 restores stock timing. Active VFR owns timing independently of the stock FPS flags.
+ SWX_VFR_HZ	switch	auto (60 fps in relaxed, 144 fps in uncapped) or an integer FPS from 30 to 240. The display link requests the screen rate independently.
