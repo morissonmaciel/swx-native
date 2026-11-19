@@ -114,7 +114,13 @@ sentinel_replaced() {   # $1 = "<relpath>:<literal>": true when #25 canonically 
             ;;
         "docs/env_switches.tsv:\`4k\` renders them at 3840x2160")
             grep -qF "SWX_NATIVE_RES" "$CORE/docs/env_switches.tsv" 2>/dev/null && \
-            grep -qF "\`2160p\` renders them at 3840x2160" "$CORE/docs/env_switches.tsv" 2>/dev/null
+            { grep -qF "\`2160p\` renders them at 3840x2160" "$CORE/docs/env_switches.tsv" 2>/dev/null || \
+              grep -qF "\`2160p\` sets them at 3840x2160" "$CORE/docs/env_switches.tsv" 2>/dev/null; }
+            ;;
+        "docs/env_switches.tsv:\`1440p\` renders them at 2560x1440")
+            grep -qF "SWX_NATIVE_RES" "$CORE/docs/env_switches.tsv" 2>/dev/null && \
+            { grep -qF "\`1440p\` renders them at 2560x1440" "$CORE/docs/env_switches.tsv" 2>/dev/null || \
+              grep -qF "\`1440p\` sets them at 2560x1440" "$CORE/docs/env_switches.tsv" 2>/dev/null; }
             ;;
         *) return 1 ;;
     esac
@@ -230,6 +236,9 @@ NATIVE_RES_V2_PATCH="compat/swx_botw_native_res-v2.patch"
 NATIVE_RES_V2_HASH="f4d3e691770818dc"
 NATIVE_RES_V3_PATCH="compat/swx_botw_native_res-v3.patch"
 NATIVE_RES_V3_HASH="304324774d5b604a"
+KEEP_DRS="swx_botw_native_keep_drs.patch"
+KEEP_DRS_PREFIX_COUNT=25
+KEEP_DRS_PREFIX_HASH="b127aa64e21e45ac"
 PRESENT_WORKER_PREFIX_COUNT=11
 PRESENT_WORKER_PREFIX_HASH="d15dd3c0e4745a4d"
 PRESENT_QUEUE_PREFIX_COUNT=12
@@ -375,13 +384,14 @@ append_bypass_4k() (
     fi
 )
 append_bypass_4k_tip() (
-    # A #23 tree upgrades straight to the #24 tip. The marker is
+    # A #23 tree upgrades straight to the current tip (#26). The marker is
     # written only after the whole stack verifies, never between patches.
     [ "$(hash_series_prefix "$BYPASS_4K_PREFIX_COUNT")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$BYPASS_4K_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_4K_PREFIX_COUNT" || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -395,12 +405,32 @@ append_native_res() (
     fi
 )
 append_native_res_tip() (
-    # A #24 tree upgrades straight to the current tip (#25). The marker is
+    # A #24 tree upgrades straight to the current tip (#26). The marker is
     # written only after the whole stack verifies, never between patches.
     [ "$(hash_series_prefix "$NATIVE_RES_PREFIX_COUNT")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$NATIVE_RES_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$NATIVE_RES_PREFIX_COUNT" || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
+    stack_verified || exit 1
+    echo "$WANT" > "$MARKER"
+)
+append_keep_drs() (
+    # #26 (keep dynamic resolution under the preset) on top of the #25 tree:
+    # apply it when missing, so every append path lands on the verified stack.
+    if ! is_applied "$KEEP_DRS"; then
+        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$KEEP_DRS" >/dev/null || exit 1
+        patch --batch -V none -p1 -d "$CORE" < "$HERE/$KEEP_DRS" >/dev/null || exit 1
+        is_applied "$KEEP_DRS" || exit 1
+    fi
+)
+append_keep_drs_tip() (
+    # A #25 tree upgrades straight to the current tip (#26). The marker is
+    # written only after the whole stack verifies, never between patches.
+    [ "$(hash_series_prefix "$KEEP_DRS_PREFIX_COUNT")" = "$KEEP_DRS_PREFIX_HASH" ] || exit 1
+    [ "$(cat "$MARKER")" = "$KEEP_DRS_PREFIX_HASH" ] || exit 1
+    verify_series_prefix "$KEEP_DRS_PREFIX_COUNT" || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -467,7 +497,7 @@ migrate_native_res_v3() (
     echo "$WANT" > "$MARKER"
 )
 append_bypass_1440p_scene_tip() (
-    # A #22 (stage 1) tree upgrades straight to the current tip (#24). The
+    # A #22 (stage 1) tree upgrades straight to the current tip (#26). The
     # marker is written only after the whole stack verifies, never between
     # patches, so a #22 install cannot strand itself.
     [ "$(hash_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ] || exit 1
@@ -476,6 +506,7 @@ append_bypass_1440p_scene_tip() (
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -488,7 +519,7 @@ append_disable_drs() (
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
         is_applied "$DISABLE_DRS" || exit 1
     fi
-    # Chained: a #19 tree upgrades straight to the current tip (#23). The
+    # Chained: a #19 tree upgrades straight to the current tip (#26). The
     # marker is written only after the whole stack verifies, never between
     # patches, so a #19 install cannot strand itself at #20.
     if ! is_applied "$BYPASS_1080P"; then
@@ -500,6 +531,7 @@ append_disable_drs() (
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -516,6 +548,7 @@ append_bypass_1080p() (
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -537,11 +570,12 @@ migrate_bypass_1080p_fullscreen() (
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
 migrate_bypass_1080p_v2() (
-    # Live v2 (fullscreen 1080p, #21 tip) to the current tip (#23): revert the
+    # Live v2 (fullscreen 1080p, #21 tip) to the current tip (#26): revert the
     # exact v2 file (no add-file hunks, so -R cannot truncate), apply #21, #22, #23.
     [ "$(cat "$MARKER")" = "$BYPASS_1080P_V2_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_1080P_PREFIX_COUNT" || exit 1
@@ -557,6 +591,7 @@ migrate_bypass_1080p_v2() (
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
+    append_keep_drs || exit 1
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
 )
@@ -769,6 +804,14 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && { [ "$(cat "$MARKER")" = "$TEXTURE_
         exit 1
     fi
     echo "patches: repaired texture-burst snapshot commit tag ($WANT)."
+    exit 0
+fi
+if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$KEEP_DRS_PREFIX_HASH" ]; then
+    if ! append_keep_drs_tip; then
+        echo "[ERROR] BOTW native resolution to keep-DRS migration failed; core left otherwise untouched." >&2
+        exit 1
+    fi
+    echo "patches: migrated BOTW native resolution to keep dynamic resolution ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$NATIVE_RES_V3_HASH" ]; then
