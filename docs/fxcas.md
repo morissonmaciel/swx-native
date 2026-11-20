@@ -14,13 +14,16 @@ Absent or `0` disables every CAS pass (verified gate: zero passes with
 Right before the draw that composites the 3D scene onto the canvas, the
 scene runs through AMD CAS sharpen-only (fixed intensity 0.25, MIT,
 `dm/gfx/msl/fxcas.metal`) into a private scratch texture of the same format
-and size, and only that draw's scene binding is swapped to the sharpened
+(RGB10A2Unorm) and size, and only that draw's scene binding is swapped to the sharpened
 copy (one-shot in `encode_args_`, cache invalidated on entry and exit).
 UVs, sampler, other readers of the scene and any FXAA of the draw itself
 are preserved. A reused scratch serves while the configuration holds;
-residency tracked, retired on change. Any incompatible condition (another
-format, DRS region, HUD layouts) or a preparation failure leaves the draw
-on the original texture.
+residency tracked, retired on change. Under DRS the scene may be smaller
+than the canvas: CAS still runs at scene resolution into a same-size scratch
+(UVs preserved), so sharpening happens before the composite upscale. Any
+incompatible condition (a format mismatch, a scene larger than the canvas in
+either dimension, HUD layouts) or a preparation failure leaves the draw on
+the original texture.
 
 `DM_PRESENT_UPSCALE=metalfx` keeps operating afterwards, on the composed
 present of the frame.
@@ -29,7 +32,7 @@ present of the frame.
 
 Exactly one draw per gameplay frame with fs `bd7ffdd435c6c3bc` +
 vs `5e9f57168d89a543`: fullscreen triangle (prim 4, 3 verts, indexed) into
-a single RGBA16Float 2D canvas (2560×1440 ms1), sampling a same-size float
+a single RGB10A2Unorm (10-bit) 2D canvas (2560×1440 ms1), sampling a same-size RGB10A2Unorm
 2D scene texture, no blending, full viewport; the scene was written by the
 immediately preceding pass. With the inventory open there is no such draw
 (canvas cleared + UI only), so menus never trigger. HUD draws follow on the
