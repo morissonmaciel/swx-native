@@ -6,7 +6,7 @@
 # verify: dm/games/settings.tsv:SWX_SHADOW_RESOLUTION
 # verify: dm/games/settings.py:SWX_SHADOW_RESOLUTION
 # verify: dm/mac/launcher.c:normalize_shadow_res
-# verify: docs/settings.md:Shadow resolution** and **Picture shape
+# verify: docs/settings.md:Shadow resolution
 # verify: dm/tools/tests/test_launcher_settings.py:SWX_BOTW_SHADOW_RES
 --- a/dm/games/01007EF00011E000/patches.py
 +++ b/dm/games/01007EF00011E000/patches.py

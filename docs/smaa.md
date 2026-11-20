@@ -1,32 +1,40 @@
-# SWX_AA=smaa — SMAA 1x on BOTW's fullscreen copy/resolve (experimental)
+# SWX_AA — game AA control for BOTW (experimental, harness-only)
 
-Opt-in, off by default, harness-only. Never pin it in the player's
-`env.txt`: the installer strips `SWX_AA` on reinstall (keep-out list in
-`wrapper/main.py`) and the harness sets it per run:
+Never pin it in the player's `env.txt`: the installer strips `SWX_AA` on
+reinstall (keep-out list in `wrapper/main.py`) and the harness sets it per
+run. Launcher Graphics → Anti-aliasing (macOS): Off / FXAA / SMAA.
 
-```sh
-SWX_AA=smaa
-```
+| Value | Behavior |
+|---|---|
+| absent or `fxaa` | The game's FXAA draws (default). Invalid values fall back here with one `[RED]` warning. |
+| `0` | AA off: the anchored FXAA draw is not encoded; a copy pass draws the scene texel-for-texel (bilinear when sizes differ), RGB-only, honoring the canvas's pending clear. |
+| `smaa` | SMAA only: the 3-pass filter runs on the scene, the copy pass draws the filtered result into the canvas, and the game draw is skipped. |
 
-Absent or `0` keeps the original draws. Any other value keeps the original
-draws with a single warning (`[RED] SWX_AA=<v> unknown (want smaa or 0)`);
-the variable is read once at launch.
+Read once at launch. `fxaa` is the public name (the launcher, the parser
+and `settings.tsv` agree on `0|fxaa|smaa`); `txaa` was never a name and is
+rejected into the fxaa fallback with the one `[RED]` warning. `ab_test.py`
+has no `SWX_AA` knob, so SMAA runs go through the harness env directly
+(`SWX_AA=smaa` per run), never through the installed `env.txt`. Order with `SWX_FXCAS`: CAS sharpens first; SMAA/copy consume its output (the skipped draw's one-shot swap is disarmed in the hook).
 
 ## What it does
 
-The anchored fullscreen copy/resolve draw keeps running: the hook filters
-its source texture (fragment stage texture slot 0,
-`bound_tex(1,0)`/`tex_by_id`; never a snapshot of the destination) through
-three fullscreen passes — edge detection into `RG8Unorm`, blend-weight
-solve into `RGBA8Unorm`, neighbourhood blend — into a temporary compatible
-with the source (same format, dimensions and colour interpretation), then
-registers it as this draw's binding only (`g_fb_src`/`g_fb_use`, the
-one-draw substitution `fb_prepare` uses; `encode_args` honours it on the
-direct path and on the recorder's replay). The sampler, coordinates,
-format and the game's RGB-only channel mask stay the draw's own. The hook
-sits right after `fb_prepare` in the per-draw path. Any failure (library,
-LUTs, pipeline, no room) leaves the original draw with the original
-source.
+At the anchored draw, the hook validates MNG-style (2D source,
+source != canvas, no blend, RGB-only mask 0x7, full viewport/scissor) and,
+unless the mode is `fxaa`, runs the copy pass instead of encoding the game
+draw. In `smaa` mode the 3-pass filter (edge detection into `RG8Unorm`,
+blend-weight solve into `RGBA8Unorm`, neighbourhood blend) runs first into
+a temporary compatible with the source (same format, dimensions and colour
+interpretation); the copy pass draws that temporary. The weights pass is a
+port of the reference H/V path (line search with SearchTex refinement,
+AreaTex lookup by distance and crossing edges, corner rounding, 16 steps,
+1x; no dedicated diagonal search — stair-step pixels on diagonals still go
+through the H/V path, and where no weight is found the blend returns the
+scene colour, so residual shimmer can remain on diagonal edges). The blend pass
+gathers the four neighbours' weights, picks the dominant axis and mixes the
+two taps on it, as the reference does. The sampler,
+coordinates and format stay the draw's own. Any failure (library, LUTs,
+pipeline, no room, validation) leaves the original draw with the original
+source (sharpened when FXCAS is armed).
 
 Kernels live in `dm/gfx/msl/smaa.metal`, built with the host's shaders
 (`host_msl.py` wildcard) and loaded by name; until the anchor is set the
@@ -78,19 +86,28 @@ bilinear RGB-only. FXAA replacement before the HUD stays independent work.
 
 - Installation/rewrite + host build: PASS (script) — stack 1..29 applies
   cleanly from the series (`patch_nxnative.sh` exit 0, marker written after
-  its own `stack_verified`), all six `# verify:` sentinels resolve,
-  `smaa.metal` + anchor keys in tree.
-- Harness smokes: PASS (structural) — `SWX_AA=smaa` + `SWX_FXCAS=0`:
-  `filtered 2560x1440 (format 90) for one draw`, anchor 1×/frame
-  (F1674–1676), zero `[RED]`; `=smaa` + `SWX_FXCAS=1`: CAS sharpens
-  (`ser=57398 sharpened`) then SMAA filters the same composite draw
-  (F2065–2067, 1×/frame each), zero `[RED]`. Unset/`=0`/unknown paths
-  unchanged from the inert-anchor runs (original draws kept).
-- Visual/order: PASS per player report 2026-11-20 — no HUD/text blur, no
-  flicker, no glitches; slight AA improvement on edges (SMAA 1x = single
-  full filter per anchored draw per frame, as designed); with `SWX_FXCAS=1`
-  the combo holds (CAS sharpness + slight pleasant color pop, no
-  over-sharpen/ringing reported). Formal p95 A/B + 2160p pressure smoke
-  still open (waived like FXCAS unless you want them).
-- Cost (OPEN): formal A/B (GPU p95 + recorder) at the anchored
-  resolution(s) before any wider rollout.
+  its own `stack_verified`), all thirteen `# verify:` sentinels resolve,
+  `smaa.metal` + anchor keys + copy pass in tree.
+- Harness smokes: PASS — `=smaa` log-confirmed at 1440p + shadow High
+  (`filtered 2560x1440 (format 90)`, `filtered scene ... drawn into the
+  canvas ... texel for texel; the game draw skipped`, zero `[RED]`,
+  exit 0) and at 2160p + shadow High (`filtered 3840x2160 (format 90)`,
+  texel-for-texel into the canvas, draw skipped, zero `[RED]`, exit 0;
+  the 4K anchor holds with the same fs key). The 1440p retained run had
+  `SWX_FXCAS=0`; the 2160p anchor runs cover both orders — CAS off and
+  the combo `SWX_FXCAS=1` (`BOTW scene 3840x2160 sharpened before its
+  composite draw`, then filtered + copied + skipped, zero `[RED]`,
+  exit 0). The `=0`/`fxaa` permutations ran per player report
+  (screenshots taken); their structural lines are not in the retained
+  logs. Unknown-value warning path unchanged (warns once, keeps the
+  game draw).
+- Visual/order: PASS per player report 2026-11-20 (new binary, skip-draw
+  path) — screenshots compared with zoom across `fxaa`/`=0`/`=smaa` ×
+  `SWX_FXCAS=0/1`: AA differences perceptible under zoom, CAS sharpening
+  differences perceptible with `=1`; no blur/flicker/glitch reported.
+  Prior binding-swap runs (F1674-76 solo, F2065-67 combo) validated the
+  anchor only, not this skip-draw path.
+- Cost (pressure PASS 2026-11-20, formal A/B open): `=smaa` + 2160p +
+  shadow High + CAS off, 2100 frames: GPU p50 17.11 / p95 20.03 /
+  max 21.88 ms; frame p50 19.80 / p95 34.06 ms (VFR 60 Hz lock, exit 0,
+  zero `[RED]`). Alternating A/B vs `=0` not run.
