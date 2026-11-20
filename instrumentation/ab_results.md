@@ -664,3 +664,31 @@ round-trip identical, `sh -n`, `#25→#26` migration `b127aa64e21e45ac` →
 with the pairs overlay: prewarm `17,818` rows → `13` files, `787.7 MB`).
 Gameplay (player report, same intense-combat region as the earlier runs,
 `SWX_NATIVE_RES=1440p` with `SWX_DISABLE_DRS=0`): holds stable 60 fps.
+
+## BOTW FidelityFX CAS sharpen-only — gates (patch #27, validated 2026-11-20)
+
+`swx_botw_fxcas.patch` + `docs/fxcas.md`: opt-in `SWX_FXCAS=1` (absent/`0`
+off). Before the composite draw (fs `bd7ffdd435c6c3bc` + vs
+`5e9f57168d89a543`, fullscreen triangle into a single RGB10A2Unorm 2D
+canvas, same-format scene, full viewport), the scene runs through AMD CAS
+sharpen-only (fixed 0.25, `dm/gfx/msl/fxcas.metal`) into a private
+same-format scratch; only that draw's scene binding is swapped (one-shot
+in `encode_args_`, cache invalidated on entry/exit). Code review: APPROVE
+with two MEDIUM fast-follows applied (registry `g_rmu` lock, arm scoped to
+the arming draw); format contract corrected to RGB10A2Unorm 10-bit after
+the first build proved `RGBA16Float` never matches (`fmt=90`).
+
+Installation: stack 26→27 reapplies idempotently (`patch_nxnative.sh`
+exit 0, marker `7203f912…`), host compiles/links, `vs_cas`/`fs_cas` in the
+MSL header; `SWX_FXCAS=0` disables by construction (zero passes).
+
+Image/order (PASSDUMP F1953–1955, 1440p, `SWX_FXCAS=1`): exactly one
+`B … st1 fxcas scene ser=57277 sharpened` per frame on the confirmed
+anchor (same canvas `ser=2792` fmt=90 2560×1440, scene 2560×1440 swizzle
+identity, blend off); HUD follows on the same canvas with unchanged
+shaders; zero `[RED]`. Player visual: 3D sharper, no hitch felt. Long
+run (25,200+ frames): exit 0, zero `[RED]`, hitch pattern unchanged
+(boot/uploads/pipeline compiles only).
+
+Cost/compat (formal A/B p95 ≤ +0.5 ms, 1080p/2160p smoke + recorder):
+open — indirect evidence only (present-path GPU p50/p95 unchanged).
