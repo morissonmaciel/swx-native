@@ -1,0 +1,59 @@
+# SWX_FXCAS — FidelityFX CAS sharpen-only on BOTW's 3D scene (experimental)
+
+Opt-in, off by default. Add to the player's `env.txt`:
+
+```ini
+SWX_FXCAS=1
+```
+
+Absent or `0` disables every CAS pass (verified gate: zero passes with
+`SWX_FXCAS=0`).
+
+## What it does
+
+Right before the draw that composites the 3D scene onto the canvas, the
+scene runs through AMD CAS sharpen-only (fixed intensity 0.25, MIT,
+`dm/gfx/msl/fxcas.metal`) into a private scratch texture of the same format
+(RGB10A2Unorm) and size, and only that draw's scene binding is swapped to the sharpened
+copy (one-shot in `encode_args_`, cache invalidated on entry and exit).
+UVs, sampler, other readers of the scene and any FXAA of the draw itself
+are preserved. A reused scratch serves while the configuration holds;
+residency tracked, retired on change. Under DRS the scene may be smaller
+than the canvas: CAS still runs at scene resolution into a same-size scratch
+(UVs preserved), so sharpening happens before the composite upscale. Any
+incompatible condition (a format mismatch, a scene larger than the canvas in
+either dimension, HUD layouts) or a preparation failure leaves the draw on
+the original texture. Taps are clamped to the scene texture bounds; this
+assumes DRS reallocates the scene (a smaller-viewport-into-the-same-allocation
+case would smear one pixel of edge ringing — bounded, since the composite's
+own filtering already crosses that boundary).
+
+`DM_PRESENT_UPSCALE=metalfx` keeps operating afterwards, on the composed
+present of the frame.
+
+## Anchor (PASSDUMP-confirmed)
+
+Exactly one draw per gameplay frame with fs `bd7ffdd435c6c3bc` +
+vs `5e9f57168d89a543`: fullscreen triangle (prim 4, 3 verts, indexed) into
+a single RGB10A2Unorm (10-bit) 2D canvas (2560×1440 ms1), sampling a same-size RGB10A2Unorm
+2D scene texture, no blending, full viewport; the scene was written by the
+immediately preceding pass. With the inventory open there is no such draw
+(canvas cleared + UI only), so menus never trigger. HUD draws follow on the
+same canvas and read it unchanged.
+
+The quick-menu blur quad (`HoldShortCutBg`, fs `d4fa32dabc35066c`) uses a
+different fragment shader and cannot match the anchor; it stays on the
+smoke gate (spyglass, quick menu, movie: no flicker or black screen).
+
+## Gates
+
+- Installation: PASS — stack from master reapplies idempotently, host
+  compiles/links, `SWX_FXCAS=0` yields zero passes.
+- Image/order: PASS — 3/3 PASSDUMP frames (F1953–1955, 1440p,
+  `SWX_FXCAS=1`): exactly one CAS pass per frame on the confirmed anchor
+  (scene `ser=57277`, canvas `ser=2792`), HUD draws follow on the same
+  canvas with unchanged shaders, zero `[RED]`; 25,200+ frame run exit 0,
+  zero `[RED]`; player confirms 3D sharper, no hitch felt.
+- Cost/compat: OPEN — formal A/B (GPU p95 ≤ +0.5 ms, 1080p/2160p smoke +
+  recorder) not run; indirect evidence only (present-path GPU unchanged,
+  hitch pattern unchanged).
