@@ -37,8 +37,7 @@ The existing render-scale, dynamic resolution and Metal safety mechanisms
 continue to apply.
 
 See the [Gate 2 present-queue protocol](../instrumentation/vfr_present_gate.md)
-for planned coverage and interpretation. It is not a report of completed
-gameplay runs or an approval of the cadence.
+for coverage, interpretation and the final player acceptance.
 
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
@@ -57,9 +56,9 @@ does not wait for GPU completion. `SWX_VFR=0` remains on the stock path.
 The queue-policy patch also records queue depth, enqueue-to-display timing,
 drop/hold/empty counts, and game-time versus wall-time windows. These values
 support the pair-by-pair Gate 2 protocol in
-[`vfr_present_gate.md`](../instrumentation/vfr_present_gate.md). The long
-60/60 production gate remains open; the 30 fps movie and return-to-gameplay
-transition have separate passing evidence below.
+[`vfr_present_gate.md`](../instrumentation/vfr_present_gate.md). The player
+accepted steady 60/60 and the remaining Gate 2 coverage on 2026-11-20.
+The 30 fps movie and return-to-gameplay have separate passing evidence below.
 
 The VFR-only quick-menu capture alpha guard is documented in
 [`vfr_quick_menu_alpha.md`](vfr_quick_menu_alpha.md). It preserves the stock
@@ -141,5 +140,7 @@ One long `relaxed/auto` session on a 60 Hz link confirmed the 60 → 30 →
   stopped; the transition window had zero eligible empty ticks and zero
   full-queue drops; the first full 60 fps window returned to p99
   16.67 ms. No route repetition needed for these two cases.
-- Steady-rate 60/60 production (300 presents ≈ 5 s, `drop_oldest ≈ 0`
-  in regime) remains the open Gate 2 item.
+- The player closed Gate 2 on 2026-11-20, accepting steady 60/60
+  production and waiving the remaining matrix and recovery captures. The
+  archived 60/60 measurements and observed empty ticks remain in the
+  [A/B results](../instrumentation/ab_results.md).

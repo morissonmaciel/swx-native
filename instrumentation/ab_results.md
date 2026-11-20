@@ -182,7 +182,7 @@ intervals, five discarded frames and no `[RED]`. All late and discarded counts
 were in the first 2,700 presents. In the common gameplay windows through frame
 2,700, the per-window median enqueue-to-screen time was 59.4–59.8 ms stock and
 60.5–61.1 ms with the worker. This comparison shows similar display cadence at
-60 Hz. Visual flicker and the comparison with the previous VFR build remain open.
+60 Hz. This capture did not cover visual flicker or the previous VFR build.
 
 The second stock run also used a 2560×1440 drawable and logged 4,800
 presents. The player reported very good frame pacing, two noticeable
@@ -213,8 +213,8 @@ hold at present 12 and returning to one vsync at present 43. Neither of
 the two stock runs on 2026-11-18 entered that hold.
 
 Gate 1 is accepted for advancing to Stage 2 based on the reproducible
-60/60 result and player approval. Full protocol validation remains open,
-including the matched previous VFR baseline, an isolated producer stall
+60/60 result and player approval. The remaining protocol coverage at that
+point included the matched previous VFR baseline, an isolated producer stall
 with one ready frame in reserve, and display-link pause and recovery.
 
 ## Present queue — corrected Stage 2, first 60/60 run (2026-11-18)
@@ -237,8 +237,8 @@ enqueue-to-screen p50 values was 60.5 ms, compared with 54.2 ms in the
 uncorrected run. These are separate latency metrics.
 
 The 60/60 production-rate and oldest-drop checks pass in this capture.
-The full Gate 2 remains open, including attribution of the isolated empty
-ticks and coverage of the other refresh/rate and recovery cases. Preserved
+The isolated empty ticks and the other refresh/rate and recovery cases
+were outside the conclusions of this capture. Preserved
 capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-on-115748.log`.
 
 The second `relaxed/auto` 60/60 run used the same drawable and four slots.
@@ -250,9 +250,15 @@ contains three consecutive long frames (GPU 20.0, 24.0 and 16.9 ms).
 The window-level log cannot assign individual empty ticks to those frames.
 All 30 on-screen windows had p99 of 16.67 ms, and no `[RED]` was logged.
 After present 2,100 the game and wall deltas both sum to 115.017 s.
-The 60/60 cadence fix is reproducible across two runs. The strict
-zero-eligible-empty check and the full Gate 2 remain open. Preserved
+The 60/60 cadence fix is reproducible across two runs. The second run
+recorded the two eligible empty ticks above. Preserved
 capture: `/tmp/swx-vfr-gameplay-20261118/stage2-fixed-on-120211.log`.
+
+### Gate 2 closure (2026-11-20)
+
+The player accepted steady 60/60 and closed the full VFR Gate 2. Remaining
+refresh/rate, stall and recovery captures were waived. The recorded empty
+ticks and measurements above are unchanged.
 
 ### New save — engine cutscenes and 30 fps movie recovery (2026-11-18)
 
@@ -547,14 +553,14 @@ enabled. The other settings combinations are player-reported.
 | Window boot and transition | Starts with a 1920×1080 drawable. During the reported maximize interaction, the recorded drawable was 1920×1144, which keeps the fitted 16:9 viewport at 1920×1080. The presenter used its standard pass and the drawable returned to 1920×1080. Normal exit. |
 
 The current behavior of centering the picture when maximizing the window
-is accepted for this release. Making maximize behave like fullscreen is
-deferred. No new `PASSDUMP` or matched fullscreen capture with MetalFX
+was accepted as final for this delivery on 2026-11-20. Fullscreen-like
+maximization was an enhancement idea and is outside this validation. No new `PASSDUMP` or matched fullscreen capture with MetalFX
 disabled was retained for v2.
 
 Local captures: `/tmp/swx-native-1080p-gates.tyffPJ/fullscreen-metalfx.log`
 and `/tmp/swx-native-1080p-gates.tyffPJ/window-and-transition.log`.
 
-## BOTW native 1440p scene — Gate 2 (2B approved 2026-11-19, 2C partial, Gate 3 open)
+## BOTW native 1440p scene — Gates 2 and 3 (accepted 2026-11-20)
 
 Patch #23 flips the docked stub's 1440p path from `{2560.0f, 1920.0f}` to
 `{2560.0f, 2560.0f}` (stage 2: native 1440p scene), names the effective
@@ -585,12 +591,13 @@ with MetalFX 1.23–1.26 ms p95. VFR: average present 16.67 ms over
 255.0 s sampled, 0 of last 300 dropped. Zero `[RED]`, exit 0.
 2B approved on this evidence; the windowed leg was not run.
 
-### Remainder (deferred, not regressions)
+### Acceptance of the remaining 2C controls and Gate 3
 
-2C: fullscreen smoke PASS (same binary). Deferred to a later round:
-return to the fixed 1440p window on exit, the `1080p` / `0` / handheld
-(`DM_OPMODE=0`) controls. Gate 3: formal 1080p-vs-1440p A/B still open
-(the run above sustained 16.67 ms mean present, not a comparison).
+The fullscreen 2C smoke passed on the same binary. On 2026-11-20 the
+player accepted the delivery and closed both gates, waiving additional
+captures for return to the fixed 1440p window, the `1080p` / `0` / handheld
+(`DM_OPMODE=0`) controls and the formal 1080p-vs-1440p A/B. The 1440p run
+above records a 16.67 ms mean present interval for that configuration.
 
 ### Gate 1 — stage-1 output and memory (approved 2026-11-19)
 

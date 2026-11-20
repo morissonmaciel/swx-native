@@ -127,14 +127,14 @@ VFR on/off. For each pair run `collect <label>` on both arms then
 `@link_target_ms` vs `@pres_at_ms`, GPU vs present timings, game-time
 drift in a steady segment, and UI/input/physics/cutscene behavior.
 
-## VFR present queue — Gate 2 (planned)
+## VFR present queue — Gate 2 (accepted)
 
 The ready-FIFO gameplay gate is defined in
 [`vfr_present_gate.md`](vfr_present_gate.md). It covers the game-rate/display
 matrix, non-divisor and uncapped rates, movies, opening, isolated stalls, and
 link-silent recovery. The parser preserves absent counters as `null`/`n/a` in
-older logs. Planned criteria and coverage are not evidence of a completed run;
-Gate 2 remains unevaluated until real captures are reviewed.
+older logs. The player closed Gate 2 on 2026-11-20 and waived the
+remaining captures.
 
 ## Bind-once gate (experimental, default off)
 

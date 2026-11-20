@@ -1,8 +1,7 @@
 # VFR present queue — Gate 2
 
-This is the planned measurement gate for the ready FIFO and present worker.
-It is a protocol, not a result: no run is recorded here as passing, and the
-gate remains open until real gameplay captures cover the matrix and checks.
+Gate 2 was closed by player acceptance on 2026-11-20. The protocol below
+records the original coverage and explains the telemetry.
 
 ## Coverage
 
@@ -59,5 +58,8 @@ alone.
 
 ## Current result
 
-Not run / not evaluated. This document defines the planned coverage and
-interpretation only; it makes no pass/fail claim about the implementation.
+Accepted by the player, including steady 60/60 and the remaining protocol
+coverage. The archived gameplay includes repeated steady 60/60 runs and
+the 30 fps movie with recovery to 60 fps. The player waived additional
+captures for the rest of the matrix and recovery cases. See the
+[A/B results](ab_results.md).
