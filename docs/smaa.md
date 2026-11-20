@@ -7,11 +7,11 @@ run. Launcher Graphics → Anti-aliasing (macOS): Off / FXAA / SMAA.
 | Value | Behavior |
 |---|---|
 | absent or `fxaa` | The game's FXAA draws (default). Invalid values fall back here with one `[RED]` warning. |
-| `0` | AA off: the anchored FXAA draw is not encoded; a copy pass draws the scene texel-for-texel (bilinear when sizes differ), RGB-only, honoring the canvas's pending clear. |
+| `off` | AA off: the anchored FXAA draw is not encoded; a copy pass draws the scene texel-for-texel (bilinear when sizes differ), RGB-only, honoring the canvas's pending clear. |
 | `smaa` | SMAA only: the 3-pass filter runs on the scene, the copy pass draws the filtered result into the canvas, and the game draw is skipped. |
 
 Read once at launch. `fxaa` is the public name (the launcher, the parser
-and `settings.tsv` agree on `0|fxaa|smaa`); `txaa` was never a name and is
+and `settings.tsv` agree on `off|fxaa|smaa`); `txaa` was never a name and is
 rejected into the fxaa fallback with the one `[RED]` warning. `ab_test.py`
 has no `SWX_AA` knob, so SMAA runs go through the harness env directly
 (`SWX_AA=smaa` per run), never through the installed `env.txt`. Order with `SWX_FXCAS`: CAS sharpens first; SMAA/copy consume its output (the skipped draw's one-shot swap is disarmed in the hook).
@@ -86,7 +86,7 @@ bilinear RGB-only. FXAA replacement before the HUD stays independent work.
 
 - Installation/rewrite + host build: PASS (script) — stack 1..29 applies
   cleanly from the series (`patch_nxnative.sh` exit 0, marker written after
-  its own `stack_verified`), all thirteen `# verify:` sentinels resolve,
+  its own `stack_verified`), all seventeen `# verify:` sentinels resolve,
   `smaa.metal` + anchor keys + copy pass in tree.
 - Harness smokes: PASS — `=smaa` log-confirmed at 1440p + shadow High
   (`filtered 2560x1440 (format 90)`, `filtered scene ... drawn into the
@@ -97,12 +97,12 @@ bilinear RGB-only. FXAA replacement before the HUD stays independent work.
   `SWX_FXCAS=0`; the 2160p anchor runs cover both orders — CAS off and
   the combo `SWX_FXCAS=1` (`BOTW scene 3840x2160 sharpened before its
   composite draw`, then filtered + copied + skipped, zero `[RED]`,
-  exit 0). The `=0`/`fxaa` permutations ran per player report
+  exit 0). The `=off`/`fxaa` permutations ran per player report
   (screenshots taken); their structural lines are not in the retained
   logs. Unknown-value warning path unchanged (warns once, keeps the
   game draw).
 - Visual/order: PASS per player report 2026-11-20 (new binary, skip-draw
-  path) — screenshots compared with zoom across `fxaa`/`=0`/`=smaa` ×
+  path) — screenshots compared with zoom across `fxaa`/`=off`/`=smaa` ×
   `SWX_FXCAS=0/1`: AA differences perceptible under zoom, CAS sharpening
   differences perceptible with `=1`; no blur/flicker/glitch reported.
   Prior binding-swap runs (F1674-76 solo, F2065-67 combo) validated the
@@ -110,4 +110,4 @@ bilinear RGB-only. FXAA replacement before the HUD stays independent work.
 - Cost (pressure PASS 2026-11-20, formal A/B open): `=smaa` + 2160p +
   shadow High + CAS off, 2100 frames: GPU p50 17.11 / p95 20.03 /
   max 21.88 ms; frame p50 19.80 / p95 34.06 ms (VFR 60 Hz lock, exit 0,
-  zero `[RED]`). Alternating A/B vs `=0` not run.
+  zero `[RED]`). Alternating A/B vs `=off` not run.

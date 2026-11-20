@@ -954,6 +954,9 @@ fi
 VFR_CURRENT="dm_vfr_framepace.patch"
 VFR_OLD="compat/dm_vfr_framepace-v1.patch"
 
+SMAA_CURRENT="swx_botw_smaa.patch"
+SMAA_OLD="compat/swx_botw_smaa-v1.patch"
+
 migrate_vfr() (
     # Preflight both diffs on copies of the patch's files before touching
     # the installed stack. Later patches may remain applied in this upgrade.
@@ -1001,6 +1004,37 @@ if [ "$FORCE" -eq 0 ] && ! is_applied "$VFR_CURRENT" && is_applied "$VFR_OLD"; t
         echo "patches: upgraded VFR ($WANT)."
         exit 0
     fi
+fi
+
+# Pre-normalize SMAA 0->off upgrade: the old and new patch files share every
+# # verify: sentinel, so on an old-version tree the generic normalize below
+# would reverse with the NEW file (whose "off" context that tree never
+# received), fail, and stop loudly. Detect the old tree by its unique MLOG
+# literal instead: fresh trees never received the patch at all (no literal,
+# no false positive), and the new file's version-specific sentinels
+# (strcmp(e, "off"), off=Off) fail there, so ! is_applied pairs the guard.
+# Revert with the exact old file first, then fall through to the normal
+# check-then-apply flow (existing sweeps drop the truncated smaa.metal).
+if ! is_applied "$SMAA_CURRENT" && grep -qF 'SWX_AA=0: mode off' "$CORE/dm/gfx/nvn/nvn_mtl.m" 2>/dev/null; then
+    echo "patches: upgrading SMAA ($SMAA_OLD -> $SMAA_CURRENT)"
+    [ -f "$HERE/$SMAA_OLD" ] || { echo "[ERROR] SMAA upgrade needs the old patch file but it is missing: $SMAA_OLD" >&2; exit 1; }
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$SMAA_OLD" >/dev/null || {
+        echo "[ERROR] SMAA upgrade dry-run failed: cannot revert the old SMAA patch cleanly ($SMAA_OLD)." >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    }
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$SMAA_OLD" >/dev/null || {
+        echo "[ERROR] SMAA upgrade revert failed ($SMAA_OLD)." >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    }
+    if is_applied "$SMAA_OLD" || grep -qF 'SWX_AA=0: mode off' "$CORE/dm/gfx/nvn/nvn_mtl.m" 2>/dev/null; then
+        echo "[ERROR] SMAA upgrade revert did not clear sentinels (duplicate or partial application?): $SMAA_OLD" >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    fi
+    echo "patches: reverted $SMAA_OLD"
+    rm -f "$MARKER"
 fi
 
 # 0. normalize first when the tree is not the verified marked state:

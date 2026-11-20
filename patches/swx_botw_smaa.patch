@@ -1,14 +1,14 @@
-# SWX_AA tri-state (0/fxaa/smaa) with FXAA-off for BOTW 1.9.0 on macOS.
+# SWX_AA tri-state (off/fxaa/smaa) with FXAA-off for BOTW 1.9.0 on macOS.
 # The anchored fullscreen composite draw (scene -> canvas, fs key
 # bd7ffdd435c6c3bc with vs 5e9f57168d89a543, prim 4, 3 verts, indexed,
 # 1x/frame, PASSDUMP F3115-3117) is either left to the game or replaced by
-# an inline copy pass: 0 skips the FXAA draw and copies the scene texel for
+# an inline copy pass: off skips the FXAA draw and copies the scene texel for
 # texel when the sizes match, bilinear when they differ, RGB-only (mask 0x7;
 # the alpha stays), honouring the canvas's pending clear. smaa runs the
 # 3-pass filter on the scene, then the copy pass draws the filtered result
 # into the canvas and the game draw is skipped. The sampler, coordinates,
 # format and the game's RGB-only channel mask stay the draw's own. Interface:
-# absent or fxaa = the game's FXAA (default); 0 off; smaa SMAA only; invalid
+# absent or fxaa = the game's FXAA (default); off AA off; smaa SMAA only; invalid
 # falls back to fxaa with one warning; read once at launch; the installer
 # leaves it absent (harness sets it per run). Anchor: the full FS key above,
 # plus the VS key (unique pairing observed). Order with SWX_FXCAS: CAS
@@ -34,11 +34,15 @@
 # verify: dm/gfx/nvn/nvn_mtl.m:k_swx_smaa_area
 # verify: dm/gfx/nvn/nvn_mtl.m:static int swx_aa_hook
 # verify: dm/gfx/nvn/nvn_mtl.m:static int swx_aa_mode
+# verify: dm/gfx/nvn/nvn_mtl.m:strcmp(e, "off")
 # verify: dm/games/settings.tsv:SWX_AA	choice
+# verify: dm/games/settings.tsv:off=Off
 # verify: dm/games/settings.py:'SWX_AA', 'DM_SCREEN_ASPECT'
 # verify: dm/tools/tests/test_launcher_settings.py:mac['SWX_AA']
 # verify: docs/launcher.schema.json:(DM|SWX)_[A-Z0-9_]+
 # verify: docs/settings.md:Anti-aliasing** and **Picture shape
+# verify: dm/mac/launcher.c:SWX_AA off was once
+# verify: dm/ios/Sources/LauncherSettings.swift:SWX_AA off was once
 --- a/dm/gfx/nvn/nvn_mtl.m
 +++ b/dm/gfx/nvn/nvn_mtl.m
 @@ -15607,982 +15607,16321 @@
@@ -280,7 +284,7 @@
 +// at launch, absent or empty means fxaa. The installer leaves it absent
 +// (wrapper/main.py): the harness sets it per run.
 +// - fxaa: the game default. The hook does nothing; the draw encodes shipped.
-+// - 0 (AA off): the game draw is not encoded. An inline copy pass draws the
++// - off (AA off): the game draw is not encoded. An inline copy pass draws the
 +//   scene (FXCAS-sharpened when armed) into the canvas instead, texel for
 +//   texel when the sizes match, bilinear otherwise, RGB-only like the game
 +//   draw (mask 0x7; the alpha stays), honouring the canvas's pending clear.
@@ -308,9 +312,9 @@
 +    if (v == -2) {
 +        const char *e = getenv("SWX_AA");
 +        if (!e || !*e || !strcmp(e, "fxaa")) { v = SWX_AA_FXAA; MLOG("SWX_AA: mode fxaa (the game's FXAA draws; anchor fs=bd7ffdd435c6c3bc)"); }
-+        else if (!strcmp(e, "0")) { v = SWX_AA_OFF; MLOG("SWX_AA=0: mode off (the scene is copied into the canvas, the game draw skipped; anchor fs=bd7ffdd435c6c3bc)"); }
++        else if (!strcmp(e, "off")) { v = SWX_AA_OFF; MLOG("SWX_AA=off: mode off (the scene is copied into the canvas, the game draw skipped; anchor fs=bd7ffdd435c6c3bc)"); }
 +        else if (!strcmp(e, "smaa")) { v = SWX_AA_SMAA; MLOG("SWX_AA=smaa: mode smaa (the SMAA-filtered scene is copied into the canvas, the game draw skipped; anchor fs=bd7ffdd435c6c3bc)"); }
-+        else { v = SWX_AA_FXAA; MLOG("[RED] SWX_AA=%s unknown (want 0, fxaa or smaa): keeping the game's FXAA", e);
++        else { v = SWX_AA_FXAA; MLOG("[RED] SWX_AA=%s unknown (want off, fxaa or smaa): keeping the game's FXAA", e);
 +            MLOG("SWX_AA: mode fxaa (the game's FXAA draws; anchor fs=bd7ffdd435c6c3bc)"); }
      }
 -    else if (g_vis_counting) {   // no report can see this draw (vis_need_scan)
@@ -16243,7 +16247,7 @@
 +    g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1;
 +    { static int once; if (!once++) MLOG("SWX_AA=smaa: filtered %lux%lu (format %lu) for one draw", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat); }
 +}
-+// SWX_AA=0/smaa: the copy pass into the canvas (MNG botw_finish.h bfin_ps /
++// SWX_AA=off/smaa: the copy pass into the canvas (MNG botw_finish.h bfin_ps /
 +// bfin_pass). Texel for texel when the sizes match, bilinear otherwise,
 +// RGB only (writeMask, like the game draw's mask 0x7; the alpha stays),
 +// honouring the canvas's pending clear (done by the pass, as MNG does).
@@ -16292,7 +16296,7 @@
 +    if (clear) R.clear_c[0] = 0;   // done by the pass
 +    return 1;
 +}
-+// SWX_AA=0/smaa at the anchored draw: validate it MNG-style and run the copy
++// SWX_AA=off/smaa at the anchored draw: validate it MNG-style and run the copy
 +// pass instead of the game draw. Returns 1 when the draw is not to be
 +// encoded (like MNG's botw_fin_upscale). fxaa returns 0 before any check:
 +// the draw encodes as shipped.
@@ -16303,7 +16307,7 @@
 +    if (!swx_aa_anchor(pr)) return 0;   // not the anchor draw: silent, most draws land here
 +    int prim = dw ? dw->prim : di ? di->prim : -1, count = dw ? (int)dw->count : di ? (int)di->count : -1;
 +    if (prim != 4 || count != 3 || !di) return 0;   // not the fullscreen triangle: silent
-+    const char *want = mode == SWX_AA_OFF ? "0" : "smaa";
++    const char *want = mode == SWX_AA_OFF ? "off" : "smaa";
 +    id<MTLTexture> dst = tex_mtl(R.rt.color[0]);
 +    if (!dst || dst.textureType != MTLTextureType2D || dst.sampleCount != 1) { static int d; if (!d++) MLOG("SWX_AA=%s: the canvas is not a plain 2D target: keeping the game's draw", want); return 0; }
 +    if (R.rt.has_cview[0] && ((R.rt.cview[0].set_levels && R.rt.cview[0].base_level) || (R.rt.cview[0].set_layers && R.rt.cview[0].min_layer))) {
@@ -16446,7 +16450,7 @@
 +    if (g_enc && g_vis_counting && g_vis_need && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
 +    if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
 +    fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-+    // SWX_AA=0/smaa: the copy pass drew the (filtered) scene into the
++    // SWX_AA=off/smaa: the copy pass drew the (filtered) scene into the
 +    // canvas already; the game draw is skipped. fxaa (and any failure
 +    // above) encodes the draw as shipped.
 +    if (swx_aa_hook(pr, dw, di)) return;
@@ -17340,7 +17344,7 @@
  SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
  SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Sets the base scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes. The game keeps its dynamic resolution around the base; Fixed internal resolution controls whether the scene can drop under load.
  SWX_SHADOW_RESOLUTION	choice	896=Console,2048=High?platform:mac&fixups:SWX_BOTW_SHADOW_RES	896	fixups:SWX_BOTW_SHADOW_RES	Game	Shadow resolution	Sun shadow cascade size: Console uses the game's own table (896x896 docked), High uses 2048x2048.
-+SWX_AA	choice	0=Off,fxaa=FXAA,smaa=SMAA	fxaa	platform:mac	Game	Anti-aliasing	FXAA is the game's own filter; Off skips it (plain copy); SMAA filters edges before the canvas write.
++SWX_AA	choice	off=Off,fxaa=FXAA,smaa=SMAA	fxaa	platform:mac	Game	Anti-aliasing	FXAA is the game's own filter; Off skips it (plain copy); SMAA filters edges before the canvas write.
  DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
  DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
  DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
@@ -17384,7 +17388,7 @@
          self.assertEqual(sh['options'], [['896', 'Console'], ['2048', 'High']])
 +        aa = mac['SWX_AA']
 +        self.assertEqual((aa['kind'], aa['section'], aa['default'], aa['level']), ('choice', 'Graphics', 'fxaa', 'basic'))
-+        self.assertEqual(aa['options'], [['0', 'Off'], ['fxaa', 'FXAA'], ['smaa', 'SMAA']])
++        self.assertEqual(aa['options'], [['off', 'Off'], ['fxaa', 'FXAA'], ['smaa', 'SMAA']])
          self.assertEqual([e for e, s in mac.items() if s['section'] == 'Game' and s.get('level') == 'basic'], ['DM_OPMODE', 'DM_LANG'])
          self.assertEqual(list(dict.fromkeys(s['section'] for s in mac.values())), ['Game', 'Graphics', 'Controls', 'Performance'])
          ios = build(BOTW, 'nvn')
@@ -17586,10 +17590,49 @@
 +  float3 rgb = blendingWeight.x * src.sample(s, blendingCoord.xy).rgb + blendingWeight.y * src.sample(s, blendingCoord.zw).rgb;
 +  return float4(rgb, src.sample(s, in.uv).a);
 +}
-+// Copy pass for SWX_AA=0/smaa (nvn_mtl.m swx_aa_copy): the scene (or the
++// Copy pass for SWX_AA=off/smaa (nvn_mtl.m swx_aa_copy): the scene (or the
 +// SMAA-filtered temporary) into the canvas. Texel-for-texel at same size,
 +// bilinear otherwise; the pipeline writes RGB only (writeMask), alpha stays.
 +vertex V swxaa_vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
 +fragment float4 swxaa_copy(V in [[stage_in]], texture2d<float, access::read> t [[texture(0)]]) { return t.read(uint2(in.p.xy)); }
 +fragment float4 swxaa_scale(V in [[stage_in]], texture2d<float> t [[texture(0)]]) {
 +  constexpr sampler s(filter::linear, address::clamp_to_edge); return t.sample(s, in.uv); }
+--- a/dm/mac/launcher.c
++++ b/dm/mac/launcher.c
+@@ -95,6 +95,16 @@
+         for (CFIndex i = 0; i < CFArrayGetCount(values); i++) {
+             CFTypeRef o = CFArrayGetValueAtIndex(values, i);
+             if (CFGetTypeID(o) == CFStringGetTypeID() && CFStringCompare(o, v, 0) == kCFCompareEqualTo) return 1;
++        }
++        {   // SWX_AA off was once "0": a saved "0" counts as its "off" option (as LauncherModel.normalizedSaved)
++            char env[128];
++            if (rule_env(rule, env, sizeof env) && !strcmp(env, "SWX_AA") && !strcmp(s, "0")) {
++                for (CFIndex i = 0; i < CFArrayGetCount(values); i++) {
++                    CFTypeRef o = CFArrayGetValueAtIndex(values, i);
++                    if (CFGetTypeID(o) == CFStringGetTypeID() && CFStringCompare(o, CFSTR("off"), 0) == kCFCompareEqualTo) return 1;
++                }
++                return 0;
++            }
+         }
+         {   // render scale on macOS is a percent select: a saved "1.00" counts as its "1.0" option (as LauncherModel.normalizedSaved)
+             char env[128]; char *end; double want;
+@@ -143,7 +153,7 @@
+         if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for %s ignored: not a string of at most %zu bytes\n", env, sizeof s - 1);
+         else if (!saved_accepted(rule, v, s)) fprintf(stderr, "launcher: saved choice %s=%s ignored: this build does not offer it\n", env, s);
+         else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, s, env, getenv(env));
+-        else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
++        else { const char *t = (!strcmp(env, "SWX_AA") && !strcmp(s, "0")) ? "off" : s; setenv(env, t, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, t); }
+         CFRelease(v);
+     }
+ }
+--- a/dm/ios/Sources/LauncherSettings.swift
++++ b/dm/ios/Sources/LauncherSettings.swift
+@@ -76,6 +76,8 @@
+     // the list does not offer falls back to the tested default. Every other row keeps exact matching, and the iOS
+     // slider keeps its range check.
+     func normalizedSaved(_ s: Setting, _ raw: String) -> String? {
++        // SWX_AA off was once "0": a saved "0" reads as its "off" option, as launcher.c saved_choices does.
++        if s.env == "SWX_AA", raw == "0" { return s.options?.contains { $0[0] == "off" } == true ? "off" : nil }
+         guard s.env == "DM_RENDER_SCALE", s.kind == "choice" else { return s.accepts(raw) ? raw : nil }
+         guard let d = Double(raw), d.isFinite else { return nil }
+         if let exact = s.options?.first(where: { $0[0] == raw }) { return exact[0] }
