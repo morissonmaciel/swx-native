@@ -680,7 +680,9 @@ the first build proved `RGBA16Float` never matches (`fmt=90`).
 
 Installation: stack 26→27 reapplies idempotently (`patch_nxnative.sh`
 exit 0, marker `7203f912…`), host compiles/links, `vs_cas`/`fs_cas` in the
-MSL header; `SWX_FXCAS=0` disables by construction (zero passes).
+MSL header; `SWX_FXCAS=0` disables by construction (zero passes — master
+`1c9461b` reinstall, `SWX_NATIVE_RES=1440p` windowed: zero `sharpened`,
+zero `[RED]`, exit 0).
 
 Image/order (3/3 PASSDUMP frames F1953–1955, 1440p, `SWX_FXCAS=1`): exactly one
 `B … st1 fxcas scene ser=57277 sharpened` per frame on the confirmed
@@ -690,5 +692,15 @@ shaders; zero `[RED]`. Player visual: 3D sharper, no hitch felt. Long
 run (25,200+ frames): exit 0, zero `[RED]`, hitch pattern unchanged
 (boot/uploads/pipeline compiles only).
 
-Cost/compat (formal A/B p95 ≤ +0.5 ms, 1080p/2160p smoke + recorder):
-open — indirect evidence only (present-path GPU p50/p95 unchanged).
+Cost/compat (formal A/B p95 ≤ +0.5 ms + recorder): SKIPPED per player
+order 2026-11-20 — compat covered by the smokes below, cost by indirect
+evidence only (present-path GPU p50/p95 unchanged). 1080p
+smoke on master `1c9461b` (`SWX_FXCAS=1`, `SWX_NATIVE_RES=1080p`
+windowed): 10,800 sharpened passes at 1920×1080 over a ~200 s gameplay
+session, zero `[RED]`, exit 0. `2160p` fullscreen smoke on master `1c9461b`
+(`SWX_FXCAS=1`, `SWX_NATIVE_RES=2160p`, `2160p bypass active: internal
+3840x2160`, drawable 3840×2160): 3,600 sharpened passes at 3840×2160 over
+a ~98 s session, zero `[RED]`, exit 0. (An earlier windowed
+`2160p`-requested run fell back to the stock path and sharpened a
+DRS-driven 1600×900 scene — CAS fires there too, but that run did not
+exercise 4K.)
