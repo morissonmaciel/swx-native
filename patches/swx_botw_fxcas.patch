@@ -1,13 +1,13 @@
 # BOTW FidelityFX CAS sharpen-only (SWX_FXCAS=1, experimental opt-in).
-# Before the FXAA/upscale composite draw of BOTW 1.9.0 (fs bd7ffdd435c6c3bc + vs 5e9f57168d89a543: fullscreen triangle into a single RGB10A2Unorm 2D canvas, same-format 2D scene at or under canvas size, no blending, full viewport), the scene runs through fs_cas (AMD CAS sharpen-only, fixed 0.25, MIT) into a private same-format scratch texture; only that draw's scene binding is swapped (one-shot in encode_args_, cache invalidated on entry and exit). Anything else keeps the original texture; absent/0 disables all passes.
+# Before the FXAA/upscale composite draw of BOTW 1.9.0 (fs bd7ffdd435c6c3bc + vs 5e9f57168d89a543: fullscreen triangle into a single RGB10A2Unorm 2D canvas, same-format 2D scene at or under canvas size, no blending, full viewport), the scene runs through fs_cas (AMD CAS sharpen-only, fixed 0.25, MIT) into a private same-format scratch texture; only that draw's scene binding is swapped (one-shot in encode_args_, cache invalidated on entry and exit, arm scoped to the arming draw). Anything else keeps the original texture; absent/0 disables all passes.
 # verify: dm/gfx/msl/fxcas.metal:fs_cas
 # verify: dm/gfx/nvn/nvn_mtl.m:fxcas_run
 # verify: dm/gfx/nvn/nvn_mtl.m:fxcas_scene_ser
 # verify: dm/gfx/nvn/nvn_mtl.m:MTLPixelFormatRGB10A2Unorm
 # verify: dm/gfx/nvn/nvn_mtl.m:SWX_FXCAS=1: AMD CAS sharpen-only
 --- a/dm/gfx/nvn/nvn_mtl.m	2026-11-19 23:32:16
-+++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-19 23:57:44
-@@ -13485,7 +13485,90 @@
++++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-20 00:00:02
+@@ -13485,6 +13485,99 @@
          MLOG("[RED]   its indirect dispatch of %s: %u x %u x %u groups now at %#llx", g_ind_fly[i].key, g[0], g[1], g[2], (unsigned long long)g_ind_fly[i].ind);
      }
      pthread_mutex_unlock(&g_cbs_mu);
@@ -25,6 +25,7 @@
 +static int fxcas_on(void) { static int v = -2; if (v == -2) { const char *e = getenv("SWX_FXCAS"); v = (e && atoi(e)) ? 1 : 0;
 +    if (v) MLOG("SWX_FXCAS=1: AMD CAS sharpen-only (fixed 0.25) on BOTW's 3D scene before its composite draw"); } return v; }
 +static id<MTLTexture> fxcas_tex = nil; static uint64_t fxcas_scene_ser = 0; static int fxcas_armed = 0;
++static const p_draw *fxcas_dw = NULL; static const p_draw_idx *fxcas_di = NULL;
 +static unsigned long long fxcas_n = 0;
 +static id<MTLTexture> fxcas_run(id<MTLTexture> src) {
 +    static id<MTLTexture> scratch = nil; static NSUInteger sw = 0, sh = 0; static MTLPixelFormat spf = 0;
@@ -68,9 +69,12 @@
 +    [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
 +    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;
 +    return scratch;
- }
++}
 +// Before the anchor draw: sharpen the scene it is about to sample and arm the one-shot binding swap (encode_args_).
 +static void fxcas_try(const p_draw *dw, const p_draw_idx *di) {
++    if (fxcas_armed && (dw != fxcas_dw || di != fxcas_di)) {   // armed for another draw that never encoded (discard, cull, empty scissor): release it, the next encode is fresh
++        fxcas_armed = 0; fxcas_tex = nil; fxcas_scene_ser = 0; fxcas_dw = NULL; fxcas_di = NULL; args_dirty(1);
++    }
 +    if (fxcas_armed) return;
 +    int prim = dw ? dw->prim : di ? di->prim : -1, count = dw ? (int)dw->count : di ? (int)di->count : -1;
 +    if (prim != 4 || count != 3 || !di) return;
@@ -82,23 +86,28 @@
 +    if (!ct || ct.textureType != MTLTextureType2D || ct.sampleCount != 1 || ct.pixelFormat != MTLPixelFormatRGB10A2Unorm) return;
 +    if (S.has_vp && (S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != (float)ct.width || S.vp[0][3] != (float)ct.height)) return;
 +    int tid = (int)(bound_tex(1, 0) & 0xfffff);
-+    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) return;
-+    void *tv = NULL; tex_fast_rid(tid, &tv);
-+    __unsafe_unretained id<MTLTexture> st = (__bridge id<MTLTexture>)tv;
-+    int snap = st ? fb_snapshot_slot(1, st) : -1; if (snap >= 0) st = g_fb_use[snap];
-+    uint64_t sser = g_treg[tid].t.serial;
++    if (tid <= 0) return;
++    void *tv = NULL; uint64_t sser = 0;
++    __unsafe_unretained id<MTLTexture> st = nil;
++    os_unfair_lock_lock(&g_rmu);   // the registration tables may be grown or rewritten by the game thread (encode_args_ convention); released before fxcas_run, which encodes
++    if (tid < g_ntreg && g_treg[tid].ok) {
++        tex_fast_rid(tid, &tv);
++        st = (__bridge id<MTLTexture>)tv;
++        int snap = st ? fb_snapshot_slot(1, st) : -1; if (snap >= 0) st = g_fb_use[snap];
++        sser = g_treg[tid].t.serial;
++    }
++    os_unfair_lock_unlock(&g_rmu);
 +    if (!st || st.textureType != MTLTextureType2D || st.sampleCount != 1 || st.pixelFormat != ct.pixelFormat || !sser || sser == R.rt.color[0]->serial) return;
 +    if (st.width > ct.width || st.height > ct.height) return;
 +    if (st.swizzle.red != MTLTextureSwizzleRed || st.swizzle.green != MTLTextureSwizzleGreen || st.swizzle.blue != MTLTextureSwizzleBlue || st.swizzle.alpha != MTLTextureSwizzleAlpha) return;
 +    id<MTLTexture> sharp = fxcas_run(st);
 +    if (!sharp) return;
-+    fxcas_scene_ser = sser; fxcas_tex = sharp; fxcas_armed = 1; args_dirty(1);
++    fxcas_scene_ser = sser; fxcas_tex = sharp; fxcas_dw = dw; fxcas_di = di; fxcas_armed = 1; args_dirty(1);
 +    if (!fxcas_n++ || fxcas_n % 3600 == 0) MLOG("[fxcas] BOTW scene %lux%lu sharpened before its composite draw (%llu frames)", (unsigned long)st.width, (unsigned long)st.height, fxcas_n);
-+}
+ }
  static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex);
  #define ZA_K(k) (1ull << NVN_RB_##k)
- static const uint64_t ZA_ADDR_KINDS = ZA_K(CBUF) | ZA_K(SBUFP) | ZA_K(SUPPORT) | ZA_K(C1) | ZA_K(DRV0) | ZA_K(DRV2) | ZA_K(UBOP) | ZA_K(SBUFU) | ZA_K(GEOMETRY) | ZA_K(TEXP) | ZA_K(SAMPP) | ZA_K(TEXH) |
-@@ -13606,6 +13689,10 @@
+@@ -13606,6 +13699,10 @@
              if (t && b->dpf == NVN_DPF_FLOAT && mtl_pf_dpf(t.pixelFormat) != NVN_DPF_FLOAT) { uint64_t r2 = 0; id<MTLTexture> v = tex_float_fit(tid, t, &r2); if (v) { t = v; trid = r2; } }   // see tex_float_fit
              if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; }
              else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(tid, t, &trid);   // see tbuf_shadow
@@ -109,7 +118,7 @@
              slots[aid] = trid;
              USE(t, MTLResourceUsageRead);
          } else if (b->kind == NVN_RB_IMG || b->kind == NVN_RB_IMGU) {   // Storage image: NVN image slot r (BindImages) ↔ D3D u_r, or its handle in a uniform buffer (IMGU)
-@@ -15525,6 +15612,7 @@
+@@ -15525,6 +15622,7 @@
  static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
  static void draw_(const p_draw *dw, const p_draw_idx *di) {
      g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)

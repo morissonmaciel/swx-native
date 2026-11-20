@@ -23,7 +23,10 @@ than the canvas: CAS still runs at scene resolution into a same-size scratch
 (UVs preserved), so sharpening happens before the composite upscale. Any
 incompatible condition (a format mismatch, a scene larger than the canvas in
 either dimension, HUD layouts) or a preparation failure leaves the draw on
-the original texture.
+the original texture. Taps are clamped to the scene texture bounds; this
+assumes DRS reallocates the scene (a smaller-viewport-into-the-same-allocation
+case would smear one pixel of edge ringing — bounded, since the composite's
+own filtering already crosses that boundary).
 
 `DM_PRESENT_UPSCALE=metalfx` keeps operating afterwards, on the composed
 present of the frame.
