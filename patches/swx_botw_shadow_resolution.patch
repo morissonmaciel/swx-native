@@ -1,0 +1,216 @@
+# BOTW sun shadow cascade resolution (SWX_SHADOW_RESOLUTION=2048 High, experimental opt-in).
+# The sun's four cascade-table moves (main+0x124eef8..0x124ef04: 480, 720, 720, 896) run through a stub reading the +0xB8 selector: 2048 (High) writes 2048 in all four slots, anything else reproduces the game's own table (Console). The fifth entry (2048 max) is untouched; High is not gated on docked mode. The three moves after the entry branch are NOPs (never executed, recorded so text writes there are refused).
+# verify: dm/games/01007EF00011E000/patches.py:ctx.capabilities.add('SWX_BOTW_SHADOW_RES')
+# verify: dm/host/loader.c:g_shadow_res
+# verify: dm/host/dm.h:uint32_t shadow_res;
+# verify: dm/games/settings.tsv:SWX_SHADOW_RESOLUTION
+# verify: dm/games/settings.py:SWX_SHADOW_RESOLUTION
+# verify: dm/mac/launcher.c:normalize_shadow_res
+# verify: docs/settings.md:Shadow resolution** and **Picture shape
+# verify: dm/tools/tests/test_launcher_settings.py:SWX_BOTW_SHADOW_RES
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -359,6 +359,35 @@
+         cond1(site, orig, new2, new3, rd, why)
+     ctx.capabilities.add('SWX_NATIVE_1440P')
+     ctx.capabilities.add('SWX_NATIVE_4K')
++    # Sun shadow cascade resolution (state +0xB8 u32, written by the loader: 0 = Console, 1 = High). The four 64-bit-constant
++    # moves building x8 at main+0x124eef8..0x124ef04 reference the cascade table at main+0x124ee70 (+0x44: four 16-bit sizes
++    # 480, 720, 720, 896; the fifth entry 2048 is stored separately and untouched). The stub reuses x8 (the block's
++    # destination) for the flag load and rebuilds it in both paths; cbz selects without touching NZCV (no compare needed).
++    for site, orig in ((0x124eef8, '083c80d2'), (0x124eefc, '085aa0f2'),
++                       (0x124ef00, '085ac0f2'), (0x124ef04, '0870e0f2')):
++        fs_site(site, orig)
++    start = here()
++    emit_ops([
++        ('adrp', 8, FS_STATE_OFF),
++        ('word', 0xb940b908),             # ldr w8,[x8,#0xb8] shadow resolution selector
++        ('cbz', 8, 'console', False),
++        ('word', 0xd2810008),             # high: 2048 in each 16-bit slot (movz x8,#0x800)
++        ('word', 0xf2a10008),             # high: movk x8,#0x800,lsl#16
++        ('word', 0xf2c10008),             # high: movk x8,#0x800,lsl#32
++        ('word', 0xf2e10008),             # high: movk x8,#0x800,lsl#48
++        ('b', 'done'),
++        ('label', 'console'),
++        ('word', 0xd2803c08),             # console: movz x8,#0x1e0 (480)
++        ('word', 0xf2a05a08),             # console: movk x8,#0x2d0,lsl#16 (720)
++        ('word', 0xf2c05a08),             # console: movk x8,#0x2d0,lsl#32 (720)
++        ('word', 0xf2e07008),             # console: movk x8,#0x380,lsl#48 (896)
++        ('label', 'done'),
++    ])
++    emit(B(here(), 0x124ef08))
++    fs_put(0x124eef8, [B(0x124eef8, start)], 'sun shadow cascade sizes = 2048 with the High preset, as shipped otherwise')
++    for site in (0x124eefc, 0x124ef00, 0x124ef04):
++        fs_put(site, [0xd503201f], 'dead shadow-table moves under the entry branch: never execute, recorded so text writes there are refused')
++    ctx.capabilities.add('SWX_BOTW_SHADOW_RES')
+     # Screen shape: a screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched
+     # or cut one. The game's sizes are constants: the output size static [main+0x1e43dc0] (1920x1080; set in nnMain and by its getter main+0x1261880) that sizes the
+     # framework's window textures, the layout size static [main+0x1e43dd0] (1280x720; nnMain, getter main+0x12618dc), and the display mode switch main+0x1266074, which
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -283,6 +283,7 @@
+         else if (!strcmp(key, "SWX_NATIVE_1080P")) m->native_1080p = (uint32_t)v;
+         else if (!strcmp(key, "SWX_NATIVE_1440P")) m->native_1440p = (uint32_t)v;
+         else if (!strcmp(key, "SWX_NATIVE_4K")) m->native_4k = (uint32_t)v;
++        else if (!strcmp(key, "SWX_BOTW_SHADOW_RES")) m->shadow_res = (uint32_t)v;
+         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+         else if (!strcmp(key, "VFR_FRAMEPACE")) m->vfr_framepace = (uint32_t)v;
+         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
+@@ -334,6 +335,7 @@
+ static int g_native_1080p = 0;   // the scene stub reads state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_1080P in its fixups table); 0 = no such stub
+ static int g_native_1440p = 0;   // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_1440P in its fixups table); 0 = no such stub
+ static int g_native_4k = 0;   // the 4K stubs read state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_4K in its fixups table); 0 = no such stub
++static int g_shadow_res = 0;   // the sun-shadow stub reads state +0xB8 as SWX_SHADOW_RESOLUTION (SWX_BOTW_SHADOW_RES in its fixups table); 0 = no such stub
+ static int g_bypass_mem_1440 = 0;   // the frontend confirmed a 1440p boot: the guest heap reservation grows by 512 MiB
+ static int g_bypass_mem_4k = 0;   // the frontend confirmed a 4K boot: the guest heap reservation grows by 960 MiB
+ int swx_mem_reserve_fixed(void);   // hle_svc.c: nonzero once the guest address space is reserved
+@@ -357,9 +359,13 @@
+     g_native_1080p = (int)m->native_1080p;
+     g_native_1440p = (int)m->native_1440p;
+     g_native_4k = (int)m->native_4k;
++    g_shadow_res = (int)m->shadow_res;
+     if (g_native_1080p || g_native_1440p || g_native_4k) {   // the bypass slot (+0xB4 u32) lives past the VFR words
+         if (m->fps_state_off + 0xB8 > m->size) die("%s: frame step state page too small for the bypass word", m->name);
+     }
++    if (g_shadow_res) {   // the shadow selector (+0xB8 u32) lives past the bypass slot
++        if (m->fps_state_off + 0xBC > m->size) die("%s: frame step state page too small for the shadow word", m->name);
++    }
+     // A stub that otherwise only lowers the size takes the macOS ceiling (RENDER_SCALE_MAX_PCT, percent); iOS keeps the legacy ceiling. No field: the legacy ceiling on both.
+ #if TARGET_OS_IPHONE
+     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+@@ -436,6 +442,27 @@
+         }
+         if (g_native_1080p || g_native_1440p || g_native_4k) memcpy(dm_fps_state + 0xB4, &zero, sizeof zero);
+     }
++    // Sun-shadow resolution (state +0xB8 u32, Breath of the Wild 1.9.0's sun-shadow stub): SWX_SHADOW_RESOLUTION=2048 selects
++    // High (1); 896, 0 or absent keeps Console (0), as does anything else, with a warning. High is not gated on docked mode
++    // (it works handheld too). Incapable builds and iOS keep the stock path, warning only for an explicit non-zero request.
++    // Written only for builds whose stub reads it (SWX_BOTW_SHADOW_RES in their fixups table); other builds ignore the slot
++    {
++        uint32_t sel = 0;
++        const char *sr = getenv("SWX_SHADOW_RESOLUTION");
++        if (g_shadow_res) {
++#if TARGET_OS_IPHONE
++            if (sr && *sr && strcmp(sr, "0")) LOG("%s: SWX_SHADOW_RESOLUTION=%s needs macOS; using the stock path", g_fps_mod, sr);
++#else
++            if (!sr || !*sr || !strcmp(sr, "0") || !strcmp(sr, "896")) sel = 0;
++            else if (!strcmp(sr, "2048")) sel = 1;
++            else LOG("[RED] SWX_SHADOW_RESOLUTION=%s: must be 896, 2048 or 0; using Console", sr);
++#endif
++            memcpy(dm_fps_state + 0xB8, &sel, sizeof sel);
++            LOG("%s: sun shadows: %s (SWX_SHADOW_RESOLUTION)", g_fps_mod, sel ? "High" : "Console");
++        } else if (sr && *sr && strcmp(sr, "0") && strcmp(sr, "896")) {
++            LOG("[RED] SWX_SHADOW_RESOLUTION=%s: this build declares no SWX_BOTW_SHADOW_RES stub; using the stock path", sr);
++        }
++    }
+     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
+     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
+     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -84,6 +84,7 @@
+     uint32_t native_1080p; // the scene stub reads state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_1080P capability, patch_nso.py): 0 = no such stub
+     uint32_t native_1440p; // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_1440P capability, patch_nso.py): 0 = no such stub
+     uint32_t native_4k; // the 4K stubs read state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_4K capability, patch_nso.py): 0 = no such stub
++    uint32_t shadow_res; // the sun-shadow stub reads state +0xB8 as SWX_SHADOW_RESOLUTION (the fixups table's SWX_BOTW_SHADOW_RES capability, patch_nso.py): 0 = no such stub
+     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
+     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -19,6 +19,7 @@
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+ SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
+ SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Sets the base scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes. The game keeps its dynamic resolution around the base; Fixed internal resolution controls whether the scene can drop under load.
++SWX_SHADOW_RESOLUTION	choice	896=Console,2048=High?platform:mac&fixups:SWX_BOTW_SHADOW_RES	896	fixups:SWX_BOTW_SHADOW_RES	Game	Shadow resolution	Sun shadow cascade size: Console uses the game's own table (896x896 docked), High uses 2048x2048.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
+--- a/dm/games/settings.py
++++ b/dm/games/settings.py
+@@ -22,7 +22,7 @@
+ # The Mac settings window's Graphics section (SettingsFile order is the screen order): Display mode to Picture shape,
+ # right after Game. Console mode stays in Game. iOS keeps the table's sections and order, so this remap is mac-only.
+ MAC_GRAPHICS_ORDER = ('DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE',
+-                      'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'DM_SCREEN_ASPECT')
++                      'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'DM_SCREEN_ASPECT')
+ # Render scale as a percent select on macOS: the text shows the percent, the option writes the fraction the host reads
+ RENDER_SCALE_PCTS = (('0.5', '50%'), ('0.75', '75%'), ('1.0', '100%'), ('1.1', '110%'), ('1.2', '120%'))
+ 
+--- a/dm/mac/launcher.c
++++ b/dm/mac/launcher.c
+@@ -188,6 +188,20 @@
+     }
+ }
+ 
++static void normalize_shadow_res(void) {
++    // Sun shadow resolution (SWX_SHADOW_RESOLUTION): 896 (Console) or 2048 (High). An explicit invalid
++    // value normalizes to 896 after the env files, keeping the key's fixed-key list entry (env_file()
++    // already recorded an env.txt origin; a launch-environment value belongs in the launch list).
++    const char *sr = getenv("SWX_SHADOW_RESOLUTION");
++    char bad[64];
++    if (!sr || !*sr || !strcmp(sr, "896") || !strcmp(sr, "2048")) return;
++    snprintf(bad, sizeof bad, "%s", sr);
++    setenv("SWX_SHADOW_RESOLUTION", "896", 1);
++    fprintf(stderr, "launcher: env SWX_SHADOW_RESOLUTION=896 (invalid SWX_SHADOW_RESOLUTION=%s from %s, using Console)\n",
++            bad, has_key(g_file_keys, "SWX_SHADOW_RESOLUTION") ? "env.txt" : "environment");
++    if (!has_key(g_file_keys, "SWX_SHADOW_RESOLUTION") && !has_key(g_launch_keys, "SWX_SHADOW_RESOLUTION")) add_key(&g_launch_keys, "SWX_SHADOW_RESOLUTION");
++}
++
+ // Saved native-resolution choice (launcher.SWX_NATIVE_RES, legacy launcher.SWX_RES_BYPASS): migrate the legacy
+ // key once, keep the canonical one when both exist, drop the legacy key so Reset cannot resurrect it. Skipped
+ // with DM_SAVED_CHOICES=0. Runs before the window and before the no-window saved-choices read.
+@@ -275,6 +289,7 @@
+     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
+     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
+     normalize_native_res();
++    normalize_shadow_res();
+     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1); setenv("DM_ENV_LAUNCH_KEYS", g_launch_keys ? g_launch_keys : "", 1);
+     free(g_file_keys); free(g_launch_keys);
+     setenv("DM_SAVE", save, 0);   // before the window: its cloud-save check compares this save with the cloud's (Launcher.swift SaveCheck)
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -233,7 +233,7 @@
+ 
+ ### Graphics
+ 
+-The Mac window's picture rows, right after **Game**: **Display mode**, **Native resolution**, **Frame rate**, **Render scale**, **Upscaling**, **Fixed internal resolution** and **Picture shape**, in this order. **Render scale** is a percent menu: 50/75/100/110/120 % writing `0.5`–`1.2` to `DM_RENDER_SCALE`, up to the game's ceiling (a build with a ceiling of `1.0` offers up to 100 %). A saved choice equivalent to an option, like `1.00`, reads as that option; one the list does not offer falls back to 100 %. A valid value fixed by an `env.txt` off the menu, like `0.95`, still applies and shows as **95 %** on its greyed-out row. The iPhone keeps the slider, with the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %).
++The Mac window's picture rows, right after **Game**: **Display mode**, **Native resolution**, **Frame rate**, **Render scale**, **Upscaling**, **Fixed internal resolution**, **Shadow resolution** and **Picture shape**, in this order. **Render scale** is a percent menu: 50/75/100/110/120 % writing `0.5`–`1.2` to `DM_RENDER_SCALE`, up to the game's ceiling (a build with a ceiling of `1.0` offers up to 100 %). A saved choice equivalent to an option, like `1.00`, reads as that option; one the list does not offer falls back to 100 %. A valid value fixed by an `env.txt` off the menu, like `0.95`, still applies and shows as **95 %** on its greyed-out row. The iPhone keeps the slider, with the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %).
+ 
+ ### Switch 2 controllers
+ 
+--- a/dm/tools/tests/test_launcher_settings.py
++++ b/dm/tools/tests/test_launcher_settings.py
+@@ -175,13 +175,16 @@
+         with tempfile.TemporaryDirectory() as tmp:
+             (Path(tmp) / 'main.fixups.tsv').write_text(
+                 '# RENDER_SCALE\t1\n# RENDER_SCALE_MAX_PCT\t78\n# RENDER_SCALE_DRS\t1\n'
+-                '# SWX_NATIVE_1080P\t1\n# SWX_NATIVE_1440P\t1\n# SWX_NATIVE_4K\t1\n', encoding='utf-8')
++                '# SWX_NATIVE_1080P\t1\n# SWX_NATIVE_1440P\t1\n# SWX_NATIVE_4K\t1\n# SWX_BOTW_SHADOW_RES\t1\n', encoding='utf-8')
+             with patch.object(settings.nacp, 'languages', return_value=['en-US', 'ja']), \
+                     patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac', 'DM_LANG': 'en-US'}):
+                 mac = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+         self.assertEqual([e for e, s in mac.items() if s['section'] == 'Graphics'],
+                          ['DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE',
+-                          'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'DM_SCREEN_ASPECT'])
++                          'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'DM_SCREEN_ASPECT'])
++        sh = mac['SWX_SHADOW_RESOLUTION']
++        self.assertEqual((sh['kind'], sh['section'], sh['default'], sh['level']), ('choice', 'Graphics', '896', 'basic'))
++        self.assertEqual(sh['options'], [['896', 'Console'], ['2048', 'High']])
+         self.assertEqual([e for e, s in mac.items() if s['section'] == 'Game' and s.get('level') == 'basic'], ['DM_OPMODE', 'DM_LANG'])
+         self.assertEqual(list(dict.fromkeys(s['section'] for s in mac.values())), ['Game', 'Graphics', 'Controls', 'Performance'])
+         ios = build(BOTW, 'nvn')
+@@ -192,6 +195,13 @@
+                     patch.dict(os.environ, {'GFXAPI': 'nvn', 'DM_LANG': 'en-US'}):
+                 ios_rs = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['DM_RENDER_SCALE']
+         self.assertEqual((ios_rs['kind'], ios_rs['section']), ('range', 'Game'))
++        with tempfile.TemporaryDirectory() as tmp:   # capable iOS build: the row stays, Console-only (High is macOS)
++            (Path(tmp) / 'main.fixups.tsv').write_text('# SWX_BOTW_SHADOW_RES\t1\n', encoding='utf-8')
++            with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
++                    patch.dict(os.environ, {'GFXAPI': 'nvn', 'DM_LANG': 'en-US'}):
++                os.environ.pop('SETTINGS_PLATFORM', None)
++                ios_sh = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['SWX_SHADOW_RESOLUTION']
++        self.assertEqual((ios_sh['section'], ios_sh['options']), ('Game', [['896', 'Console']]))
+ 
+     def test_mac_render_scale_select_follows_the_stub_ceiling(self):
+         """Render scale on macOS is a percent select writing the fraction: a 1.2 ceiling offers all five, a 1.0 ceiling stops at 100%"""
