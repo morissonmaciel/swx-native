@@ -1,13 +1,8 @@
-# Upload overlap plan: pooled staging first, reserve and helper copies parked
+# Upload overlap: implementation record and deferred work
 
-Approved multi-slice plan for cutting area-entry texture-upload cost.
-Branch: `feat/async_writes`. Docs only — no code, no builds.
-
-Status update (2026-11-18): the repaired staging pool is now enabled in the
-managed BOTW installation environment. This is an install configuration
-decision based on two clean pool-only gameplay runs, not a change to the
-vendored core's compiled default or a claim of proven frame-time improvement.
-`SWX_GPU_BIND_ONCE` remains experimental and off in the managed environment.
+The managed BOTW install enables the repaired staging pool after two clean
+pool-only gameplay runs. The core defaults stay off for pooling and
+bind-once, and the managed install leaves bind-once off.
 
 ## 1. Objective and non-goal
 
@@ -20,10 +15,10 @@ and zero drain waits. Fields: `instrumentation/swx_upload_pertexture_diag.patch`
 (path counts plus per-path ms), `instrumentation/swx_upload_times_diag.patch`
 (alloc/rescommit/commit/drain/slotwait/oldq), parsed by
 `instrumentation/log_report.py` (`m_tm`, `m_pa`, `up_pdi/pen/pcp`).
-Conclusion: the burst bottleneck is submit-thread encode + records, not
-allocation or commit — so splitting batches cannot fix it (Gate 1 proved
-this: `instrumentation/ab_results.md`), and the fix is pooled resident
-staging with overlap, not reordering.
+In that capture, submit-thread encoding and recording dominated. The
+matched count-split experiment increased submit cost. Later pooling runs
+supported the rollout for BOTW, with a general frame-time gain still
+unproven.
 
 Non-goals (each covered elsewhere, not in these slices):
 
@@ -69,87 +64,19 @@ Each dated 2026-11-16 with a one-line rationale:
   the snapshot ring; the compiled default (stock ring) applies unless set
   for A/B testing.
 
-## 3. Slice 0 — bind-once state cache (experimental, default off: `SWX_GPU_BIND_ONCE`)
+## 3. Pooled staging and bind-once
 
-`patches/dm_gpu_bind_once.patch` suppresses repeated argument-table and
-pipeline binds only for consecutive deswizzle dispatches on the same upload
-encoder. It invalidates the cache before sparse gather and whenever the
-upload encoder ends or is recreated; `setAddress` stays per slice. This is
-not an MNG parity claim: its reference deswizzle path also binds per slice.
-Gate it with cold and enter-leave-enter A/B runs: zero `[RED]`, no new
-frame-step transition, median p95 submit reduction of at least 1 ms, and no
-individual regression above 1 ms.
+The staging pool reuses resident private buffers across submissions and
+returns them through the GPU completion path. These buffers are transient
+and the pool does not change save contents. The bind-once experiment caches
+argument-table and pipeline binds across compatible consecutive dispatches.
+Its invalidation covers encoder changes and sparse gather.
 
-## 4. Slice 1 — pooled resident staging (`SWX_GPU_TEXTURE_POOL`; enabled in managed BOTW env)
+The [A/B ledger](../instrumentation/ab_results.md#texture-bursts--22-staging-pool-and-bind-cache-2026-11-18)
+records the correctness runs and rollout decision. A general improvement in
+burst frame time was not established.
 
-Shape (NX-sized private pool): keep a small pool of private staging
-blocks resident across submissions — MNG separately has 6x32 MB private + 4x8 MB shared,
-`res_add` once (`docs/io_paths_nxnative_vs_mng.md` §2; literal anchors
-`up_pool_take` / `up_reserve` / `up_pair_alloc` / `up_cpu_reserve`,
-`bcd`/`bc1astc`/`bctc` dispatches, `retire_idle_kick`, `q4_commit` with no
-`rec_drain` and no encode thread live in `docs/texture_streaming_hitches.md`
-§1a — none of these tokens exist in `io_paths`, which describes the same
-mechanism in prose). NOTE: `reup_take` names nothing in either tree or doc
-and is dropped from this plan.
-
-What changes:
-
-- Pooled take instead of per-batch `newBuffer` + `res_add`: NX today does
-  per-texture `newBuffer(Shared)` + `res_add` plus per-batch
-  `newBuffer(Private)` + `res_add` with `res_commit` in `up_flush`
-  (`docs/io_paths_nxnative_vs_mng.md` §2); slice 1 takes blocks from the
-  pool and returns them on retire instead.
-- Busy-bit retire instead of `res_remove`: retire on the existing feedback
-  path (`g_up_pending` drain in `up_flush`) with a busy bit per block,
-  MNG-style (`retire_idle_kick`, `docs/texture_streaming_hitches.md` §1a).
-- Dirty-gated `res_commit` skip: blocks that stay resident and unmodified
-  skip re-commit; only newly taken or dirtied blocks commit.
-- Pool hit/miss counters in the existing diag line: extend the
-  `[upload alloc ... + path ...]` longframe line
-  (`instrumentation/swx_upload_times_diag.patch`,
-  `instrumentation/swx_upload_paths_diag.patch`,
-  parsed by `instrumentation/log_report.py`) with `pool hit/miss`;
-  measurement only, no behavior change.
-
-What stays identical:
-
-- Split triggers, batch contract (128 MB cap, one upload CB per replay
-  submission, flush-before-sample ordering), fence / sample / present
-  ordering, and the encode-thread record path (`rec_commit_upload` +
-  `rec_drain`).
-- Refused, writeback (`gsb_store` inline path,
-  `docs/texture_streaming_hitches.md` §4b) and save paths
-  (`docs/async_writes_evaluation.md`).
-
-Crash/kill semantics: staging copies only, no persistent state. A kill
-mid-burst loses at most the in-flight staging contents of one submission;
-there is no torn persistent tail by construction (nothing is written back
-from staging), so no `kill -9` recovery proof is needed beyond the existing
-Gate 1 save/load/shrine/teleport run.
-
-Gate 1 (correctness) — house style, cloned from
-`docs/async_writes_evaluation.md` §5:
-
-- Zero `[RED]`, save/load + shrine + teleport clean, no new longframe
-  class vs the same-route baseline.
-- Kill mid-burst defined behavior: relaunch loads clean (staging is
-  transient; committed textures re-upload from RomFS on next entry).
-- PASS requires 2+ clean runs on the fixed area-entry route
-  (`instrumentation/ab_testing.md` fixed variables; `ab_test.py collect`).
-
-Gate 2 (numbers) — same fixed route, `collect`/`compare`:
-
-- Submit p50/p95 on burst frames falls; `uploads/batch` unchanged;
-  holds unchanged-or-better; no new longframe class.
-- Success = alloc + rescommit + commit frame-attributed cost shrinks toward
-  zero while encode-ms is untouched (encode moves in later slices, not this
-  one) — a pooling win, not an fps number.
-- The pool is install-enabled by the user's decision after two pool-only
-  runs. Treat that as a scoped BOTW environment choice; the compiled default
-  remains off. A second corpus is still needed before claiming a repeatable
-  performance benefit or expanding the rollout.
-
-## 5. Parked follow-ups: slice 2 (pre-reserve offsets) and slice 3 (helper copies + GPU decompress)
+## 4. Parked follow-ups: slice 2 (pre-reserve offsets) and slice 3 (helper copies + GPU decompress)
 
 Slice 2 — pre-reserve offsets, only if slice 1 is insufficient. MNG shape:
 `up_reserve` / `up_pair_alloc` atomic reservation of
@@ -173,7 +100,7 @@ addition: wrong-picture abort condition — any helper/GPU-decompress mismatch
 must fail loudly (`[RED]`) and fall back to the synchronous path, never
 ship a wrong texel. Parked until slices 1–2 numbers demand it.
 
-## 6. Standing rules
+## 5. Standing rules
 
 - Measurement entries served their gates and were removed: the
   `../instrumentation/swx_*_diag.patch` entries (batches, times, paths,

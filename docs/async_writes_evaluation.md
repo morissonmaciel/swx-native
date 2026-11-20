@@ -68,7 +68,7 @@ Recommendation: S2 under `SWX_SAVE_ASYNC=1` (`DM_SAVE_ASYNC` legacy alias;
 `SWX_SAVE_ASYNC` wins when both are set, both absent means on), documented
 as step 1 of the switch's meaning; S1 stays a documented escalation, not this slice.
 
-## 5. Slice 1 plan + gates — IMPLEMENTED 2026-11-16, pending Gate 1
+## 5. Save cleanup implementation and validation
 
 - Prototype: `patches/dm_save_async.patch` (single file, `hle_fs.c`,
   switch `SWX_SAVE_ASYNC` with `DM_SAVE_ASYNC` as legacy alias, on when
@@ -93,20 +93,10 @@ as step 1 of the switch's meaning; S1 stays a documented escalation, not this sl
   autosave and in-game config save all commit the same transaction
   (log shows 1, 2, 7, 12, 17 writes across 5 commits on one mount;
   BOTW mounts no `_device` save and no SystemSaveData handler exists).
-- Gate 1 (correctness): zero `[RED]`, save/load + shrine + teleport clean,
-  no new longframe class. Kill -9 timing is impractical by hand;
-  construction argument instead (swap atomic unchanged, fallback sync,
-  orphans cleaned by pre-clears) + refused paths covered by the upstream
-  `tests/t_fs.c` suite. **PASS 2026-11-16** (3 runs, 3046–26254 frames).
-- Gate 2 (numbers): same fixed route, `collect`/`compare` — commit lines
-  off the frame path (clone+swap timings move to the background queue's
-  log context or vanish from frame-attributed cost), zero new longframe
-  class, holds unchanged-or-better. Success = save cost no longer
-  frame-attributed, not a fps number. Pass = latest save loads, zero FS
-  errors, no new reproducible hitch; cadence benefit inconclusive if
-  back-to-back saves never overlap an in-flight cleanup.
-- Decision: keep env-gated; promote to default only with a second corpus
-  (different area, longer session).
+- Correctness passed on 2026-11-16 in three gameplay runs (3,046–26,254
+  frames), covering save/load, shrine and teleport. The promoted worker's
+  later A/B measured about 4–5 ms less on the synchronous commit path.
+  See the [save cleanup results](../instrumentation/ab_results.md#save-cleanup-worker--single-install-ab-2026-11-18).
 
 ## 6. Pipelines sketch — slice 2a IMPLEMENTED 2026-11-16, pending Gate 1 (brought forward per user call; archive batching stays parked)
 
@@ -119,7 +109,7 @@ UTILITY queue, drains inline at `atexit`. Crash loses only unflushed rows
 `instrumentation/ab_test.py set pso on/off`.
 Remaining parked: (b) archive batch-of-N off-thread with play-never-blocks
 invariant; (c) audit the 151 ms creation path separately (may be variant
-coverage, fatia 3 territory). Each with kill -9 + A/B gates cloned from §5.
+coverage, fatia 3 territory).
 
 Stall points: `ser_begin` writer-first (`nvn_mtl.m:9404-9424`, 2 s timeout;
 never fired in corpus), archive serialize+rename (`:9811-9835`, ≤46 ms
@@ -131,4 +121,4 @@ of 8 serialized off-thread, play records the key only
 rows only — self-healing, proven by frame 3416's rows landing post-hoc);
 (b) archive batch-of-N off-thread with play-never-blocks invariant;
 (c) audit the 151 ms creation path separately (may be variant coverage,
-fatia 3 territory). Each with kill -9 + A/B gates cloned from §5.
+fatia 3 territory). Both remain deferred and would need crash-recovery and gameplay A/B validation.

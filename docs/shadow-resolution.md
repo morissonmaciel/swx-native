@@ -35,7 +35,7 @@ as the visual-gate failure; the follow-up targets the deferred pass's
 confirmed bindings (Savage Wind's texel-size correction is the
 reference).
 
-## Gates (all OPEN — no run yet)
+## Validation results
 
 - Installation and rewrite: stack applies idempotently, no `.rej`,
   capability in `main.fixups.tsv`, both stub branches + return to

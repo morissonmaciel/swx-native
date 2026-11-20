@@ -4,10 +4,10 @@ The user plays a fixed route; `instrumentation/ab_test.py` manages player-env
 overrides and snapshots each finished run before launcher log rotation can
 lose it. Analysis via `instrumentation/log_report.py`; gates in the plan discussion.
 
-The texture-burst measurement, 2×2 flag matrix, candidate reuse assessment,
-and post-data grouped-dispatch gate are documented in
+The texture-burst log format, completed pool/bind-cache comparison,
+and deferred grouped-dispatch work are documented in
 [`docs/texture_burst_measurement_and_dispatch_plan.md`](../docs/texture_burst_measurement_and_dispatch_plan.md).
-That plan uses only the existing `pool` and `bind_once` switches. The repaired
+The comparison used the existing `pool` and `bind_once` switches. The repaired
 pool is enabled in the managed BOTW installation environment, while bind-once
 remains experimental and off there; the core compiled defaults remain off.
 Missing historical upload fields are reported as unavailable, not zero.

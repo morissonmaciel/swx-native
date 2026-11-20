@@ -1,14 +1,9 @@
 # Texture burst: measurement, pool evaluation, and grouped-dispatch plan
 
-Status: measurement protocol and follow-up plan. No grouped-dispatch
-implementation is approved by this document. The existing runtime switches
-remain the only texture-burst A/B controls: `SWX_GPU_TEXTURE_POOL` and
-`SWX_GPU_BIND_ONCE`. The repaired pool is pinned on in the managed BOTW
-installation environment; the vendored core's compiled default remains off.
-Bind-once remains experimental, compiled default off, and absent from the
-managed environment. `pool` and `bind_once` in `instrumentation/ab_test.py`
-remain available for explicit A/B overrides. No new environment flag is
-proposed.
+Reference for the completed parser and pool/bind-cache A/B, the current
+upload attribution format, and the deferred grouped-dispatch prototype.
+The managed BOTW install enables the repaired staging pool. Bind-once
+remains experimental and off in the managed environment.
 
 ## 1. What the current evidence says
 
@@ -30,51 +25,12 @@ so splitting more often is not a default remedy. See
 `docs/upload_overlap_plan.md`, `docs/texture_streaming_hitches.md`,
 `docs/io_paths_nxnative_vs_mng.md`, and `instrumentation/ab_results.md`.
 
-## 2. Stage A — repair the historical parser and establish a baseline
+## 2. Upload measurement format
 
-The upload suffix parser must accept both historical shapes: an `oldq` field
-followed immediately by `]`, and `oldq ... + path ...` inside the bracket.
-The path suffix exists in count-only and count-plus-time forms. A missing
-metric is unavailable (`null` in JSON and `n/a` in text), never a fabricated
-zero. The parser records whether each field had samples so a real zero remains
-distinguishable from no instrumentation. Existing `ab_test.py compare`
-columns retain their names and display unavailable values as `None`/`n/a`.
-
-For baseline captures, use the already supported per-frame timing TSV
-(`DM_NVN_TSV=<run-specific path>`) and wait ledger (`DM_NVN_WAITS=1`). Keep
-these diagnostic settings identical across all arms. Save the TSV, game log,
-`env.txt`, and generated JSON report with each `ab_test.py collect` label.
-Align TSV rows to the game-log frame number and wait-ledger submission/ticket
-where available; do not infer an exact causal join from a 300-present summary
-window. Existing diagnostics are enough for the first pass; avoid per-texture
-logging or another always-on timer.
-
-Every row/window should distinguish:
-
-| Bucket | What it measures | Boundary / caveat |
-|---|---|---|
-| Producer / package | texture count, bytes, upload type, mip/level count if already available | `pkg_upload` input; object count is not work duration |
-| Allocation | staging `newBuffer`/pool take, allocation count, useful reserved bytes | staging only; not destination texture creation |
-| Residency | `res_add` / `res_commit` and related wait | resource-set work, separate from buffer allocation |
-| Encoding | CPU time for command construction and dispatch setup | include batch and encoder boundaries; do not call this GPU execution time |
-| Submission / waits | commit, drain, slot wait, old queue/fence wait | use `DM_NVN_WAITS` to name blocking points |
-| GPU execution | GPU interval for the matching submission when present | join by submission/ticket ID, not nearest timestamp alone |
-| Presentation | frame interval, link target, actual present, empty/late/drop | correlates with hitch; does not by itself prove upload causation |
-
-The join key should be `(game frame, submission sequence, upload batch,
-ticket)` where available. A texture-job row, if later justified, also carries
-that batch and texture ID. Preserve submission order and identify missing join
-keys explicitly. TSV timestamps use the same monotonic clock domain as the
-present/timing records when the producer confirms that contract; otherwise
-store the clock source and do not subtract timestamps across domains.
-
-Baseline gate: on the fixed area-entry route, collect at least two comparable
-runs with the same save, drawable, `SWX_VFR` state, and diagnostic settings.
-Report medians and p95 for burst-frame submit/encode/wait/commit, number of
-first uploads, bytes, batches and path, plus on-screen late/empty/drop counts.
-Retain an unaffected large-byte burst as a control. If timestamps cannot
-reliably join a burst to a submission or the parser reports missing buckets,
-stop and repair attribution before testing behavior changes.
+The parser accepts both historical upload lines: `oldq` followed by `]`
+and `oldq ... + path ...` before `]`. Path durations may be absent even
+when counts are present. Unavailable measurements are `null` in JSON and
+`n/a` in text.
 
 ### Structured burst records and collection
 
@@ -135,45 +91,18 @@ beside `game.log`, `env.txt`, and `report.json`. Missing an explicitly named
 TSV is a collection error rather than a silently incomplete capture. Preserve
 the source TSV and all raw IDs when comparing logs.
 
-## 3. Stage B — isolate the two existing switches in a 2×2 A/B
+## 3. Pool and bind-cache results
 
-Do not combine this matrix with VFR changes, RT heap reserve, UB ring, or
-other graphics flags. Run the same route and same diagnostics in four arms:
+The four-arm comparison and combined follow-up are in the
+[A/B results ledger](../instrumentation/ab_results.md#texture-bursts--22-staging-pool-and-bind-cache-2026-11-18).
+The repaired pool was enabled for BOTW after two clean pool-only runs.
+The results do not establish a general performance gain or support promoting
+bind-once.
 
-| Arm | `SWX_GPU_TEXTURE_POOL` | `SWX_GPU_BIND_ONCE` |
-|---|---:|---:|
-| Baseline | 0 | 0 |
-| Pool only | 1 | 0 |
-| Bind cache only | 0 | 1 |
-| Combined | 1 | 1 |
-
-Repeat a run only when the paired burst differs materially or one arm has an
-outlier. For an explicit stock-baseline arm, set both switches to 0; the
-managed installation otherwise starts with the repaired pool enabled and
-bind-once disabled. The pool agent's low-frequency line is
-`texture staging pool up to frame N: reuse X / cold Y / miss Z; reserved B
-bytes; resident B bytes`. Treat counters as cumulative snapshots and compare
-deltas between reports. `reuse`, `cold`, and `miss` are distinct outcomes;
-`reserved` is useful bytes requested within staging blocks, while `resident`
-is materialized private pool capacity (`cold × block size`; this pool has no
-eviction). Neither byte field describes destination texture
-memory.
-
-The user's rollout decision enables the repaired pool in the managed BOTW
-environment after two pool-only gameplay runs. This does not promote the
-whole pool+bind package or establish a general performance gain. Pool success
-for future performance claims still requires reduced staging
-allocation/residency churn or burst submit cost, without higher miss/wait
-counts, leaks, memory growth, `[RED]`, visual errors, or frame-step changes.
-`bind_once` success is reduced CPU encode/bind
-cost on consecutive eligible deswizzle jobs, with correct invalidation at
-encoder changes, sparse work, and batch boundaries. Judge the combined arm
-against both single-switch arms: if only the combination helps, report an
-interaction; do not attribute the gain to either component alone. Promote the
-pair as a package only after isolated arms are understood, combined behavior
-passes correctness, and a second route/session reproduces the improvement.
-Otherwise retain only the scoped pool install setting; keep bind-once
-experimental or roll it back.
+The staging pool reports cumulative reuse, cold allocations and misses.
+Compare deltas across reports. Reserved bytes are useful staging demand,
+while resident bytes are materialized private pool capacity. Neither
+measures destination texture memory.
 
 ## 4. Reuse assessment: existing experimental work
 
@@ -265,15 +194,7 @@ non-burst frames for no regression, then repeat on a second route/session.
 Only after those results should the prototype be considered for a permanent
 patch or package promotion.
 
-## 6. Current scope and next decision
-
-The four-arm A/B and the combined follow-up are recorded in
-[the results ledger](../instrumentation/ab_results.md#texture-bursts--22-staging-pool-and-bind-cache-2026-11-18).
-The repaired pool is enabled in the managed BOTW installation. Bind-once
-remains an opt-in experiment. The captures contain the new pool counters
-and window-level waits, but lack the per-frame timing TSV and batch-level
-attribution needed to explain the residual `submit+present` cost. That
-attribution is the remaining entry condition for grouped dispatch.
+## 6. Parser validation
 
 Parser validation used archived `ab-new-save-early/game.log` and
 `run-bindonce-long-20261116-225156.log`: the former's count-only `+ path`
