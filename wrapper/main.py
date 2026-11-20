@@ -484,7 +484,7 @@ def redirect_saves(cfg, master, phase_log):
                                                  "SWX_GPU_KEEPALIVE=", "SWX_GPU_KEEPALIVE_YIELD=",
                                                  "SWX_RESIDENCY_UB_RING=",
                                                  "SWX_GPU_TEXTURE_POOL=", "SWX_GPU_BIND_ONCE=",
-                                                 "SWX_DISABLE_DRS="))]
+                                                 "SWX_DISABLE_DRS=", "SWX_AA="))]
     # Keep explicit player VFR choices across reinstalls. A new install
     # uses the VFR 60 fps lock and derives display-link rate from the panel.
     # DM_NVN_SYNC_LAG is not pinned either and must stay out of the env.
@@ -494,6 +494,8 @@ def redirect_saves(cfg, master, phase_log):
     # default in code (keep-alive on on macOS; upload split opt-in). The
     # repaired texture staging pool is pinned on here; bind-once stays out
     # of installed env files and remains available through the A/B harness.
+    # SWX_AA (SMAA 1x) likewise stays out: experimental, armed per run via
+    # the harness env, never pinned.
     # SWX_DISABLE_DRS (fixed internal resolution) follows the same rule:
     # gated by the RENDER_SCALE_DRS fixups capability, exposed in the
     # launcher and armed per run via the harness (ab_test.py disable-drs)
