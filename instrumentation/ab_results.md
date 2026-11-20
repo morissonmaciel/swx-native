@@ -682,7 +682,7 @@ Installation: stack 26→27 reapplies idempotently (`patch_nxnative.sh`
 exit 0, marker `7203f912…`), host compiles/links, `vs_cas`/`fs_cas` in the
 MSL header; `SWX_FXCAS=0` disables by construction (zero passes).
 
-Image/order (PASSDUMP F1953–1955, 1440p, `SWX_FXCAS=1`): exactly one
+Image/order (3/3 PASSDUMP frames F1953–1955, 1440p, `SWX_FXCAS=1`): exactly one
 `B … st1 fxcas scene ser=57277 sharpened` per frame on the confirmed
 anchor (same canvas `ser=2792` fmt=90 2560×1440, scene 2560×1440 swizzle
 identity, blend off); HUD follows on the same canvas with unchanged

@@ -47,9 +47,13 @@ smoke gate (spyglass, quick menu, movie: no flicker or black screen).
 
 ## Gates
 
-Installation (stack from master, idempotent reapply, host compiles/links;
-zero passes at `SWX_FXCAS=0`), image/order (3 frames, same save/framing at
-1440p: exactly one CAS pass on the confirmed scene before the HUD; 3D
-sharper, HUD glyphs identical), cost/compat (A/B same binary, 1440p
-fullscreen + MetalFX + DRS, no PASSDUMP during measurement; target ≤ +0.5 ms
-GPU p95 at 60 fps, no new hitches or `[RED]`; short smoke 1080p/2160p + recorder).
+- Installation: PASS — stack from master reapplies idempotently, host
+  compiles/links, `SWX_FXCAS=0` yields zero passes.
+- Image/order: PASS — 3/3 PASSDUMP frames (F1953–1955, 1440p,
+  `SWX_FXCAS=1`): exactly one CAS pass per frame on the confirmed anchor
+  (scene `ser=57277`, canvas `ser=2792`), HUD draws follow on the same
+  canvas with unchanged shaders, zero `[RED]`; 25,200+ frame run exit 0,
+  zero `[RED]`; player confirms 3D sharper, no hitch felt.
+- Cost/compat: OPEN — formal A/B (GPU p95 ≤ +0.5 ms, 1080p/2160p smoke +
+  recorder) not run; indirect evidence only (present-path GPU unchanged,
+  hitch pattern unchanged).
