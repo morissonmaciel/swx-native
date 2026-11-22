@@ -33,7 +33,7 @@ switch (`gpu-keepalive.txt` via `dm_gfx_keepalive_start`, live toggle via
 `dm_gfx_keepalive_set`). Off in play only sleeps the thread. Stats (kernels,
 summed/longest GPU time) surface in the overlay (`mtl_keepalive_stats`).
 
-## Adapted implementation (swx, `patches/dm_gpu_keepalive_yield.patch`)
+## Adapted implementation (swx, `nvn_mtl.m.patch` + `swx_keepalive.m.patch` + `hle_nvn.c.patch` — one file per touched target, base + yield hunks in stack order)
 
 Status: promoted to install default (macOS) after a triple A/B on the BOTW
 luneta route (VFR relaxed/auto, texture pool off): `keepalive=1,yield=1`

@@ -48,7 +48,7 @@ Minimal recipe (mac-nativegames `games/odyssey/PLAYBOOK.md`): games category
 
 ## Verdict (adopted)
 
-Ship Game Mode **on** paired with GPU keep-alive **on** (see `gpu_keep_alive.md`).
+Ship Game Mode **on** paired with GPU keep-alive **on** (see `../patches/SWX_GPU_KEEPALIVE/gpu_keep_alive.md`).
 Rationale: nxnative's collapse needs idle gaps to trigger — Game Mode enables
 an aggressive DPS policy (`Set DPS to 2`) that parks the GPU at its lowest
 clock *when it sees idle*; the keep-alive removes the idle signature, so the

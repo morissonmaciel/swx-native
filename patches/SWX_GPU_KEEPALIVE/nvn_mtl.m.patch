@@ -1,0 +1,86 @@
+# SWX_GPU_KEEPALIVE group (toggles SWX_GPU_KEEPALIVE + SWX_GPU_KEEPALIVE_YIELD): hook dm/gfx/nvn/nvn_mtl.m — keep-alive start/inflight (base) + submit stamps, commit stop, idle signal (yield).
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_start
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_gpu_inflight
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_submit
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_game_commit
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_keepalive_idle_signal
+# See SWX_GPU_KEEPALIVE/gpu_keep_alive.md.
+--- a/dm/gfx/nvn/nvn_mtl.m	2026-11-16 10:17:29
++++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-16 10:17:29
+@@ -368,7 +368,8 @@
+     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
+ }
+ static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the encode thread has made (its fence; with no encode thread, the last committed: mtl_sub_commit)
+ static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (DM_NVN_SUB_IDLE_FB and test drain)
++int swx_gpu_inflight(void) { return atomic_load_explicit(&g_seg_inflight, memory_order_relaxed); }   // SWX GPU keep-alive (swx_keepalive.m): game submissions committed and not yet reported back
+ static int cut_busy_limit(void);     // maximum in-flight commits for sub_cut (0 = unbounded, 1 = default GPU-idle, N = bounded depth)
+ // A main command buffer's commit feedback, kept as blocks: the feedback of several submissions can then ride on one commit (nvn_rec.h, submissions merged into one command buffer)
+ @interface DmCommitFB : NSObject { @public NSMutableArray *blocks; }
+@@ -2445,7 +2446,9 @@
+ // Readings: each phase discards its first 45 frames (transition + present lag); for the remaining frames, the mean of the actual present interval (same source as perf.txt) and the frame counts in the three buckets 16.7 / 25 / ≥33 ms, one log line "UB present".
+ static int g_ub_n = -1, g_ub_N = 180; static _Atomic int g_ub_cur = -1; static char g_ub_name[16][16], g_ub_keys[16][16][48]; static int g_ub_nk[16];
+ static _Atomic int g_ubp_on, g_ubp_c[4]; static _Atomic uint64_t g_ubp_sum_us;
++void swx_keepalive_start(void);   // swx_keepalive.m: GPU keep-alive spinner on its own queue (no-op without Metal or when SWX_GPU_KEEPALIVE=0)
+ void mtl_ub_present(double iv) {   // Called once per frame by the present thread: actual present interval in ms (−1 = dropped, 0 = no reading)
++    if (iv > 0) swx_keepalive_start();   // first presented frame starts the spinner; unit tests, the prebuild tool and dropped presents never start it
+     if (!atomic_load(&g_ubp_on) || iv == 0) return;
+     if (iv < 0) { atomic_fetch_add(&g_ubp_c[3], 1); return; }
+     atomic_fetch_add(&g_ubp_c[iv <= 20.8 ? 0 : iv <= 29.2 ? 1 : 2], 1); atomic_fetch_add(&g_ubp_sum_us, (uint64_t)(iv * 1000));
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -1880,15 +1880,17 @@
+ static void tu_tick(void);
+ static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
+ static void treg_sparse_notes(void);
++void swx_keepalive_submit(void);   // swx_keepalive.m: every submission stamps keepalive activity (the first one starts the spinner)
+ static void pass_split_try(void);
+ static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
+ static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
+ static void mem_trim(void);
+ static void pkg_sweep(void);
+ static uint64_t spare_trim(int all, unsigned *n_out);
+ static unsigned g_evict_why[5];   // the last trim's packages (pkg_evict_idle): considered, used within PKG_IDLE_DS, of a kind not freed (sparse, placed, a view), GPU-written, held (pin, sharing table, takeover)
+ void mtl_sub_begin(void) {
+     mtl_init(); g_sub_serial++; g_seg = 0; g_vis_need = 1;   // until its first samples-passed reset or report (vis_need_scan)
++    swx_keepalive_submit();   // the first submission starts the spinner; every one stamps its activity
+     treg_sparse_notes();   // the mappings made before this submission
+     if (g_pkg_kept) { g_pkg_kept = 0; nvn_dirty_touch(); } seg_clk_put(g_sclk); g_sclk = NULL;
+     sub_cut_begin();
+@@ -2785,8 +2790,10 @@
+ static int g_ub_n = -1, g_ub_N = 180; static _Atomic int g_ub_cur = -1; static char g_ub_name[16][16], g_ub_keys[16][16][48]; static int g_ub_nk[16];
+ static _Atomic int g_ubp_on, g_ubp_c[4]; static _Atomic uint64_t g_ubp_sum_us;
+ void swx_keepalive_start(void);   // swx_keepalive.m: GPU keep-alive spinner on its own queue (no-op without Metal or when SWX_GPU_KEEPALIVE=0)
++void swx_keepalive_submit(void);   // every submission stamps keepalive activity (the first one starts the spinner)
++void swx_keepalive_game_commit(void);   // stop a running keepalive spinner before each main command-buffer commit (yield)
++void swx_keepalive_idle_signal(void);   // the game's inflight count dropped to 0
+ void mtl_ub_present(double iv) {   // Called once per frame by the present thread: actual present interval in ms (−1 = dropped, 0 = no reading)
+-    if (iv > 0) swx_keepalive_start();   // first presented frame starts the spinner; unit tests, the prebuild tool and dropped presents never start it
+     if (!atomic_load(&g_ubp_on) || iv == 0) return;
+     if (iv < 0) { atomic_fetch_add(&g_ubp_c[3], 1); return; }
+     atomic_fetch_add(&g_ubp_c[iv <= 20.8 ? 0 : iv <= 29.2 ? 1 : 2], 1); atomic_fetch_add(&g_ubp_sum_us, (uint64_t)(iv * 1000));
+@@ -3048,7 +3055,8 @@
+     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
+     DmCommitFB *o = [DmCommitFB new];
+     atomic_fetch_add(&g_seg_inflight, 1);
+-    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
++    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; if (atomic_fetch_sub(&g_seg_inflight, 1) == 1) swx_keepalive_idle_signal(); for (dispatch_block_t block in commit_blocks) block(); }];
++    swx_keepalive_game_commit();   // a running spinner leaves now; the commit below must not wait behind a whole kernel
+     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
+     NSString *cctx = @(cctx_snap());
+     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
+@@ -18184,13 +18192,14 @@
+     DmCommitFB *o = [DmCommitFB new];
+     atomic_fetch_add(&g_seg_inflight, 1);
+     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+-        atomic_fetch_sub(&g_seg_inflight, 1);
++        if (atomic_fetch_sub(&g_seg_inflight, 1) == 1) swx_keepalive_idle_signal();
+         gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+         if (sc) { if (k < SEG_CLK_N) { atomic_store(&sc->t[k][0], gpu_s_guest_ns(cb.GPUStartTime)); atomic_store(&sc->t[k][1], gpu_s_guest_ns(cb.GPUEndTime)); } seg_clk_put(sc); }
+         if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("[RED] segment command buffer execution error: %s", cb.error.description.UTF8String); res_top_once(cb.error); }
+         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
+         gpu_lost_check(cb.error, "segment");
+     }];
++    swx_keepalive_game_commit();   // a running spinner leaves now; the segment commit below must not wait behind a whole kernel
+     cb_commit(o, (can_hold && rec_on() && rx_merge_on()) ? REC_CMT_SEG : REC_CMT_NOW);
+     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
+     g_cb = rec_cb_new();

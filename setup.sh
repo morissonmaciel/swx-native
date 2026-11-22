@@ -103,20 +103,23 @@ if [ -n "$BASE" ] || [ -n "$UPDATE" ] || [ -n "$KEYS" ] || [ -n "$INSTALL_DIR" ]
   [ "$FAILED" = "0" ] || fail "one or more inputs missing (see above)."
 fi
 
-# ---- <I>/env.txt (runtime switches the app is built with) ----
-# The launcher reads env files in order: launch environment, then the player's
-# <Application Support>/env.txt, then the bundled Resources/dm/env.txt (first
-# one wins). Passing this file via --env-file bakes it into the app bundle,
-# so DM_SAVE / DM_PSO_* travel with <I> without touching Application Support.
+# ---- <I>/env.txt (created once, never overwritten) ----
+# Feeds both the build (--env-file: where the prebuild writes pso_archive)
+# and the run (.command applies it last, so it wins over baked defaults).
+# User edits must survive reinstalls: only create when missing.
 if [ -n "$INSTALL_DIR" ]; then
   ENV_FILE="$INSTALL_DIR/env.txt"
-  {
-    printf 'DM_SAVE=%s\n' "$INSTALL_DIR/saves"
-    printf 'DM_PSO_USER=%s\n' "$INSTALL_DIR/shaders/pso_user.tsv"
-    printf 'DM_PSO_ARCHIVE=%s\n' "$INSTALL_DIR/shaders/pso_archive"
-    printf 'DM_PSO_PAIRS=%s\n' "$INSTALL_DIR/shaders/swx_pairs.tsv"
-  } > "$ENV_FILE" || fail "cannot write $ENV_FILE"
-  ok "env.txt" "$ENV_FILE"
+  if [ -f "$ENV_FILE" ]; then
+    ok "env.txt (kept, user-managed)" "$ENV_FILE"
+  else
+    {
+      printf 'DM_SAVE=%s\n' "$INSTALL_DIR/saves"
+      printf 'DM_PSO_USER=%s\n' "$INSTALL_DIR/shaders/pso_user.tsv"
+      printf 'DM_PSO_ARCHIVE=%s\n' "$INSTALL_DIR/shaders/pso_archive"
+      printf 'DM_PSO_PAIRS=%s\n' "$INSTALL_DIR/shaders/swx_pairs.tsv"
+    } > "$ENV_FILE" || fail "cannot write $ENV_FILE"
+    ok "env.txt (created)" "$ENV_FILE"
+  fi
 fi
 
 # ---- nxnative build (extract -> rewrite -> shaders/host, no .app yet) ----
@@ -126,7 +129,13 @@ fi
 # prints the command that runs the game. Packing the .app comes later.
 if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]; then
   TITLE_ID="01007EF00011E000"
-  NX="$ROOT/core/nxnative"
+  # Patches first: clone the pristine core to /tmp and patch the copy, so the
+  # build below compiles the modified files. Prints SWX_PATCHED_CORE=<dir> last.
+  PATCHED_LINE="$(sh "$ROOT/patches/apply_patches.sh" --core "$ROOT/core/nxnative" | tail -1)" \
+    || fail "apply_patches.sh failed (see output above)."
+  NX="$(printf '%s' "$PATCHED_LINE" | sed -n 's/^SWX_PATCHED_CORE=//p')"
+  [ -n "$NX" ] && [ -d "$NX" ] || fail "apply_patches.sh did not return a core dir (got: $PATCHED_LINE)"
+  ok "patched core" "$NX"
   NX_SCRIPT="$NX/scripts/build_ipa_from_nsp.py"
   [ -f "$NX_SCRIPT" ] || fail "nxnative script missing: $NX_SCRIPT (populate core/nxnative)"
   # A download via browser deixa quarentena nos binários do nxnative e o
@@ -155,6 +164,18 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     || fail "nxnative build failed (see output above)."
   ok "nxnative" "--platform mac ok (no .app yet)"
 
+  # ---- shader tables trio into <I>/shaders (self-contained <I>) ----
+  # shader_map.tsv is a static profile input; c1_full.tsv/cb_extent.tsv are
+  # (re)made in the profile folder by this build's Mac shader step, so copy
+  # only after the build: the trio stays consistent (stamp-named tables match
+  # the just-built libraries). The .command then points DM_NVN_SHMAP at <I>.
+  for t in shader_map.tsv c1_full.tsv cb_extent.tsv; do
+    src="$ROOT/core/nxnative/dm/games/$TITLE_ID/$t"
+    [ -f "$src" ] || fail "shader table not found after build: $src"
+    cp -f "$src" "$INSTALL_DIR/shaders/$t" || fail "cannot copy $t to $INSTALL_DIR/shaders"
+    ok "shader table" "$INSTALL_DIR/shaders/$t"
+  done
+
   # ---- <I>/Breath of the Wild.command (double-click to play) ----
   # Replicates build_ipa_from_nsp.py mac_run for --platform mac:
   #   cd <work>/run && DM_ROOT=<work> DM_ROMFS=<extract>/RomFS[.img] ...
@@ -180,7 +201,9 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
   MSL_DIR="$WORK/shader/cache"
   [ -d "$MSL_DIR" ] || fail "Mac shader libraries not found: $MSL_DIR"
   FONT_DIR="$WORK/font"
-  SHMAP="$NX/dm/games/$TITLE_ID/shader_map.tsv"
+  SHMAP="$INSTALL_DIR/shaders/shader_map.tsv"
+  # NOTE: copied from the pristine profile above (no patch touches the tables);
+  # <I>-local so the .command survives /tmp eviction and repo moves.
   [ -f "$SHMAP" ] || fail "shader map not found: $SHMAP"
   RUN_DIR="$WORK/run"
   mkdir -p "$RUN_DIR/save" "$RUN_DIR/temp"
