@@ -957,6 +957,9 @@ VFR_OLD="compat/dm_vfr_framepace-v1.patch"
 SMAA_CURRENT="swx_botw_smaa.patch"
 SMAA_OLD="compat/swx_botw_smaa-v1.patch"
 
+DD_CURRENT="swx_botw_draw_distance.patch"
+DD_OLD="compat/swx_botw_draw_distance-v1.patch"
+
 migrate_vfr() (
     # Preflight both diffs on copies of the patch's files before touching
     # the installed stack. Later patches may remain applied in this upgrade.
@@ -1035,6 +1038,55 @@ if ! is_applied "$SMAA_CURRENT" && grep -qF 'SWX_AA=0: mode off' "$CORE/dm/gfx/n
     fi
     echo "patches: reverted $SMAA_OLD"
     rm -f "$MARKER"
+fi
+
+# Pre-normalize draw-distance upgrade: the old file's sentinels are all shared
+# with the new file, which adds `draw distance summary:` — that added sentinel
+# is what makes is_applied(new) false on old-version trees and pairs the
+# guard below. On such a tree the generic normalize further below would
+# reverse with the NEW file (whose version-specific context that tree
+# never received), fail, and stop loudly. Detect the old tree by its unique
+# fade-store literal instead: fresh trees never received the patch at all (no
+# literal, no false positive), and the new file's version-specific sentinels
+# fail there, so ! is_applied pairs the guard. Revert with the exact old file
+# first, then fall through to the normal check-then-apply flow.
+if ! is_applied "$DD_CURRENT" && grep -qF '0xbd00d222' "$CORE/dm/games/01007EF00011E000/patches.py" 2>/dev/null; then
+    echo "patches: upgrading draw distance ($DD_OLD -> $DD_CURRENT)"
+    [ -f "$HERE/$DD_OLD" ] || { echo "[ERROR] draw-distance upgrade needs the old patch file but it is missing: $DD_OLD" >&2; exit 1; }
+    patch --batch -V none -p1 -R --dry-run -d "$CORE" < "$HERE/$DD_OLD" >/dev/null || {
+        echo "[ERROR] draw-distance upgrade dry-run failed: cannot revert the old draw-distance patch cleanly ($DD_OLD)." >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    }
+    patch --batch -V none -p1 -R -d "$CORE" < "$HERE/$DD_OLD" >/dev/null || {
+        echo "[ERROR] draw-distance upgrade revert failed ($DD_OLD)." >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    }
+    if is_applied "$DD_OLD" || grep -qF '0xbd00d222' "$CORE/dm/games/01007EF00011E000/patches.py" 2>/dev/null; then
+        echo "[ERROR] draw-distance upgrade revert did not clear sentinels (duplicate or partial application?): $DD_OLD" >&2
+        echo "        normalize manually with exact-string surgery (see docs/nxnative_patches.md), then re-run." >&2
+        exit 1
+    fi
+    echo "patches: reverted $DD_OLD"
+    rm -f "$MARKER"
+fi
+
+# First-test draw-distance trees predate BOTH the compat snapshot and the
+# telemetry fix: they carry SWX_DRAW_DISTANCE but neither the intermediate
+# fade-store literal above nor the current version's sentinels, so neither
+# the upgrade block nor the generic normalize below can revert them (a blind
+# -R with the new file would fail partway and stop loudly on a half-reverted
+# tree). Fail fast with the recovery instead: re-fetch a clean core
+# (see README for how to fetch core), or revert the first-test patch by hand,
+# then re-run. Fresh trees (no SWX_DRAW_DISTANCE row) and current trees
+# (is_applied, incl. the summary sentinel) skip this guard.
+if ! is_applied "$DD_CURRENT" && grep -qF 'SWX_DRAW_DISTANCE' "$CORE/dm/games/settings.tsv" 2>/dev/null && ! grep -qF '0xbd00d222' "$CORE/dm/games/01007EF00011E000/patches.py" 2>/dev/null; then
+    echo "[ERROR] draw-distance v1 tree detected (first-test patch, no upgrade snapshot covers it): refusing to normalize." >&2
+    echo "        (a partially-applied current tree trips the same guard; the remedy is the same.)" >&2
+    echo "        re-fetch a clean core and reinstall fresh," >&2
+    echo "        or revert the first-test swx_botw_draw_distance.patch by hand, then re-run." >&2
+    exit 1
 fi
 
 # 0. normalize first when the tree is not the verified marked state:
