@@ -15,7 +15,8 @@ Nothing from the game ships in this repository.
 
 | Path | What |
 |---|---|
-| `install.sh` | Terminal entry point: prepares `.venv` (uv + Python >= 3.14), checks nxnative deps, then calls `wrapper/main.py` |
+| `scripts/install.sh` | Terminal entry point: prepares `.venv` (uv + Python >= 3.14), checks nxnative deps, then calls `wrapper/main.py` |
+| `scripts/` | Terminal entry points (`install.sh`) |
 | `wrapper/` | Python backend (reusable by a future graphical UI); `requirements.txt` is the tool set's pinned deps (at least nxnative's) |
 | `patches/` | Our extra game patches (e.g. Atmosphère cheats applied on top of the core profile) |
 | `core/nxnative` | Upstream core that does the heavy lifting (extract, rewrite, host, shaders, `mac-app` pack). Local checkout only, not versioned here |
@@ -26,16 +27,16 @@ Nothing from the game ships in this repository.
 - Apple Silicon Mac, macOS 26.6+
 - Xcode 27.2 selected (`sudo xcode-select -s /Applications/Xcode.app`) + MetalToolchain (`xcodebuild -downloadComponent MetalToolchain`)
 - Homebrew with `zstd` and `glslang`
-- `uv` (installed by `install.sh` when missing)
+- `uv` (installed by `scripts/install.sh` when missing)
 - Your own game dump (NSP/XCI/NSZ/XCZ + update 1.9.0, optional DLC) and your own `prod.keys`
 
 ## Usage
 
 ```sh
-./install.sh [--recreate] [--python 3.14] [-- <wrapper args>]
+./scripts/install.sh [--recreate] [--python 3.14] [-- <wrapper args>]
 ```
 
-`install.sh` leaves a ready `.venv` and delegates to `wrapper/main.py`
+`scripts/install.sh` leaves a ready `.venv` and delegates to `wrapper/main.py`
 (not implemented yet). Planned backend invocation:
 
 ```sh

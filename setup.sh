@@ -1,0 +1,220 @@
+#!/bin/sh
+# swx-native — setup.sh
+# Minimal venv bootstrap for nxnative work. Only creates/updates .venv via uv.
+set -eu
+
+trap 'echo "" >&2; echo "interrupted." >&2; exit 130' INT
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+VENV="$ROOT/.venv"
+TOOLS_REQ="$ROOT/wrapper/requirements.txt"
+PYTHON_WANT="${SWX_PYTHON:-3.14}"
+RECREATE=0
+BASE=""
+UPDATE=""
+KEYS=""
+INSTALL_DIR=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      echo "usage: ./setup.sh [--recreate] [--python 3.14] [--base <file>] [--update <file>] [--keys <file>] [--install-dir <dir>]"
+      echo "  Creates .venv with uv + Python >= 3.14, installs wrapper/requirements.txt,"
+      echo "  prepares <I>/{saves,shaders,mods,game} + <I>/env.txt, then builds via nxnative (--platform mac, no .app yet)."
+      exit 0 ;;
+    --recreate) RECREATE=1; shift ;;
+    --python) PYTHON_WANT="${2:-}"; shift 2 ;;
+    --base) BASE="${2:-}"; shift 2 ;;
+    --base=*) BASE="${1#--base=}"; shift ;;
+    --update) UPDATE="${2:-}"; shift 2 ;;
+    --update=*) UPDATE="${1#--update=}"; shift ;;
+    --keys) KEYS="${2:-}"; shift 2 ;;
+    --keys=*) KEYS="${1#--keys=}"; shift ;;
+    --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
+    --install-dir=*) INSTALL_DIR="${1#--install-dir=}"; shift ;;
+    --) shift; break ;;
+    *) echo "[ERROR] unknown arg: $1 (see ./setup.sh --help)" >&2; exit 2 ;;
+  esac
+done
+
+say() { printf '%s\n' "$*"; }
+fail() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+ok() { printf '\033[32m✔\033[0m %s: %s\n' "$1" "$2"; }
+bad() { printf '\033[31m✘\033[0m %s: %s\n' "$1" "$2" >&2; }
+
+# ---- uv ----
+if ! command -v uv >/dev/null 2>&1; then
+  echo "[WARNING] uv not found; installing..." >&2
+  if command -v brew >/dev/null 2>&1; then brew install uv || fail "failed to install uv via brew.";
+  else curl -LsSf https://astral.sh/uv/install.sh | sh || fail "failed to install uv.";
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+command -v uv >/dev/null 2>&1 || fail "uv unavailable after install. Add ~/.local/bin to PATH."
+say "uv: $(uv --version)"
+
+# ---- local venv with Python >= 3.14 ----
+if [ "$RECREATE" = "1" ] && [ -d "$VENV" ]; then say "removing .venv (--recreate)..."; rm -rf "$VENV"; fi
+if [ ! -x "$VENV/bin/python" ]; then
+  say "creating .venv (python $PYTHON_WANT)..."
+  uv venv --python "$PYTHON_WANT" "$VENV" || fail "failed to create .venv (uv venv --python $PYTHON_WANT)."
+fi
+PYV="$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")')"
+say "venv python: $PYV ($VENV/bin/python)"
+"$VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' \
+  || fail "venv needs Python >= 3.14 (current: $PYV). Run: ./setup.sh --recreate --python 3.14"
+[ "$("$VENV/bin/python" -c 'import platform; print(platform.machine())')" = "arm64" ] \
+  || fail "venv python is not arm64 (Rosetta). Recreate with an arm64 uv/python: ./setup.sh --recreate"
+
+# ---- Python deps of the tool set (pinned) ----
+[ -f "$TOOLS_REQ" ] || fail "requirements not found: $TOOLS_REQ"
+say "installing Python deps ($TOOLS_REQ)..."
+uv pip install --python "$VENV/bin/python" -r "$TOOLS_REQ" || fail "failed to install requirements."
+"$VENV/bin/python" -c 'import lz4.block, capstone, fontTools, zbic; import capstone as c; assert c.__version__.startswith("5."), c.__version__' \
+  || fail "Python modules missing after install (lz4/capstone==5.x/fonttools/zbic)."
+say "Python deps ok."
+
+# ---- game inputs (<I> layout) ----
+if [ -n "$BASE" ] || [ -n "$UPDATE" ] || [ -n "$KEYS" ] || [ -n "$INSTALL_DIR" ]; then
+  FAILED=0
+  if [ -n "$BASE" ]; then
+    if [ -f "$BASE" ]; then ok "base" "$BASE"; else bad "base not found" "$BASE"; FAILED=1; fi
+  fi
+  if [ -n "$UPDATE" ]; then
+    if [ -f "$UPDATE" ]; then ok "update" "$UPDATE"; else bad "update not found" "$UPDATE"; FAILED=1; fi
+  fi
+  if [ -n "$KEYS" ]; then
+    if [ -f "$KEYS" ]; then ok "keys" "$KEYS"; else bad "keys not found" "$KEYS"; FAILED=1; fi
+  fi
+  if [ -n "$INSTALL_DIR" ]; then
+    if [ -e "$INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
+      bad "install-dir not a directory" "$INSTALL_DIR"; FAILED=1
+    else
+      if [ -d "$INSTALL_DIR" ]; then ok "install-dir (kept)" "$INSTALL_DIR";
+      else mkdir -p "$INSTALL_DIR" || { bad "cannot create install-dir" "$INSTALL_DIR"; FAILED=1; }; [ -d "$INSTALL_DIR" ] && ok "install-dir (created)" "$INSTALL_DIR"; fi
+      if [ -d "$INSTALL_DIR" ]; then
+        for sub in saves shaders mods game; do
+          if [ -d "$INSTALL_DIR/$sub" ]; then ok "$sub (kept)" "$INSTALL_DIR/$sub";
+          else mkdir -p "$INSTALL_DIR/$sub" && ok "$sub (created)" "$INSTALL_DIR/$sub" || { bad "cannot create $sub" "$INSTALL_DIR/$sub"; FAILED=1; }; fi
+        done
+      fi
+    fi
+  fi
+  [ "$FAILED" = "0" ] || fail "one or more inputs missing (see above)."
+fi
+
+# ---- <I>/env.txt (runtime switches the app is built with) ----
+# The launcher reads env files in order: launch environment, then the player's
+# <Application Support>/env.txt, then the bundled Resources/dm/env.txt (first
+# one wins). Passing this file via --env-file bakes it into the app bundle,
+# so DM_SAVE / DM_PSO_* travel with <I> without touching Application Support.
+if [ -n "$INSTALL_DIR" ]; then
+  ENV_FILE="$INSTALL_DIR/env.txt"
+  {
+    printf 'DM_SAVE=%s\n' "$INSTALL_DIR/saves"
+    printf 'DM_PSO_USER=%s\n' "$INSTALL_DIR/shaders/pso_user.tsv"
+    printf 'DM_PSO_ARCHIVE=%s\n' "$INSTALL_DIR/shaders/pso_archive"
+    printf 'DM_PSO_PAIRS=%s\n' "$INSTALL_DIR/shaders/swx_pairs.tsv"
+  } > "$ENV_FILE" || fail "cannot write $ENV_FILE"
+  ok "env.txt" "$ENV_FILE"
+fi
+
+# ---- nxnative build (extract -> rewrite -> shaders/host, no .app yet) ----
+# <I>/game is the NSP folder (base + update staged as symlinks); the build
+# folder is <I>/game/build so extraction stays under game.
+# --platform mac stops before packing: it builds the Mac shaders + host and
+# prints the command that runs the game. Packing the .app comes later.
+if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]; then
+  TITLE_ID="01007EF00011E000"
+  NX="$ROOT/core/nxnative"
+  NX_SCRIPT="$NX/scripts/build_ipa_from_nsp.py"
+  [ -f "$NX_SCRIPT" ] || fail "nxnative script missing: $NX_SCRIPT (populate core/nxnative)"
+  # A download via browser deixa quarentena nos binários do nxnative e o
+  # Gatekeeper mata eles com SIGKILL (exit 137) ou mostra o alerta de malware.
+  # Mesmo tratamento do scripts/install.sh: limpa o flag antes de rodar.
+  for b in "$NX/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate" "$NX/dm/tools/nx_extract_bin/nx_extract" "$NX/dm/gfx/tools/spirv_cross_bin/spirv-cross"; do
+    [ -x "$b" ] || fail "binary missing/not executable: $b (re-fetch core/nxnative)."
+    if xattr -l "$b" 2>/dev/null | grep -q com.apple.quarantine; then
+      say "stripping quarantine: $b"
+      xattr -d com.apple.quarantine "$b" 2>/dev/null || fail "could not strip quarantine from $b (run: xattr -d com.apple.quarantine '$b')."
+    fi
+  done
+  GAME_DIR="$INSTALL_DIR/game"
+  for src in "$BASE" "$UPDATE"; do
+    dst="$GAME_DIR/$(basename "$src")"
+    if [ -e "$dst" ] || [ -L "$dst" ]; then rm -f "$dst"; fi
+    ln -s "$src" "$dst" || fail "cannot stage $(basename "$src") into $GAME_DIR"
+    ok "staged" "$dst"
+  done
+  say "building via nxnative (--platform mac, no .app yet)..."
+  DM_GAME="$TITLE_ID" "$VENV/bin/python" "$NX_SCRIPT" "$GAME_DIR" \
+    -k "$KEYS" \
+    --platform mac \
+    --work-dir "$GAME_DIR/build" \
+    --env-file "$INSTALL_DIR/env.txt" \
+    || fail "nxnative build failed (see output above)."
+  ok "nxnative" "--platform mac ok (no .app yet)"
+
+  # ---- <I>/Breath of the Wild.command (double-click to play) ----
+  # Replicates build_ipa_from_nsp.py mac_run for --platform mac:
+  #   cd <work>/run && DM_ROOT=<work> DM_ROMFS=<extract>/RomFS[.img] ...
+  #   <work>/tools/dmhost <work>/patched_<ver>
+  # <I>/env.txt wins over the baked defaults (same precedence the script uses:
+  # the environment file is applied last).
+  WORK="$GAME_DIR/build"
+  HOST_BIN="$WORK/tools/dmhost"
+  [ -x "$HOST_BIN" ] || fail "dmhost not found: $HOST_BIN (build did not produce it?)"
+  PATCHED_ARG=""
+  for cand in "$WORK"/patched_*; do
+    if [ -d "$cand" ]; then
+      [ -n "$PATCHED_ARG" ] && fail "more than one $WORK/patched_* folder."
+      PATCHED_ARG="$cand"
+    fi
+  done
+  [ -n "$PATCHED_ARG" ] || fail "no $WORK/patched_* folder (build did not produce one?)."
+  ROMFS_ARG=""
+  for cand in "$WORK"/extract/*/RomFS.img "$WORK"/extract/*/RomFS; do
+    if [ -e "$cand" ]; then ROMFS_ARG="$cand"; break; fi
+  done
+  [ -n "$ROMFS_ARG" ] || fail "no RomFS found under $WORK/extract (RomFS.img or RomFS)."
+  MSL_DIR="$WORK/shader/cache"
+  [ -d "$MSL_DIR" ] || fail "Mac shader libraries not found: $MSL_DIR"
+  FONT_DIR="$WORK/font"
+  SHMAP="$NX/dm/games/$TITLE_ID/shader_map.tsv"
+  [ -f "$SHMAP" ] || fail "shader map not found: $SHMAP"
+  RUN_DIR="$WORK/run"
+  mkdir -p "$RUN_DIR/save" "$RUN_DIR/temp"
+  # Escape for safe embedding inside double quotes in the .command.
+  esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g'; }
+  COMMAND_FILE="$INSTALL_DIR/Breath of the Wild.command"
+  {
+    printf '#!/bin/sh\n'
+    printf '# Breath of the Wild — double-click to play. Generated by setup.sh; re-run setup.sh to regenerate.\n'
+    printf 'set -eu\n'
+    printf 'HERE="$(cd "$(dirname "$0")" && pwd)"\n'
+    printf 'RUN="%s"\n' "$(esc "$RUN_DIR")"
+    printf 'mkdir -p "$RUN/save" "$RUN/temp"\n'
+    printf 'export DM_ROOT="%s"\n' "$(esc "$WORK")"
+    printf 'export DM_ROMFS="%s"\n' "$(esc "$ROMFS_ARG")"
+    printf 'export DM_SAVE="$RUN/save"\n'
+    printf 'export DM_TEMP="$RUN/temp"\n'
+    printf 'export DM_MSL_DIR="%s"\n' "$(esc "$MSL_DIR")"
+    printf 'export DM_FONT_DIR="%s"\n' "$(esc "$FONT_DIR")"
+    printf 'export DM_OBSOLETE="%s"\n' "$(esc "$WORK/obsolete")"
+    printf 'export DM_NVN_SHMAP="%s"\n' "$(esc "$SHMAP")"
+    printf 'export DM_WINDOW=1 DM_AUDIO=1\n'
+    printf '# <I>/env.txt wins over the baked defaults (handles values with spaces).\n'
+    printf 'ENV_FILE="$HERE/env.txt"\n'
+    printf 'if [ -f "$ENV_FILE" ]; then\n'
+    printf '  while IFS= read -r line || [ -n "$line" ]; do\n'
+    printf '    case "$line" in ""|"#"*) continue;; *?=*) k=${line%%=*}; v=${line#*=}; export "$k=$v";; esac\n'
+    printf '  done < "$ENV_FILE"\n'
+    printf 'fi\n'
+    printf 'cd "$RUN"\n'
+    printf 'exec "%s" "%s"\n' "$(esc "$HOST_BIN")" "$(esc "$PATCHED_ARG")"
+  } > "$COMMAND_FILE" || fail "cannot write $COMMAND_FILE"
+  chmod +x "$COMMAND_FILE"
+  ok "command" "$COMMAND_FILE"
+fi
+
+say "ready: $VENV/bin/python"

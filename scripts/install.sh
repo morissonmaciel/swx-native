@@ -1,5 +1,5 @@
 #!/bin/sh
-# swx-native — install.sh
+# swx-native — scripts/install.sh
 # Terminal entry point: prepares the environment, then delegates to the Python
 # wrapper (a backend reusable by a future graphical UI).
 # The wrapper (wrapper/main.py) does not exist yet: this script leaves the env
@@ -9,7 +9,7 @@ set -eu
 # Soft exit on Ctrl+C: no stack traces, standard 130 status.
 trap 'echo "" >&2; echo "interrupted." >&2; exit 130' INT
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NX="$ROOT/core/nxnative"
 VENV="$ROOT/.venv"
 WRAPPER="$ROOT/wrapper/main.py"
@@ -20,7 +20,7 @@ RECREATE=0
 for a in "$@"; do
   case "$a" in
     -h|--help)
-      echo "usage: ./install.sh [--recreate] [--python 3.14] [-- <wrapper args>]"
+      echo "usage: ./scripts/install.sh [--recreate] [--python 3.14] [-- <wrapper args>]"
       echo "  Prepares .venv with uv + Python >= 3.14, checks nxnative deps (mac-app), then calls wrapper/main.py."
       exit 0 ;;
     --recreate) RECREATE=1; shift ;;
@@ -123,9 +123,9 @@ fi
 PYV="$("$VENV/bin/python" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")')"
 say "venv python: $PYV ($VENV/bin/python)"
 "$VENV/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' \
-  || fail "venv needs Python >= 3.14 (current: $PYV). Run: ./install.sh --recreate --python 3.14"
+  || fail "venv needs Python >= 3.14 (current: $PYV). Run: ./scripts/install.sh --recreate --python 3.14"
 [ "$("$VENV/bin/python" -c 'import platform; print(platform.machine())')" = "arm64" ] \
-  || fail "venv python is not arm64 (Rosetta). Recreate with an arm64 uv/python: ./install.sh --recreate"
+  || fail "venv python is not arm64 (Rosetta). Recreate with an arm64 uv/python: ./scripts/install.sh --recreate"
 
 # ---- Python deps of the tool set (pinned) ----
 [ -f "$TOOLS_REQ" ] || fail "requirements not found: $TOOLS_REQ"

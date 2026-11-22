@@ -3,7 +3,7 @@
 `core/nxnative` is a vendored snapshot: we read it, never fork it. Upstream
 fixes and features are imported by replacing the directory; our deviations
 live as patch files in `patches/`, re-applied by `patches/patch_nxnative.sh`
-on every `install.sh` run. A transparent core update = fresh snapshot +
+on every `scripts/install.sh` run. A transparent core update = fresh snapshot +
 re-run; conflicts surface loudly instead of silently rotting.
 
 ## Layout
@@ -16,7 +16,7 @@ re-run; conflicts surface loudly instead of silently rotting.
 
 ## When patches apply
 
-`install.sh` calls `patches/patch_nxnative.sh <core dir>` after verifying the
+`scripts/install.sh` calls `patches/patch_nxnative.sh <core dir>` after verifying the
 core exists and before creating the venv. Rationale: everything downstream
 (venv deps, wrapper, build) runs against the patched tree, so patching is a
 precondition, not an afterthought. `SWX_SKIP_PATCHES=1` skips it for

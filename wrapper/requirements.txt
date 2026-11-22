@@ -1,4 +1,4 @@
-# swx-native — requirements of our tool set (installed by ./install.sh into the local .venv).
+# swx-native — requirements of our tool set (installed by ./scripts/install.sh into the local .venv).
 # Includes nxnative's pins (the wrapper invokes its scripts: rewriter, shader tools, packers),
 # so it tracks the core without duplicating versions. Wrapper-owned deps go below.
 -r ../core/nxnative/.github/requirements/tools.txt
