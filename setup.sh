@@ -203,6 +203,7 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     printf 'export DM_OBSOLETE="%s"\n' "$(esc "$WORK/obsolete")"
     printf 'export DM_NVN_SHMAP="%s"\n' "$(esc "$SHMAP")"
     printf 'export DM_WINDOW=1 DM_AUDIO=1\n'
+    printf 'export DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off\n'
     printf '# <I>/env.txt wins over the baked defaults (handles values with spaces).\n'
     printf 'ENV_FILE="$HERE/env.txt"\n'
     printf 'if [ -f "$ENV_FILE" ]; then\n'
