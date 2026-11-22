@@ -1,0 +1,608 @@
+# SWX_DRAW_DISTANCE presets (1.0/1.15/1.2) for BOTW 1.9.0 on macOS: farther actors, background trees and a mipmap bias.
+# The anchored actor traverse (fmul s0,s0,s1 at main+0x10a4688, word 0x1e210800, resume +0x10a468c) scales
+# traverseDist after the shared 100 m fallback; Normal reproduces the original multiply. Distances under
+# 2000 m use max(original, min(original*factor, 1000 m)); from 2000 m the preset factor applies (1.5x defensive
+# cap). Background-tree range/fade/detail fields scale at consumption (setup + update), inputs untouched, no
+# accumulation. The loader resolves the preset once (absent/invalid/0/1.0 = Normal, invalid warns once),
+# publishes the factor at state +0xBC and calls mtl_swx_draw_distance(); the renderer never re-parses the env.
+# Sampler variants carry -log2(factor) on eligible opaque 2D linear materials (recorder-safe, cached by
+# sampler ID + bias epoch); Normal creates no variants. Rito Village bridge/NPC regression at 1.30x caps the
+# approved ceiling at 1.20x (High); grass and terrain LOD are out of scope.
+# verify: dm/games/settings.tsv:SWX_DRAW_DISTANCE
+# verify: dm/games/settings.tsv:1.2=High
+# verify: dm/games/settings.py:'SWX_DRAW_DISTANCE', 'SWX_AA'
+# verify: dm/tools/tests/test_launcher_settings.py:mac['SWX_DRAW_DISTANCE']
+# verify: docs/settings.md:Draw distance
+# verify: dm/games/01007EF00011E000/patches.py:SWX_BOTW_DRAW_DISTANCE
+# verify: dm/games/01007EF00011E000/patches.py:f90003f1
+# verify: dm/host/dm.h:uint32_t draw_distance;
+# verify: dm/host/loader.c:mtl_swx_draw_distance
+# verify: dm/gfx/nvn/nvn_mtl.m:mtl_swx_draw_distance
+# verify: dm/gfx/nvn/nvn_mtl.m:g_dd_bias
+# verify: dm/gfx/nvn/nvn_mtl.m:S.color.blend_en gates the draw-distance bias
+# verify: dm/gfx/nvn/nvn_mtl.m:draw distance summary:
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -20,6 +20,7 @@
+ SWX_DISABLE_DRS	toggle	-	0	fixups:RENDER_SCALE_DRS	Game	Fixed internal resolution	Fixes the 3D views at DM_RENDER_SCALE, including 1.0 (1600x900 docked); off keeps the game's dynamic resolution.
+ SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Sets the base scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes. The game keeps its dynamic resolution around the base; Fixed internal resolution controls whether the scene can drop under load.
+ SWX_SHADOW_RESOLUTION	choice	896=Console,2048=High?platform:mac&fixups:SWX_BOTW_SHADOW_RES	896	fixups:SWX_BOTW_SHADOW_RES	Game	Shadow resolution	Sun shadow cascade size: Console uses the game's own table (896x896 docked), High uses 2048x2048.
++SWX_DRAW_DISTANCE	choice	1.0=Normal,1.15=Medium?fixups:SWX_BOTW_DRAW_DISTANCE,1.2=High?fixups:SWX_BOTW_DRAW_DISTANCE	1.0	platform:mac	Game	Draw distance	How far the game draws detail: Normal is the game's own distances, Medium 1.15x, High 1.2x. Farther uses more GPU time.
+ SWX_AA	choice	off=Off,fxaa=FXAA,smaa=SMAA	fxaa	platform:mac	Game	Anti-aliasing	FXAA is the game's own filter; Off skips it (plain copy); SMAA filters edges before the canvas write.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+--- a/dm/games/settings.py
++++ b/dm/games/settings.py
+@@ -22,7 +22,7 @@
+ # The Mac settings window's Graphics section (SettingsFile order is the screen order): Display mode to Picture shape,
+ # right after Game. Console mode stays in Game. iOS keeps the table's sections and order, so this remap is mac-only.
+ MAC_GRAPHICS_ORDER = ('DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE',
+-                      'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'SWX_AA', 'DM_SCREEN_ASPECT')
++                      'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'SWX_DRAW_DISTANCE', 'SWX_AA', 'DM_SCREEN_ASPECT')
+ # Render scale as a percent select on macOS: the text shows the percent, the option writes the fraction the host reads
+ RENDER_SCALE_PCTS = (('0.5', '50%'), ('0.75', '75%'), ('1.0', '100%'), ('1.1', '110%'), ('1.2', '120%'))
+ 
+--- a/dm/tools/tests/test_launcher_settings.py
++++ b/dm/tools/tests/test_launcher_settings.py
+@@ -77,7 +77,7 @@
+         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
+         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
+         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
+-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'SWX_AA'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only); the Anti-aliasing row (platform:mac)
++        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'SWX_AA', 'SWX_DRAW_DISTANCE'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only); the Anti-aliasing and Draw distance rows (platform:mac)
+         s = mac['DM_FULLSCREEN']
+         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+ 
+@@ -175,16 +175,21 @@
+         with tempfile.TemporaryDirectory() as tmp:
+             (Path(tmp) / 'main.fixups.tsv').write_text(
+                 '# RENDER_SCALE\t1\n# RENDER_SCALE_MAX_PCT\t78\n# RENDER_SCALE_DRS\t1\n'
+-                '# SWX_NATIVE_1080P\t1\n# SWX_NATIVE_1440P\t1\n# SWX_NATIVE_4K\t1\n# SWX_BOTW_SHADOW_RES\t1\n', encoding='utf-8')
++                '# SWX_NATIVE_1080P\t1\n# SWX_NATIVE_1440P\t1\n# SWX_NATIVE_4K\t1\n# SWX_BOTW_SHADOW_RES\t1\n# SWX_BOTW_DRAW_DISTANCE\t1\n', encoding='utf-8')
+             with patch.object(settings.nacp, 'languages', return_value=['en-US', 'ja']), \
+                     patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac', 'DM_LANG': 'en-US'}):
+                 mac = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+         self.assertEqual([e for e, s in mac.items() if s['section'] == 'Graphics'],
+                          ['DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE',
+-                          'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'SWX_AA', 'DM_SCREEN_ASPECT'])
++                          'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'SWX_SHADOW_RESOLUTION', 'SWX_DRAW_DISTANCE', 'SWX_AA', 'DM_SCREEN_ASPECT'])
+         sh = mac['SWX_SHADOW_RESOLUTION']
+         self.assertEqual((sh['kind'], sh['section'], sh['default'], sh['level']), ('choice', 'Graphics', '896', 'basic'))
+         self.assertEqual(sh['options'], [['896', 'Console'], ['2048', 'High']])
++        dd = mac['SWX_DRAW_DISTANCE']
++        self.assertEqual((dd['kind'], dd['section'], dd['default'], dd['level']), ('choice', 'Graphics', '1.0', 'basic'))
++        self.assertEqual(dd['options'], [['1.0', 'Normal'], ['1.15', 'Medium'], ['1.2', 'High']])
++        self.assertEqual(dd['label'], 'Draw distance')
++        self.assertIn('GPU', dd['note'])   # the cost line, like the other picture rows
+         aa = mac['SWX_AA']
+         self.assertEqual((aa['kind'], aa['section'], aa['default'], aa['level']), ('choice', 'Graphics', 'fxaa', 'basic'))
+         self.assertEqual(aa['options'], [['off', 'Off'], ['fxaa', 'FXAA'], ['smaa', 'SMAA']])
+@@ -193,6 +198,7 @@
+         ios = build(BOTW, 'nvn')
+         self.assertEqual(list(dict.fromkeys(s['section'] for s in ios.values())), ['Game', 'Controls', 'Performance'])
+         self.assertNotIn('SWX_AA', ios)   # mac-only row
++        self.assertNotIn('SWX_DRAW_DISTANCE', ios)   # mac-only row
+         with tempfile.TemporaryDirectory() as tmp:
+             (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n', encoding='utf-8')
+             with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+@@ -200,12 +206,48 @@
+                 ios_rs = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['DM_RENDER_SCALE']
+         self.assertEqual((ios_rs['kind'], ios_rs['section']), ('range', 'Game'))
+         with tempfile.TemporaryDirectory() as tmp:   # capable iOS build: the row stays, Console-only (High is macOS)
+-            (Path(tmp) / 'main.fixups.tsv').write_text('# SWX_BOTW_SHADOW_RES\t1\n', encoding='utf-8')
++            (Path(tmp) / 'main.fixups.tsv').write_text('# SWX_BOTW_SHADOW_RES\t1\n# SWX_BOTW_DRAW_DISTANCE\t1\n', encoding='utf-8')
+             with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
+                     patch.dict(os.environ, {'GFXAPI': 'nvn', 'DM_LANG': 'en-US'}):
+                 os.environ.pop('SETTINGS_PLATFORM', None)
+-                ios_sh = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['SWX_SHADOW_RESOLUTION']
+-        self.assertEqual((ios_sh['section'], ios_sh['options']), ('Game', [['896', 'Console']]))
++                ios_capable = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
++        self.assertEqual((ios_capable['SWX_SHADOW_RESOLUTION']['section'], ios_capable['SWX_SHADOW_RESOLUTION']['options']), ('Game', [['896', 'Console']]))
++        self.assertNotIn('SWX_DRAW_DISTANCE', ios_capable)   # macOS-only, even with its stub
++
++    def test_draw_distance_needs_its_stub(self):
++        """Draw distance is a macOS-only row after Shadow resolution; Medium and High need its rewriter stub, so a Mac build without it offers Normal only (absent or invalid is Normal)"""
++        with tempfile.TemporaryDirectory() as tmp:
++            (Path(tmp) / 'main.fixups.tsv').write_text('# SWX_BOTW_SHADOW_RES\t1\n# SWX_BOTW_DRAW_DISTANCE\t1\n', encoding='utf-8')
++            with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
++                    patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac', 'DM_LANG': 'en-US'}):
++                mac = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
++        dd = mac['SWX_DRAW_DISTANCE']
++        self.assertEqual((dd['kind'], dd['section'], dd['default'], dd['label']), ('choice', 'Graphics', '1.0', 'Draw distance'))
++        self.assertEqual(dd['options'], [['1.0', 'Normal'], ['1.15', 'Medium'], ['1.2', 'High']])
++        self.assertEqual(dd['default'], dd['options'][0][0])   # the default is always offered
++        self.assertEqual([float(v) for v, _ in dd['options']], [1.0, 1.15, 1.2])   # the label's scale factors
++        self.assertEqual(dd['level'], 'basic')
++        self.assertIn('1.15', dd['note'])
++        order = [e for e, s in mac.items() if s['section'] == 'Graphics']
++        self.assertIn('SWX_DRAW_DISTANCE', settings.MAC_GRAPHICS_ORDER)   # the mac remap draws it under Graphics
++        self.assertLess(order.index('SWX_SHADOW_RESOLUTION'), order.index('SWX_DRAW_DISTANCE'))
++        self.assertLess(order.index('SWX_DRAW_DISTANCE'), order.index('SWX_AA'))
++        with tempfile.TemporaryDirectory() as tmp:   # a Mac build without the stub: Normal only
++            with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
++                    patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac', 'DM_LANG': 'en-US'}):
++                bare = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['SWX_DRAW_DISTANCE']
++        self.assertEqual((bare['kind'], bare['section']), ('choice', 'Graphics'))
++        self.assertEqual(bare['options'], [['1.0', 'Normal']])
++        self.assertEqual(bare['default'], bare['options'][0][0])
++        self.assertEqual(bare['level'], 'basic')
++        self.assertIn('1.15', bare['note'])   # the note still documents the stub's values
++        with tempfile.TemporaryDirectory() as tmp:   # an iOS build with the stub: no such row
++            (Path(tmp) / 'main.fixups.tsv').write_text('# SWX_BOTW_DRAW_DISTANCE\t1\n', encoding='utf-8')
++            with patch.object(settings.nacp, 'languages', return_value=['en-US']), \
++                    patch.dict(os.environ, {'GFXAPI': 'nvn', 'DM_LANG': 'en-US'}):
++                os.environ.pop('SETTINGS_PLATFORM', None)
++                ios = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
++        self.assertNotIn('SWX_DRAW_DISTANCE', ios)
+ 
+     def test_mac_render_scale_select_follows_the_stub_ceiling(self):
+         """Render scale on macOS is a percent select writing the fraction: a 1.2 ceiling offers all five, a 1.0 ceiling stops at 100%"""
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -233,7 +233,7 @@
+ 
+ ### Graphics
+ 
+-The Mac window's picture rows, right after **Game**: **Display mode**, **Native resolution**, **Frame rate**, **Render scale**, **Upscaling**, **Fixed internal resolution**, **Shadow resolution**, **Anti-aliasing** and **Picture shape**, in this order. **Render scale** is a percent menu: 50/75/100/110/120 % writing `0.5`–`1.2` to `DM_RENDER_SCALE`, up to the game's ceiling (a build with a ceiling of `1.0` offers up to 100 %). A saved choice equivalent to an option, like `1.00`, reads as that option; one the list does not offer falls back to 100 %. A valid value fixed by an `env.txt` off the menu, like `0.95`, still applies and shows as **95 %** on its greyed-out row. The iPhone keeps the slider, with the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %).
++The Mac window's picture rows, right after **Game**: **Display mode**, **Native resolution**, **Frame rate**, **Render scale**, **Upscaling**, **Fixed internal resolution**, **Shadow resolution**, **Draw distance**, **Anti-aliasing** and **Picture shape**, in this order. **Render scale** is a percent menu: 50/75/100/110/120 % writing `0.5`–`1.2` to `DM_RENDER_SCALE`, up to the game's ceiling (a build with a ceiling of `1.0` offers up to 100 %). A saved choice equivalent to an option, like `1.00`, reads as that option; one the list does not offer falls back to 100 %. A valid value fixed by an `env.txt` off the menu, like `0.95`, still applies and shows as **95 %** on its greyed-out row. The iPhone keeps the slider, with the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %).
+ 
+ ### Switch 2 controllers
+ 
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -388,6 +388,174 @@
+     for site in (0x124eefc, 0x124ef00, 0x124ef04):
+         fs_put(site, [0xd503201f], 'dead shadow-table moves under the entry branch: never execute, recorded so text writes there are refused')
+     ctx.capabilities.add('SWX_BOTW_SHADOW_RES')
++    # Draw distance (state +0xBC float, the loader's resolved SWX_DRAW_DISTANCE factor: 1.0 Normal, 1.15, 1.2; absent or invalid resolves to
++    # Normal). Placed actors exist out to traverseDist x scale: a single fmul at main+0x10a4688 (the debug scale at [debug manager +0x310], or 1.0
++    # without its heap, rejoining at the shared 100 m fallback main+0x10a4678; resume +0x10a468c). The stub scales the product: under 2000 m
++    # max(game, min(game x factor, 1000 m)), from 2000 m game x factor with a 1.5x defensive cap; factor 1.0 runs the original multiply bit for
++    # bit. The terrain's distant trees (t = tree+0x14cb0; the constructor's 100/100/4000/500/4000) fade in on f0/f1, which stay the game's; range
++    # f2, fade f3 and detail f4 are scaled at the loads that consume them and never stored, so constructor rewrites and per-frame updates cannot
++    # accumulate: the shader setup (main+0x13c94ac, x21 = t) takes the far end twice and the fade width once, its per-frame update (main+0x13c8898,
++    # x12 = t+8) takes the far end for the cull and f4 for the detail test (the int at t+0x14cc is a block mask, untouched). x8/s2 and the flags are
++    # dead at the actor site (the site is a leaf fmul s0,s0,s1; only s0/s1 in, s0 out); x16/s4 are free in the setup's range block (x21 holds t,
++    # the block's only outputs are s1/s2); s1/s4 are dead at the update cull site (destinations written before any read on the path) and s4 at the
++    # detail site, while s3 is live there (spilled). x17 is LIVE at both update sites: the game holds 0x14 in w17 for a later orr w22,w8,w17, so both
++    # update stubs spill/restore x17 in their own stack window (the detail site's window grows from #0x10 to #0x20 for s3 + x17 + x8); the actor and
++    # setup stubs spill the x17/x8 they introduce for evidence (x8 untouched before the evidence window, so the spill saves the live entry value).
++    # Gate evidence (last-seen, overwrite every time, no branches; read by the renderer's periodic log): +0xBC factor, +0xC0 actor original, +0xC4
++    # actor effective, +0xC8 tree-f2 original, +0xCC tree-f2 effective, +0xD0/+0xD4 detail original/effective (detail only; the setup stub no longer
++    # writes the fade width there), +0xD8 u32 fire counter.
++    # Each stub stores original+effective via x17 (adrp x17 in the stub) and bumps +0xD8 with a dead-or-spilled w8 (add-imm sets no flags). Grass and terrain LOD
++    # are not scaled; the far plane is untouched.
++    fs_site(0x10a4688, '0008211e')
++    start = here()
++    emit_ops([
++        ('word', 0x1e210802),             # the game's distance: fmul s2,s0,s1 (s2 dead past the fallback's fcsel)
++        ('adrp', 8, FS_STATE_OFF),
++        ('word', 0xbd40bd01),            # ldr s1,[x8,#0xBC] draw-distance factor (s1 dead past the fmul)
++        ('word', 0x1e2e1000),            # fmov s0,#1.0
++        ('word', 0x1e202020),            # fcmp s1,s0
++        ('bcond', 0, 'norm'),            # Normal: the original multiply, bit for bit
++        ('word', 0x1e202028),            # fcmp s1,#0.0
++        ('bcond', 13, 'norm'),           # a non-positive slot (never written): the original multiply
++        ('word', 0x52a89f48),            # movz w8,#0x44fa,lsl#16 (2000.0)
++        ('word', 0x1e270100),            # fmov s0,w8
++        ('word', 0x1e202040),            # fcmp s2,s0
++        ('bcond', 11, 'near'),           # under 2000 m: max(game, min(game x factor, 1000 m))
++        ('word', 0x52a7f808),            # far: movz w8,#0x3fc0,lsl#16 (1.5)
++        ('word', 0x1e270100),            # fmov s0,w8
++        ('word', 0x1e205821),            # fmin s1,s1,s0 (the 1.5x defensive cap)
++        ('word', 0x1e210840),            # fmul s0,s2,s1
++        ('b', 'done'),
++        ('label', 'near'),
++        ('word', 0x1e210840),            # fmul s0,s2,s1
++        ('word', 0x52a88f48),            # movz w8,#0x447a,lsl#16 (1000.0)
++        ('word', 0x1e270101),            # fmov s1,w8 (factor dead)
++        ('word', 0x1e215800),            # fmin s0,s0,s1 (at most 1000 m)
++        ('word', 0x1e224800),            # fmax s0,s0,s2 (never under the game's)
++        ('b', 'done'),
++        ('label', 'norm'),
++        ('word', 0x1e204040),            # fmov s0,s2
++        ('label', 'done'),
++        ('word', 0xd10043ff),            # sub sp,sp,#0x10 (evidence window; s2 = original on all paths, s0 = effective)
++        ('word', 0xf90003f1),            # str x17,[sp] (spilled; x8/w8 dead with x8, s2/s0/flags as above)
++        ('adrp', 17, FS_STATE_OFF),
++        ('word', 0xbd00c222),            # str s2,[x17,#0xC0] actor original
++        ('word', 0xbd00c620),            # str s0,[x17,#0xC4] actor effective
++        ('word', 0xb940da28),            # ldr w8,[x17,#0xD8] fire counter
++        ('word', 0x11000508),            # add w8,w8,#1 (add-imm sets no flags)
++        ('word', 0xb900da28),            # str w8,[x17,#0xD8]
++        ('word', 0xf94003f1),            # ldr x17,[sp]
++        ('word', 0x910043ff),            # add sp,sp,#0x10
++    ])
++    emit(B(here(), 0x10a468c))
++    fs_put(0x10a4688, [B(0x10a4688, start)], 'placed-actor traverse distance x the draw-distance factor (Normal: the original multiply)')
++    fs_site(0x13c9578, 'a10a40bd')
++    start = here()
++    emit_ops([
++        ('adrp', 16, FS_STATE_OFF),
++        ('word', 0xbd40be04),            # ldr s4,[x16,#0xBC] factor (s4 free in this block)
++        ('word', 0x1e2f1001),            # fmov s1,#1.5 (s1 reloaded below)
++        ('word', 0x1e215884),            # fmin s4,s4,s1 (the 1.5x defensive cap)
++        ('word', 0xbd400aa1),            # ldr s1,[x21,#8] (original: the far end)
++        ('word', 0xd10043ff),            # sub sp,sp,#0x10 (x8/x17 spilled; x16/s4 free, s1 dest dead at entry, flags preserved: no flag setter)
++        ('word', 0xf90003e8),            # str x8,[sp]
++        ('word', 0xf90007f1),            # str x17,[sp,#8]
++        ('adrp', 17, FS_STATE_OFF),
++        ('word', 0xbd00ca21),            # str s1,[x17,#0xC8] f2 original
++        ('word', 0x1e240821),            # fmul s1,s1,s4 (effective; factor dead after)
++        ('word', 0xbd00ce21),            # str s1,[x17,#0xCC] f2 effective
++        ('word', 0xb940da28),            # ldr w8,[x17,#0xD8] fire counter
++        ('word', 0x11000508),            # add w8,w8,#1
++        ('word', 0xb900da28),            # str w8,[x17,#0xD8]
++        ('word', 0xf94003e8),            # ldr x8,[sp]
++        ('word', 0xf94007f1),            # ldr x17,[sp,#8]
++        ('word', 0x910043ff),            # add sp,sp,#0x10
++    ])
++    emit(B(here(), 0x13c957c))
++    fs_put(0x13c9578, [B(0x13c9578, start)], "distant trees' far end x the draw-distance factor")
++    fs_site(0x13c95c4, 'a10a412d')
++    start = here()
++    emit_ops([
++        ('adrp', 16, FS_STATE_OFF),
++        ('word', 0xbd40be04),            # ldr s4,[x16,#0xBC] factor
++        ('word', 0x1e2f1001),            # fmov s1,#1.5 (s1 reloaded below)
++        ('word', 0x1e215884),            # fmin s4,s4,s1 (the 1.5x defensive cap)
++        ('word', 0x2d410aa1),            # ldp s1,s2,[x21,#8] (original: the far end, the fade width)
++        ('word', 0xd10043ff),            # sub sp,sp,#0x10 (covers the cap branches; x8/x17 spilled, x16 dead after factor load, s1/s2 dests dead at entry, exit flags dead)
++        ('word', 0xf90003e8),            # str x8,[sp]
++        ('word', 0xf90007f1),            # str x17,[sp,#8]
++        ('adrp', 17, FS_STATE_OFF),
++        ('word', 0xbd00ca21),            # str s1,[x17,#0xC8] f2 original
++        ('word', 0x1e240821),            # fmul s1,s1,s4 (f2 effective)
++        ('word', 0x1e240842),            # fmul s2,s2,s4 (f4 scaled)
++        ('word', 0x52a88f50),            # movz w16,#0x447a,lsl#16 (1000.0)
++        ('word', 0x1e270204),            # fmov s4,w16 (factor dead)
++        ('word', 0x1e242040),            # fcmp s2,s4
++        ('bcond', 9, 'done3'),           # scaled fade width within 1000 m: keep it
++        ('word', 0xbd400ea2),            # ldr s2,[x21,#0xC] (the fade width again)
++        ('word', 0x1e242040),            # fcmp s2,s4
++        ('bcond', 10, 'done3'),          # the game's own already reaches 1000 m: keep it
++        ('word', 0x1e204082),            # fmov s2,s4
++        ('label', 'done3'),
++        ('word', 0xbd00ce21),            # str s1,[x17,#0xCC] f2 effective (final)
++        ('word', 0xb940da28),            # ldr w8,[x17,#0xD8] fire counter
++        ('word', 0x11000508),            # add w8,w8,#1
++        ('word', 0xb900da28),            # str w8,[x17,#0xD8]
++        ('word', 0xf94003e8),            # ldr x8,[sp]
++        ('word', 0xf94007f1),            # ldr x17,[sp,#8]
++        ('word', 0x910043ff),            # add sp,sp,#0x10
++    ])
++    emit(B(here(), 0x13c95c8))
++    fs_put(0x13c95c4, [B(0x13c95c4, start)], "distant trees' far end and fade width x the draw-distance factor (the fade capped as the actors')")
++    fs_site(0x13c8aec, '810140bd')
++    start = here()
++    emit_ops([
++        ('word', 0xd10043ff),            # sub sp,sp,#0x10 (x17 is LIVE: 0x14 for a later orr; x8 spilled for the counter temp)
++        ('word', 0xf90003e8),            # str x8,[sp]
++        ('word', 0xf90007f1),            # str x17,[sp,#8]
++        ('adrp', 17, FS_STATE_OFF),
++        ('word', 0xbd40be24),            # ldr s4,[x17,#0xBC] factor (s4 rewritten below on this path, dead at entry)
++        ('word', 0x1e2f1001),            # fmov s1,#1.5 (s1 reloaded below, dest dead at entry)
++        ('word', 0x1e215884),            # fmin s4,s4,s1 (the 1.5x defensive cap)
++        ('word', 0xbd400181),            # ldr s1,[x12] (original: the far end)
++        ('word', 0xbd00ca21),            # str s1,[x17,#0xC8] f2 original
++        ('word', 0x1e240821),            # fmul s1,s1,s4 (effective; factor dead after; flags preserved: no flag setter)
++        ('word', 0xbd00ce21),            # str s1,[x17,#0xCC] f2 effective
++        ('word', 0xb940da28),            # ldr w8,[x17,#0xD8] fire counter
++        ('word', 0x11000508),            # add w8,w8,#1
++        ('word', 0xb900da28),            # str w8,[x17,#0xD8]
++        ('word', 0xf94003e8),            # ldr x8,[sp]
++        ('word', 0xf94007f1),            # ldr x17,[sp,#8]
++        ('word', 0x910043ff),            # add sp,sp,#0x10
++    ])
++    emit(B(here(), 0x13c8af0))
++    fs_put(0x13c8aec, [B(0x13c8aec, start)], "distant trees' cull distance x the draw-distance factor")
++    fs_site(0x13c8b64, '840940bd')
++    start = here()
++    emit_ops([
++        ('word', 0xd10083ff),            # sub sp,sp,#0x20 (s3 live + x17 LIVE: 0x14 for a later orr + x8 for the counter temp)
++        ('word', 0xbd0003e3),            # str s3,[sp] (spilled; restored below)
++        ('word', 0xf90007f1),            # str x17,[sp,#8] (spilled; the 0x14 block-flags mask)
++        ('word', 0xf9000be8),            # str x8,[sp,#16]
++        ('adrp', 17, FS_STATE_OFF),
++        ('word', 0xbd40be23),            # ldr s3,[x17,#0xBC] factor
++        ('word', 0x1e2f1004),            # fmov s4,#1.5 (s4 reloaded below, dest dead at entry)
++        ('word', 0x1e245863),            # fmin s3,s3,s4 (the 1.5x defensive cap)
++        ('word', 0xbd400984),            # ldr s4,[x12,#8] (original: where the blocks change detail)
++        ('word', 0xbd00d224),            # str s4,[x17,#0xD0] f4 original
++        ('word', 0x1e230884),            # fmul s4,s4,s3 (effective; factor in s3 dead after; flags preserved)
++        ('word', 0xbd00d624),            # str s4,[x17,#0xD4] f4 effective
++        ('word', 0xb940da28),            # ldr w8,[x17,#0xD8] fire counter
++        ('word', 0x11000508),            # add w8,w8,#1
++        ('word', 0xb900da28),            # str w8,[x17,#0xD8]
++        ('word', 0xbd4003e3),            # ldr s3,[sp]
++        ('word', 0xf94007f1),            # ldr x17,[sp,#8]
++        ('word', 0xf9400be8),            # ldr x8,[sp,#16]
++        ('word', 0x910083ff),            # add sp,sp,#0x20
++    ])
++    emit(B(here(), 0x13c8b68))
++    fs_put(0x13c8b64, [B(0x13c8b64, start)], "distant trees' detail distance x the draw-distance factor")
++    ctx.capabilities.add('SWX_BOTW_DRAW_DISTANCE')
+     # Screen shape: a screen taller than 16:9 (the iPhone Duo's, about 1.43:1) gets a picture of its own shape instead of a stretched
+     # or cut one. The game's sizes are constants: the output size static [main+0x1e43dc0] (1920x1080; set in nnMain and by its getter main+0x1261880) that sizes the
+     # framework's window textures, the layout size static [main+0x1e43dd0] (1280x720; nnMain, getter main+0x12618dc), and the display mode switch main+0x1266074, which
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -85,6 +85,7 @@
+     uint32_t native_1440p; // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_1440P capability, patch_nso.py): 0 = no such stub
+     uint32_t native_4k; // the 4K stubs read state +0xB4 as SWX_RES_BYPASS (the fixups table's SWX_NATIVE_4K capability, patch_nso.py): 0 = no such stub
+     uint32_t shadow_res; // the sun-shadow stub reads state +0xB8 as SWX_SHADOW_RESOLUTION (the fixups table's SWX_BOTW_SHADOW_RES capability, patch_nso.py): 0 = no such stub
++    uint32_t draw_distance; // the draw-distance stubs read state +0xBC as SWX_DRAW_DISTANCE (the fixups table's SWX_BOTW_DRAW_DISTANCE capability, patch_nso.py): 0 = no such stub
+     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
+     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -284,6 +284,7 @@
+         else if (!strcmp(key, "SWX_NATIVE_1440P")) m->native_1440p = (uint32_t)v;
+         else if (!strcmp(key, "SWX_NATIVE_4K")) m->native_4k = (uint32_t)v;
+         else if (!strcmp(key, "SWX_BOTW_SHADOW_RES")) m->shadow_res = (uint32_t)v;
++        else if (!strcmp(key, "SWX_BOTW_DRAW_DISTANCE")) m->draw_distance = (uint32_t)v;
+         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+         else if (!strcmp(key, "VFR_FRAMEPACE")) m->vfr_framepace = (uint32_t)v;
+         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
+@@ -336,6 +337,7 @@
+ static int g_native_1440p = 0;   // the canvas/heap stubs read state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_1440P in its fixups table); 0 = no such stub
+ static int g_native_4k = 0;   // the 4K stubs read state +0xB4 as SWX_RES_BYPASS (SWX_NATIVE_4K in its fixups table); 0 = no such stub
+ static int g_shadow_res = 0;   // the sun-shadow stub reads state +0xB8 as SWX_SHADOW_RESOLUTION (SWX_BOTW_SHADOW_RES in its fixups table); 0 = no such stub
++static int g_draw_distance = 0;   // the draw-distance stubs read state +0xBC as SWX_DRAW_DISTANCE (SWX_BOTW_DRAW_DISTANCE in its fixups table); 0 = no such stub
+ static int g_bypass_mem_1440 = 0;   // the frontend confirmed a 1440p boot: the guest heap reservation grows by 512 MiB
+ static int g_bypass_mem_4k = 0;   // the frontend confirmed a 4K boot: the guest heap reservation grows by 960 MiB
+ int swx_mem_reserve_fixed(void);   // hle_svc.c: nonzero once the guest address space is reserved
+@@ -360,12 +362,16 @@
+     g_native_1440p = (int)m->native_1440p;
+     g_native_4k = (int)m->native_4k;
+     g_shadow_res = (int)m->shadow_res;
++    g_draw_distance = (int)m->draw_distance;
+     if (g_native_1080p || g_native_1440p || g_native_4k) {   // the bypass slot (+0xB4 u32) lives past the VFR words
+         if (m->fps_state_off + 0xB8 > m->size) die("%s: frame step state page too small for the bypass word", m->name);
+     }
+     if (g_shadow_res) {   // the shadow selector (+0xB8 u32) lives past the bypass slot
+         if (m->fps_state_off + 0xBC > m->size) die("%s: frame step state page too small for the shadow word", m->name);
+     }
++    if (g_draw_distance) {   // the draw-distance factor (+0xBC float) and its gate-evidence slots (+0xC0..+0xD8) live past the shadow word
++        if (m->fps_state_off + 0xDC > m->size) die("%s: frame step state page too small for the draw-distance word", m->name);
++    }
+     // A stub that otherwise only lowers the size takes the macOS ceiling (RENDER_SCALE_MAX_PCT, percent); iOS keeps the legacy ceiling. No field: the legacy ceiling on both.
+ #if TARGET_OS_IPHONE
+     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+@@ -461,6 +467,26 @@
+             LOG("%s: sun shadows: %s (SWX_SHADOW_RESOLUTION)", g_fps_mod, sel ? "High" : "Console");
+         } else if (sr && *sr && strcmp(sr, "0") && strcmp(sr, "896")) {
+             LOG("[RED] SWX_SHADOW_RESOLUTION=%s: this build declares no SWX_BOTW_SHADOW_RES stub; using the stock path", sr);
++        }
++    }
++    // Draw distance (state +0xBC float, Breath of the Wild 1.9.0's draw-distance stubs): SWX_DRAW_DISTANCE=1.15/1.2 selects
++    // its preset factor (1.0, 0 or absent keeps Normal), anything else warning to Normal. Resolved once here, before the guest
++    // starts, so the stubs and the renderer read the same value; the renderer never re-parses the env (mtl_swx_draw_distance).
++    // Written only for builds whose stubs read it (SWX_BOTW_DRAW_DISTANCE in their fixups table)
++    {
++        float factor = 1.0f;
++        const char *dd = getenv("SWX_DRAW_DISTANCE");
++        if (g_draw_distance) {
++            if (!dd || !*dd || !strcmp(dd, "0") || !strcmp(dd, "1.0")) factor = 1.0f;
++            else if (!strcmp(dd, "1.15")) factor = 1.15f;
++            else if (!strcmp(dd, "1.2")) factor = 1.2f;
++            else LOG("[RED] SWX_DRAW_DISTANCE=%s: must be 1.0, 1.15 or 1.2; using Normal", dd);
++            memcpy(dm_fps_state + 0xBC, &factor, sizeof factor);
++            memset(dm_fps_state + 0xC0, 0, 0xDC - 0xC0);   // gate evidence (+0xC0..+0xD8): actor/f2/f4 original+effective + fire counter, zeroed until the stubs publish (last-seen)
++            extern void mtl_swx_draw_distance(float factor); mtl_swx_draw_distance(factor);   // the renderer keeps the resolved factor (nvn_mtl.m, as mtl_present_screen)
++            LOG("%s: draw distance x%.2f (SWX_DRAW_DISTANCE)", g_fps_mod, factor);
++        } else if (dd && *dd && strcmp(dd, "0") && strcmp(dd, "1.0")) {
++            LOG("[RED] SWX_DRAW_DISTANCE=%s: this build declares no SWX_BOTW_DRAW_DISTANCE stub; using the stock path", dd);
+         }
+     }
+     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -62,6 +62,7 @@
+ #include "nvn_owner.h"   // the serial tables (serial_put, tex_put, tex_get, the pins, the held counts) and their lock g_smu
+ #include "../../host/dm.h"
+ #import <CommonCrypto/CommonDigest.h>
++#include <math.h>   // log2f: the draw-distance texture bias from the resolved factor
+ #include <stdarg.h>
+ #include <mach-o/dyld.h>
+ #include <mach-o/fat.h>
+@@ -8049,6 +8050,7 @@
+     tex_t image = *t; image.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+     mtl_reg_tex(tid, &image, v);
+ }
++static void **g_sview_dd; static uint64_t *g_srid_dd; static void **g_sview_ddw; static uint64_t *g_srid_ddw; static uint64_t *g_sdd_gen; static int g_sdd_n;   // draw-distance bias variants, defined beside samp_by_id
+ void mtl_reg_samp(int sid, const samp_par *sp) {
+     int id_ = sid; if (id_ < 0) return;
+     os_unfair_lock_lock(&g_rmu);
+@@ -8058,6 +8060,10 @@
+         memset(g_sview_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_sview_w); memset(g_srid_w + g_nsreg, 0, (n - g_nsreg) * sizeof *g_srid_w); g_nsreg = n; }
+     if (g_sview[id_]) { CFRelease(g_sview[id_]); g_sview[id_] = NULL; g_srid[id_] = 0; }
+     if (g_sview_w[id_]) { CFRelease(g_sview_w[id_]); g_sview_w[id_] = NULL; g_srid_w[id_] = 0; }
++    if (g_sview_dd && id_ < g_sdd_n) {   // a re-registered sampler retires its draw-distance variants (NULL in Normal: one predictable branch, no behaviour change)
++        if (g_sview_dd[id_]) { defer_obj_release((__bridge id)g_sview_dd[id_]); CFRelease(g_sview_dd[id_]); g_sview_dd[id_] = NULL; g_srid_dd[id_] = 0; }
++        if (g_sview_ddw[id_]) { defer_obj_release((__bridge id)g_sview_ddw[id_]); CFRelease(g_sview_ddw[id_]); g_sview_ddw[id_] = NULL; g_srid_ddw[id_] = 0; }
++        g_sdd_gen[id_] = 0; }
+     g_sreg[id_] = *sp; g_sreg_ok[id_] = 1;
+     int bn, bw; float k[4]; const uint8_t wrap[3] = {sp->ws, sp->wt, sp->wr};
+     if (nvn_border(sp->border, wrap, sp->reduction, &bn, &bw, k)) atomic_store(&g_border_any, 1);
+@@ -8435,36 +8441,39 @@
+         case 6: return MTLSamplerAddressModeMirrorRepeat; }
+     return MTLSamplerAddressModeRepeat;
+ }
+-static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
+-    if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
+-    if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
+-    if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
+-    samp_par p = g_sreg[sid];
++static id<MTLSamplerState> samp_make_locked(const samp_par *p, int border) {   // Caller holds g_rmu; one sampler of samp_by_id's pair (border: its Metal border colour)
+     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
+-    d.magFilter = p.magf ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+-    d.minFilter = (p.minf == 1 || p.minf == 3 || p.minf == 5) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+-    d.mipFilter = p.minf <= 1 ? MTLSamplerMipFilterNotMipmapped : (p.minf == 2 || p.minf == 3) ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
+-    d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
+-    d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
+-    d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
+-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+-    if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
++    d.magFilter = p->magf ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
++    d.minFilter = (p->minf == 1 || p->minf == 3 || p->minf == 5) ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
++    d.mipFilter = p->minf <= 1 ? MTLSamplerMipFilterNotMipmapped : (p->minf == 2 || p->minf == 3) ? MTLSamplerMipFilterNearest : MTLSamplerMipFilterLinear;
++    d.sAddressMode = wrapm(p->ws); d.tAddressMode = wrapm(p->wt); d.rAddressMode = wrapm(p->wr);
++    d.lodMinClamp = p->lod_min < 0 ? 0 : p->lod_min; d.lodMaxClamp = p->lod_max;
++    d.lodBias = p->lod_bias < -16 ? -16 : p->lod_bias > 15.99f ? 15.99f : p->lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
++    d.maxAnisotropy = p->aniso < 1 ? 1 : p->aniso > 16 ? 16 : (NSUInteger)p->aniso;
++    if (p->cmp_mode) d.compareFunction = (MTLCompareFunction)(p->cmp_func - 1);
+     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
+     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
+     // with a nearest or no mip filter, so such samplers filter mips linearly: at the integer LODs reductions are used with that gives the same level, and a sampler without mips keeps to the base
+     // level through the LOD clamp
+-    if (p.reduction == 1 || p.reduction == 2) {
+-        d.reductionMode = p.reduction == 1 ? MTLSamplerReductionModeMinimum : MTLSamplerReductionModeMaximum;
++    if (p->reduction == 1 || p->reduction == 2) {
++        d.reductionMode = p->reduction == 1 ? MTLSamplerReductionModeMinimum : MTLSamplerReductionModeMaximum;
+         if (d.mipFilter == MTLSamplerMipFilterNotMipmapped) { d.lodMinClamp = 0; d.lodMaxClamp = 0; }
+         d.mipFilter = MTLSamplerMipFilterLinear;
+     }
++    d.borderColor = (MTLSamplerBorderColor)border;
++    d.supportArgumentBuffers = YES;
++    return [g_dev newSamplerStateWithDescriptor:d];
++}
++static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
++    if (g_spool_n && sid >= g_spool_n) { if (!g_stat_samp_oob++) MLOG("sampler ID %d outside the pool (capacity %d) treated as an empty slot", sid, g_spool_n); return nil; }
++    if (sid < 0 || sid >= g_nsreg || !g_sreg_ok[sid]) { RED_ONCE(12, "sampler ID %d not registered", sid); return nil; }
++    if (g_sview[sid]) return (__bridge id<MTLSamplerState>)g_sview[sid];
++    samp_par p = g_sreg[sid];
+     int bn, bw; float k[4]; const uint8_t wrap[3] = { p.ws, p.wt, p.wr }; int twin = nvn_border(p.border, wrap, p.reduction, &bn, &bw, k);   // border colours Metal lacks (nvn_border.h)
+-    d.borderColor = (MTLSamplerBorderColor)bn;
+-    d.supportArgumentBuffers = YES;
+-    id<MTLSamplerState> s = [g_dev newSamplerStateWithDescriptor:d];
++    id<MTLSamplerState> s = samp_make_locked(&p, bn);
+     if (s) { g_sview[sid] = (void *)CFBridgingRetain(s); g_srid[sid] = s.gpuResourceID._impl; }
+     if (s && twin) {
+-        d.borderColor = (MTLSamplerBorderColor)bw; id<MTLSamplerState> t = [g_dev newSamplerStateWithDescriptor:d];
++        id<MTLSamplerState> t = samp_make_locked(&p, bw);
+         if (t) { g_sview_w[sid] = (void *)CFBridgingRetain(t); g_srid_w[sid] = t.gpuResourceID._impl; memcpy(g_sbk[sid], k, sizeof k); }
+         static int nlog; if (nlog++ < 16) MLOG("sampler ID %d: border colour %g,%g,%g,%g, which Metal lacks: Metal colour %d, corrected in the shaders through a twin of colour %d", sid, p.border[0], p.border[1], p.border[2], p.border[3], bn, bw);
+     }
+@@ -8474,6 +8483,55 @@
+     if (sid > 0 && sid < g_nsreg && g_sreg_ok[sid] && g_sview[sid]) return g_sview[sid];
+     return (__bridge void *)samp_by_id(sid);
+ }
++// SWX_DRAW_DISTANCE (draw distance): at higher factors the host biases the fragment stage's eligible samplers towards the sharper mips, -log2(factor)
++// (1.0 → 0, 1.15 → -0.202, 1.2 → -0.263), added to the game's own bias. The loader publishes the resolved factor at boot (dm_fps_state_apply in
++// dm/host/loader.c, the same hand-off as mtl_present_screen): the renderer keeps the factor and the bias, and the sampler binding below reads them.
++// Only the fragment stage's SAMPT combined handles are biased (the handle carries texture and sampler together, so co-use is proven); separate
++// SAMP slots keep the game's sampler, as do arrays, uniform / driver-table handles and pools, as do all other stages. A variant is created per sampler ID once per bias and cached
++// beside the game's sampler, with its own border twin when a binding needs it; the argument block holds its resource ID, so the direct and the recorder's
++// replayed draws (both encode through encode_args_) read it the same way, as copy_t2t_draw's tables do. Eligibility is decided per encode: a blend-state
++// change dirties the fragment stage's argument generation, so an opaque and a blending pipeline sharing a shader each get their own decision.
++static float g_dd_factor = 1.0f;   // the resolved factor (1.0 / 1.15 / 1.2); 1.0 or unresolved keeps the stock path
++static float g_dd_bias;            // the additional texture bias, -log2(factor)
++static uint64_t g_dd_gen;          // the bias epoch: bumped when the bias changes, retiring the cached variants
++static void **g_sview_dd; static uint64_t *g_srid_dd;       // a sampler ID's bias variant (retained, NULL = none)
++static void **g_sview_ddw; static uint64_t *g_srid_ddw;    // its border twin for bw bindings (NULL = none, or not needed)
++static uint64_t *g_sdd_gen; static int g_sdd_n;            // the epoch each variant was made in (current while == g_dd_gen), and the arrays' capacity in IDs
++static uint64_t g_dd_examined, g_dd_applied, g_dd_made, g_dd_kept;   // fragment pairs seen, slots biased, variants created, pairs kept on the game's sampler
++extern uint8_t *dm_fps_state;   // frame-step state page (loader.c install_fps_state): +0xC0 float actor original, +0xC4 effective, +0xC8 tree-f2 original, +0xCC effective, +0xD0/+0xD4 detail original/effective (detail only), +0xD8 u32 fires; NULL when the build has none (the loader zeroes the words at publish)
++static int fmt_int_or_ds(MTLPixelFormat f);
++void mtl_swx_draw_distance(float factor) {   // the loader's resolved factor at boot (as mtl_present_screen); not static, as that one
++    float f = !(factor >= 1.0f) ? 1.0f : factor;
++    float bias = f == 1.0f ? 0.0f : -log2f(f);
++    os_unfair_lock_lock(&g_rmu);
++    if (bias != g_dd_bias) { g_dd_factor = f; g_dd_bias = bias; g_dd_gen++; args_dirty_all(); }   // a new bias re-encodes the argument blocks, which hold sampler resource IDs
++    os_unfair_lock_unlock(&g_rmu);
++    { static int once; if (!once++) MLOG("draw distance: factor %.2f (texture bias %.3f)%s (SWX_DRAW_DISTANCE)", f, bias, bias == 0.0f ? ", the stock path" : ""); }
++}
++static void dd_ensure_locked(void) {   // Caller holds g_rmu; grows the variant arrays to the sampler table, lazily (Normal never allocates them)
++    if (g_sdd_n >= g_nsreg) return;
++    int n = g_nsreg, o = g_sdd_n;
++    g_sview_dd = realloc_or_die(g_sview_dd, n * sizeof *g_sview_dd, "the draw-distance sampler variants");
++    g_srid_dd = realloc_or_die(g_srid_dd, n * sizeof *g_srid_dd, "the draw-distance sampler variants");
++    g_sview_ddw = realloc_or_die(g_sview_ddw, n * sizeof *g_sview_ddw, "the draw-distance sampler variants");
++    g_srid_ddw = realloc_or_die(g_srid_ddw, n * sizeof *g_srid_ddw, "the draw-distance sampler variants");
++    g_sdd_gen = realloc_or_die(g_sdd_gen, n * sizeof *g_sdd_gen, "the draw-distance sampler variants");
++    memset(g_sview_dd + o, 0, (n - o) * sizeof *g_sview_dd); memset(g_srid_dd + o, 0, (n - o) * sizeof *g_srid_dd);
++    memset(g_sview_ddw + o, 0, (n - o) * sizeof *g_sview_ddw); memset(g_srid_ddw + o, 0, (n - o) * sizeof *g_srid_ddw);
++    memset(g_sdd_gen + o, 0, (n - o) * sizeof *g_sdd_gen); g_sdd_n = n;
++}
++static id<MTLSamplerState> dd_variant_locked(int sid, int twin) {   // Caller holds g_rmu; the cached bias variant (twin: its border twin), made on first use
++    dd_ensure_locked();
++    void **slot = twin ? &g_sview_ddw[sid] : &g_sview_dd[sid];
++    uint64_t *rid = twin ? &g_srid_ddw[sid] : &g_srid_dd[sid];
++    if (*slot && g_sdd_gen[sid] == g_dd_gen) return (__bridge id<MTLSamplerState>)*slot;
++    if (*slot) { defer_obj_release((__bridge id)*slot); CFRelease(*slot); *slot = NULL; *rid = 0; }   // an older bias: retired once its submissions complete
++    samp_par p = g_sreg[sid]; p.lod_bias += g_dd_bias;
++    int bn, bw; float k[4]; const uint8_t wrap[3] = { p.ws, p.wt, p.wr }; nvn_border(p.border, wrap, p.reduction, &bn, &bw, k);
++    id<MTLSamplerState> s = samp_make_locked(&p, twin ? bw : bn);
++    if (s) { *slot = (void *)CFBridgingRetain(s); *rid = s.gpuResourceID._impl; g_sdd_gen[sid] = g_dd_gen; g_dd_made++; }
++    return s;
++}
+ 
+ // ---------- Argument buffer blocks: one block per submission, reclaimed after the GPU completes ----------
+ @interface NvArena : NSObject { @public id<MTLBuffer> buf; uint8_t *cpu; uint64_t gpu, fence; size_t used, len; } @end   // len: buf.length and cpu: buf.contents, kept so an allocation and its writes send no message
+@@ -8553,6 +8611,32 @@
+ static inline void args_dirty(int st) { g_args_gen[st] = ++g_args_seq; }
+ static inline void args_dirty_ubo(int st) { g_args_ugen[st] = ++g_args_seq; }
+ static inline void args_dirty_all(void) { for (int st = 0; st < 6; st++) args_dirty(st); }
++static int dd_pick_locked(int nvn_stage, const nvn_rbind *b, int sid, __unsafe_unretained id<MTLSamplerState> *ss, uint64_t *rid) {
++    // The bias variant for a fragment-stage SAMPT pair, 1 with *ss / *rid naming it (for the slot and the residency note); 0 keeps the game's sampler. Caller holds g_rmu
++    if (g_dd_bias == 0.0f || nvn_stage != 1) return 0;   // Normal (factor 1.0) or unresolved: the stock path, no variant
++    if (b->kind != NVN_RB_SAMPT) return 0;   // only the combined handle proves texture / sampler co-use; separate SAMP slots keep the game's sampler
++    if (sid <= 0 || sid >= g_nsreg || !g_sreg_ok[sid]) return 0;
++    const samp_par *p = &g_sreg[sid];
++    g_dd_examined++;
++    if (S.color.blend_en) { g_dd_kept++; return 0; }   // opaque materials only: a draw that blends (UI, particles, effects) keeps the game's sampler
++    if (p->cmp_mode || p->magf != 1 || (p->minf != 3 && p->minf != 5)) { g_dd_kept++; return 0; }   // no depth compare; linear min / mag filtering only (refs/savage-wind sampler_user_lod_bias)
++    uint64_t h = b->reg < NTEX ? bound_handle(S.tex[nvn_stage][b->reg]) : 0;   // SAMPT: the pair of the combined handle
++    int tid = (int)(h & 0xfffff);
++    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) { g_dd_kept++; return 0; }
++    void *tv = NULL; tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
++    if (!t || t.textureType != MTLTextureType2D || t.mipmapLevelCount < 2 || (t.usage & MTLTextureUsageRenderTarget) || fmt_int_or_ds(t.pixelFormat)) { g_dd_kept++; return 0; }
++    int twin = b->bw && g_sview_w[sid] != NULL;   // a bw binding of a border twin: the variant needs its twin too
++    id<MTLSamplerState> v = dd_variant_locked(sid, twin);
++    if (!v) { g_dd_kept++; return 0; }
++    *ss = v; *rid = twin ? g_srid_ddw[sid] : g_srid_dd[sid];
++    g_dd_applied++;
++    { static int once; if (!once++) MLOG("draw distance %.2f: first biased sampler (effective bias %.3f): sampler ID %d on texture ID %d, %lux%lu, %lu mips", g_dd_factor, p->lod_bias + g_dd_bias, sid, tid, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.mipmapLevelCount); }
++    { uint64_t frame = atomic_load(&g_cur_frame); static uint64_t last;   // aggregate counters, at most one line per 3600 frames (as [fxcas])
++        if (frame - last >= 3600) { last = frame; float ao = 0, ae = 0, f2o = 0, f2e = 0, f4o = 0, f4e = 0; uint32_t fires = 0;
++            if (dm_fps_state) { memcpy(&ao, dm_fps_state + 0xC0, 4); memcpy(&ae, dm_fps_state + 0xC4, 4); memcpy(&f2o, dm_fps_state + 0xC8, 4); memcpy(&f2e, dm_fps_state + 0xCC, 4); memcpy(&f4o, dm_fps_state + 0xD0, 4); memcpy(&f4e, dm_fps_state + 0xD4, 4); memcpy(&fires, dm_fps_state + 0xD8, 4); }
++            MLOG("draw distance %.2f: %llu fragment pairs examined, %llu biased through %llu variants, %llu kept on the game's sampler (actor %.1f->%.1f f2 %.1f->%.1f f4 %.1f->%.1f fires %u)", g_dd_factor, (unsigned long long)g_dd_examined, (unsigned long long)g_dd_applied, (unsigned long long)g_dd_made, (unsigned long long)g_dd_kept, ao, ae, f2o, f2e, f4o, f4e, fires); } }
++    return 1;
++}
+ static inline int args_changed(int st) { return g_args_gen[st] > g_args_wrote[st] || g_args_ugen[st] > g_args_wrote[st]; }   // a binding of the stage changed since it last wrote a block
+ // A deferred inline update changes what the draws after it read through the uniform bindings it overlaps (they get a shadow): the argument blocks of those stages are written again.
+ // Only those: marking every stage made each later draw encode all of its blocks again, which with the updates kept across passes cost about 1.5 ms a frame in Breath of the Wild.
+@@ -11834,6 +11918,9 @@
+     if (atomic_exchange(&g_warm_stop, 1)) return;
+     if (atomic_load(&g_warm_running)) MLOG("pipeline prewarm stopped: the process is ending (%llu lines done)", (unsigned long long)g_warm_done);
+     if (atomic_load(&g_pre_running)) MLOG("pipeline prebuild stopped: the process is ending (%d pairs handed out)", (int)atomic_load(&g_pre_next));
++    { float ao = 0, ae = 0, f2o = 0, f2e = 0, f4o = 0, f4e = 0; uint32_t fires = 0;   // draw-distance shutdown summary: once per run in every mode, even short ones (the 3600-frame aggregate never fires there)
++        if (dm_fps_state) { memcpy(&ao, dm_fps_state + 0xC0, 4); memcpy(&ae, dm_fps_state + 0xC4, 4); memcpy(&f2o, dm_fps_state + 0xC8, 4); memcpy(&f2e, dm_fps_state + 0xCC, 4); memcpy(&f4o, dm_fps_state + 0xD0, 4); memcpy(&f4e, dm_fps_state + 0xD4, 4); memcpy(&fires, dm_fps_state + 0xD8, 4); }
++        MLOG("draw distance summary: factor %.2f: %llu fragment pairs examined, %llu biased through %llu variants, %llu kept on the game's sampler (actor %.1f->%.1f f2 %.1f->%.1f f4 %.1f->%.1f fires %u)", g_dd_factor, (unsigned long long)g_dd_examined, (unsigned long long)g_dd_applied, (unsigned long long)g_dd_made, (unsigned long long)g_dd_kept, ao, ae, f2o, f2e, f4o, f4e, fires); }
+ }
+ // Wait for the background warm-up to finish (at most timeout_ms): returns how many milliseconds were actually waited, 0 if it is not running. On first install the system shader cache is fully cold; if warm-up is slower than the player entering a run,
+ // pipelines not yet warmed are compiled on the spot on the submit thread = in-run stutter; the loading screen on entering a run blocks the player anyway, so let it load a little longer (called where hle_nvn.c presents).
+@@ -13672,7 +13759,11 @@
+         } else if (b->kind == NVN_RB_SAMP || b->kind == NVN_RB_SAMPT || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SAMPI) {   // SAMPT: the sampler part of a combined handle (texture ID | sampler ID << 20); SAMPU: the same, with the handle in a uniform buffer
+             int sid = bind_sid(nvn_stage, b);
+             __unsafe_unretained id<MTLSamplerState> ss = sid ? (__bridge id<MTLSamplerState>)samp_fast(sid) : nil;
+-            if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_rewrite.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
++            uint64_t dd_rid = 0;   // draw distance: the bias variant's resource ID when the pair takes one (0: the game's sampler below)
++            if (ss && b->kind == NVN_RB_SAMPT && dd_pick_locked(nvn_stage, b, sid, &ss, &dd_rid)) {
++                slots[aid] = dd_rid;
++                if (b->bw && g_sview_w[sid]) { bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]); }   // the variant's twin keeps the game's border factors: only the bias differs (a border-bit shader without a twin keeps the plain path below)
++            } else if (b->bw && ss && g_sview_w[sid]) {   // a twin (dmsh_rewrite.py border_emu) of a sampler whose border colour Metal lacks: the shader corrects its samples
+                 ss = (__bridge id<MTLSamplerState>)g_sview_w[sid]; slots[aid] = g_srid_w[sid];
+                 bmask |= 1u << (b->bw - 1); memcpy(bk[b->bw - 1], g_sbk[sid], sizeof bk[0]);
+             } else slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();   // a twin of any other sampler is never sampled
+@@ -14054,7 +14145,7 @@
+                 case 4: dst = &S.poly; n = sizeof S.poly; break;
+                 case 5: dst = &S.ds; n = sizeof S.ds; break;
+             }
+-            if (dst && memcmp(dst, b->bytes, n)) { memcpy(dst, b->bytes, n); if (b->kind == 5) g_dss_dirty = 1; else g_pso_dirty = 1; }
++            if (dst && memcmp(dst, b->bytes, n)) { memcpy(dst, b->bytes, n); if (b->kind == 5) g_dss_dirty = 1; else g_pso_dirty = 1; if (b->kind == 1) args_dirty(1); }   // S.color.blend_en gates the draw-distance bias (dd_pick_locked): a blend change re-decides the fragment block, as fxcas does
+             break;
+         }
+         case OP_BIND_VATTR: { const p_bind_vattr *b = a; if (S.nattr != b->n || memcmp(S.attr, b->st, 4 * b->n)) { memcpy(S.attr, b->st, 4 * b->n); S.nattr = b->n; g_pso_dirty = 1; } break; }
