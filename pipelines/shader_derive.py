@@ -27,7 +27,7 @@ import os
 import shutil
 import sys
 
-from shader_convert import convert_list
+from shader_convert import convert_list, unpack_key, short_name, MNG_VS, MNG_FS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -80,7 +80,9 @@ def read_mng_list(path):
     """Return (s_rows, pair_list) with 16-hex keys.
 
     s_rows: [(key16_b, stage)]. pair_list: [(vs16, fs16)] from R/B/T rows
-    whose variants parse (variant = <key64>-<suffix>_b).
+    whose variants parse (variant = <key64>-<suffix>_b). R/B/T keys come in
+    two wire formats (packed vs:fs:state or the raw hex of the 544-byte
+    key); unpack_key handles both, the names are read from the blob.
     """
     s_rows, pairs = [], []
     with open(path, encoding="utf-8") as f:
@@ -93,6 +95,14 @@ def read_mng_list(path):
             if kind == "S" and len(p) > 2 and len(p[1]) >= 16:
                 s_rows.append((p[1][:16] + "_b", p[2]))
             elif kind in ("R", "B", "T") and len(p) > 1:
+                blob = unpack_key(p[1])
+                if blob is not None:
+                    vs = short_name(blob[MNG_VS:MNG_VS + 80].split(b"\0")[0].decode("ascii", errors="replace"))
+                    fs_raw = blob[MNG_FS:MNG_FS + 80].split(b"\0")[0].decode("ascii", errors="replace")
+                    fs = short_name(fs_raw) if fs_raw else None
+                    if vs and fs:
+                        pairs.append((vs[:-2], fs[:-2]))
+                    continue
                 fields = p[1].split(":")
                 if len(fields) >= 2:
                     vs, fs = fields[0][:16], fields[1][:16]
@@ -136,8 +146,8 @@ def build_derived(profile_dir, mng_list, out_dir):
     Excludes patches.py (patch_nso.py aborts on duplicate build IDs across
     repo + DM_GAMES_DIR overlays) and leaves the split-validated tables
     (shader_map/facts/pairs) byte-identical, so the split check passes.
-    Only pso_manifest.tsv grows: converted community R rows the profile
-    lacks. Returns stats.
+    Only pso_manifest.tsv grows: converted community R rows and S shader
+    rows the profile lacks. Returns stats.
     """
     keys, pairs, _ = read_profile(profile_dir)
     converted, conv_stats = convert_list(mng_list, keys)
@@ -147,7 +157,7 @@ def build_derived(profile_dir, mng_list, out_dir):
     shutil.copytree(profile_dir, out_dir,
                     ignore=shutil.ignore_patterns("__pycache__", ".DS_Store", "patches.py"))
 
-    have = set()
+    have, have_s = set(), set()
     mpath = os.path.join(out_dir, "pso_manifest.tsv")
     if os.path.isfile(mpath):
         with open(mpath, encoding="utf-8") as f:
@@ -155,16 +165,34 @@ def build_derived(profile_dir, mng_list, out_dir):
                 line = line.strip()
                 if line.startswith("R\t"):
                     have.add(line.split("\t", 1)[1])
+                elif line.startswith("S\t"):
+                    have_s.add(line.split("\t", 2)[1])
     new_rows = [h for h in converted if h not in have]
     with open(mpath, "a", encoding="utf-8") as f:
         f.write("# SWX: converted community pipelines below (mac-nativegames R/B/T rows)\n")
         for h in new_rows:
             f.write(f"R\t{h}\n")
+    # S rows: community shaders the seed lacks (key in the map, numeric stage)
+    s_rows, _ = read_mng_list(mng_list)
+    s_add, seen_s = [], set()
+    for key_b, stage in s_rows:
+        if key_b in have_s or key_b in seen_s or key_b[:-2] not in keys:
+            continue
+        if stage not in ("0", "1", "2", "3", "4", "5"):
+            continue
+        seen_s.add(key_b)
+        s_add.append((key_b, stage))
+    if s_add:
+        with open(mpath, "a", encoding="utf-8") as f:
+            f.write("# SWX: community shaders the seed lacks (mac-nativegames S rows)\n")
+            for key_b, stage in s_add:
+                f.write(f"S\t{key_b}\t{stage}\n")
 
     stats = {
         "profile_keys": len(keys),
         "converted_rows": len(converted),
         "manifest_rows_added": len(new_rows),
+        "manifest_s_added": len(s_add),
         "skipped": {k: v for k, v in conv_stats.items()
                     if k not in ("rows_seen", "converted")},
     }

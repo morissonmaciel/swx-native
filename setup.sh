@@ -140,8 +140,9 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
   TITLE_ID="01007EF00011E000"
   # Community pipelines (append_shaders.py): re-enabled — required to
   # (re)materialize the derived overlay, which is the build's active profile
-  # (DM_GAMES_DIR) and the trio/manifest source. The MNG list itself currently
-  # contributes 0 new pairs/rows, so this changes nothing content-wise.
+  # (DM_GAMES_DIR) and the trio/manifest source. The MNG list adds exact R
+  # rows (and S shader rows) the seed lacks; its pairs are already covered
+  # by the profile. Additive only, validated in /tmp before install.
   "$VENV/bin/python" "$ROOT/pipelines/append_shaders.py" --install-dir "$INSTALL_DIR" \
     || fail "append_shaders failed (see output above)."
   # Patches first: clone the pristine core to /tmp and patch the copy, so the

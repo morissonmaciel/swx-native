@@ -12,7 +12,7 @@ Derives community coverage for the core profile
 Work happens in /tmp/swx-pipelines-<hash> (hash over the inputs, same
 inputs reuse the same path; deleted and rebuilt every run, like patches/).
 Validated there (pair keys resolve, split tables byte-identical,
-no patches.py, manifest only gains R rows); then installed into <I>.
+no patches.py, manifest only gains checked R/S rows); then installed into <I>.
 
 Usage: append_shaders.py --install-dir <I> [--core <dir>] [--title-id <id>] [--mng-list <file>] [--check]
   --check validates everything in tmp and discards it; touches nothing in <I>.
@@ -118,22 +118,30 @@ def validate(out_dir, profile_dir, title_id):
     if (derived / "patches.py").exists():
         die("overlay must exclude patches.py")
     print("overlay ok: validated tables identical, no patches.py")
-    # 3. manifest only gains R rows (plus comments)
+    # 3. manifest only gains R rows and checked S rows (plus comments)
     base_rows = set()
     mpath = profile_dir / "pso_manifest.tsv"
     if mpath.is_file():
         with open(mpath, encoding="utf-8") as f:
             base_rows = {ln for ln in (l.rstrip("\n") for l in f)
                          if ln and not ln.startswith("#")}
-    new_rows = 0
+    new_r = new_s = 0
     with open(derived / "pso_manifest.tsv", encoding="utf-8") as f:
         for ln in (l.rstrip("\n") for l in f):
             if not ln or ln.startswith("#") or ln in base_rows:
                 continue
-            if not ln.startswith("R\t"):
-                die(f"non-R manifest row added: {ln!r}")
-            new_rows += 1
-    print(f"manifest ok: {new_rows} R rows added, nothing else changed")
+            if ln.startswith("R\t"):
+                new_r += 1
+            elif ln.startswith("S\t"):
+                p = ln.split("\t")
+                if (len(p) != 3 or not p[1].endswith("_b")
+                        or p[1][:-2] not in keys
+                        or p[2] not in ("0", "1", "2", "3", "4", "5")):
+                    die(f"bad S manifest row added: {ln!r}")
+                new_s += 1
+            else:
+                die(f"non-R/S manifest row added: {ln!r}")
+    print(f"manifest ok: {new_r} R rows + {new_s} S rows added, nothing else changed")
 
 
 def main(argv=None):

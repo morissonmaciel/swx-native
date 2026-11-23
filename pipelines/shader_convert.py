@@ -81,19 +81,23 @@ PACKED = re.compile(r"^([0-9a-f_\-]{0,80}):([0-9a-f_\-]{0,80}):((?:[0-9a-f]{2}|z
 
 
 def unpack_key(text):
-    """Mirror MNG unpack_key: packed -> 544-byte key, or None."""
+    """MNG pipeline key -> 544-byte blob, or None. Two wire formats:
+    packed `vs:fs:zhex.` (mirror MNG unpack_key) and the raw hex of the
+    544-byte key itself (shader_list.tsv v1 R rows carry this one)."""
     m = PACKED.match(text)
-    if not m:
-        return None
-    vs, fs, rest = m.groups()
-    try:
-        key = (vs.encode().hex().ljust(2 * 80, "0") + fs.encode().hex().ljust(2 * 80, "0")
-               + re.sub(r"z([0-9a-f]+)\.", lambda z: "00" * int(z.group(1), 16), rest))
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if len(key) != 2 * MNG_SIZE:
-        return None
-    return bytes.fromhex(key)
+    if m:
+        vs, fs, rest = m.groups()
+        try:
+            key = (vs.encode().hex().ljust(2 * 80, "0") + fs.encode().hex().ljust(2 * 80, "0")
+                   + re.sub(r"z([0-9a-f]+)\.", lambda z: "00" * int(z.group(1), 16), rest))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if len(key) != 2 * MNG_SIZE:
+            return None
+        return bytes.fromhex(key)
+    if len(text) == 2 * MNG_SIZE and all(c in "0123456789abcdef" for c in text):
+        return bytes.fromhex(text)
+    return None
 
 
 def short_name(variant):
@@ -111,8 +115,10 @@ def convert_row(kind, packed, profile_keys, stats):
     blob = unpack_key(packed)
     if blob is None:
         return None, "unparsable"
-    vs_name = short_name(packed.split(":", 1)[0])
-    fs_name = short_name(packed.split(":", 2)[1] if packed.count(":") >= 2 else "")
+    # names live in the blob's vs[80]/fs[80] ASCII fields in both wire formats
+    vs_name = short_name(blob[MNG_VS:MNG_VS + 80].split(b"\0")[0].decode("ascii", errors="replace"))
+    fs_raw = blob[MNG_FS:MNG_FS + 80].split(b"\0")[0].decode("ascii", errors="replace")
+    fs_name = short_name(fs_raw) if fs_raw else None
     if not vs_name:
         return None, "bad-vs-name"
     if vs_name[:-2] not in profile_keys or (fs_name and fs_name[:-2] not in profile_keys):
