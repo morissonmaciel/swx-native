@@ -213,55 +213,7 @@ enabled = false
 flag = "SWX_DISABLE_DRS"
 games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
-note = "scope tbd, see PATCHES.md #20"
-
-[[patch]]
-path = "swx_botw_native_1080p.patch"
-enabled = false
-flag = "SWX_RES_BYPASS"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #21"
-
-[[patch]]
-path = "swx_botw_native_1440p.patch"
-enabled = false
-flag = "SWX_RES_BYPASS"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #22"
-
-[[patch]]
-path = "swx_botw_native_1440p_scene.patch"
-enabled = false
-flag = "SWX_RES_BYPASS"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #23"
-
-[[patch]]
-path = "swx_botw_native_4k.patch"
-enabled = false
-flag = "SWX_NATIVE_RES"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #24"
-
-[[patch]]
-path = "swx_botw_native_res.patch"
-enabled = false
-flag = "SWX_NATIVE_RES"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "scope tbd, see PATCHES.md #25"
-
-[[patch]]
-path = "swx_botw_native_keep_drs.patch"
-enabled = false
-flag = "SWX_NATIVE_RES"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "scope tbd, see PATCHES.md #26"
+note = "experimental opt-in (default off; never pinned by the installer). Fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including 1.0 (1600×900 docked). Independent of SWX_NATIVE_RES (which is now first-class in the core)."
 
 [[patch]]
 path = "swx_botw_fxcas.patch"

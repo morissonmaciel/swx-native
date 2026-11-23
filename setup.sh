@@ -277,6 +277,8 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     printf '# device pso_user.tsv is never read. Unset, prewarm reads the seed\n'
     printf '# beside SHMAP plus <I>/shaders/pso_user.tsv (see warm_paths).\n'
     printf 'export DM_WINDOW=1 DM_AUDIO=1\n'
+    printf '# Fullscreen is the install default (override with DM_FULLSCREEN=0 in <I>/env.txt).\n'
+    printf 'export DM_FULLSCREEN=1\n'
     printf 'export DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off\n'
     printf '# Approved pacing defaults (T1-T4): hold=off + probe ramp + encode thread hold flat 60 fps.\n'
     printf 'export DM_FSTEP_PROBE_RAMP=1\n'
@@ -291,7 +293,13 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     printf '  done < "$ENV_FILE"\n'
     printf 'fi\n'
     printf 'cd "$RUN"\n'
-    printf 'exec "%s" "%s"\n' "$(esc "$HOST_BIN")" "$(esc "$PATCHED_ARG")"
+    printf '# No exec: the exit status is recorded at the end of the log.\n'
+    printf 'set +e\n'
+    printf '"%s" "%s"\n' "$(esc "$HOST_BIN")" "$(esc "$PATCHED_ARG")"
+    printf 'exit_status=$?\n'
+    printf 'set -e\n'
+    printf 'printf "===== exit status: %%s =====\\n" "$exit_status"\n'
+    printf 'exit "$exit_status"\n'
   } > "$COMMAND_FILE" || fail "cannot write $COMMAND_FILE"
   chmod +x "$COMMAND_FILE"
   ok "command" "$COMMAND_FILE"
