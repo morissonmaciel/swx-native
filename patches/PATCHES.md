@@ -163,7 +163,7 @@ which pins:
 | `DM_FSTEP_PROBE_RAMP` | `1` | probe ramp; approved pacing default alongside hold=off (T3/T4) |
 | `DM_NVN_ENC_THREAD` | `1` | core env switch (not a TOML patch): NVN encoding on its own thread; eliminated the T3 30 fps step-up |
 | `SWX_GPU_KEEPALIVE` / `SWX_GPU_KEEPALIVE_YIELD` | `1` / `1` | the only active patches; macOS install defaults |
-| `SWX_NATIVE_RES` | `0` (off; absent by default) | core env switch (not a patch): native-resolution presets `0` / `1080p` / `1440p` / `2160p`, first-class in `core/nxnative`; macOS only, needs docked mode; player may arm via `<I>/env.txt`. Interaction with `DM_RENDER_SCALE`: the preset defines the base, `DM_RENDER_SCALE` multiplies it (e.g. 2160p+0.5 validated 2026-11-23) |
+| `SWX_NATIVE_RES` | `0` (off; absent by default) | core env switch (not a patch): native-resolution presets `0` / `1080p` / `1440p` / `2160p`, first-class in `core/nxnative`; macOS only, needs docked mode; player may arm via `<I>/env.txt`. Interaction with `DM_RENDER_SCALE`: with factor < 1.0 the preset defines the output while `loader.c` derives a smaller scene canvas (preset × factor, truncated as the game sizes buffers — 2160p+0.75 → scene 2880×1620 / output 4K; 2160p+0.5 → scene 1920×1080 validated 2026-11-23; see Notes) |
 | `DM_SAVE` / `DM_PSO_USER` / `DM_PSO_ARCHIVE` / `DM_PSO_PAIRS` / `DM_NVN_SHMAP` | `<I>` paths | self-contained install layout |
 
 `DM_FPS_HOLD=off` + `DM_FSTEP_PROBE_RAMP=1` + `DM_NVN_ENC_THREAD=1` are the
@@ -219,3 +219,21 @@ lines, 0 bases compiled), 13–14 archive files kept (~1.9 GiB, no sweep, no
   3840×2160; control 2160p+1.0 → scene 3840×2160; stock without preset
   unchanged. This supersedes the historical `+0x10 = 1.0f` wording kept in
   removed row #26 above.
+- Canvas/output split with preset + factor < 1.0, core (gameplay
+  2026-11-23): before, 2160p+0.75 rendered the scene at 3840×2160 (the
+  factor was ignored with a preset active). Now `loader.c` derives
+  canvas = preset × factor, generic for any pair (2160p+0.75 → 2880×1620;
+  2160p+0.5 → 1920×1080; 1440p+0.5 → 1280×720; 1080p+0.5 → 960×540;
+  truncated as the game sizes buffers) and publishes `+0xB8` u32 canvas
+  width, `+0xBC` u32 canvas height, `+0xC0` f32 canvas width (`0` = off);
+  `+0xB4` stays the output mode (2160p heaps and 4K window kept);
+  `+0x10` publishes `1.0` in this case (the factor is already baked into
+  the dimensions; the game's DRS operates off the canvas base). The ARM64
+  stubs read `+0xB8`/`+0xBC`/`+0xC0` in the canvas initializers, the TV
+  pair, the viewport and the scene base-width pair; the presenter upscales
+  (MetalFX 1620p→4K, bilinear with off); HUD composes with the scene.
+  Gate (player): 2160p+0.75+metalfx fullscreen 4K →
+  WindowInitialize/WindowCrop/snapshot 2880×1620, drawable 3840×2160,
+  MetalFX spatial scaler 2880x1620 → 3840x2160; control 2160p+1.0 → all
+  3840×2160 1:1; tests passed with and without render scale at all three
+  resolutions.
