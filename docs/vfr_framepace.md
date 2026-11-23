@@ -1,5 +1,21 @@
 # Breath of the Wild VFR and display pacing
 
+> **Status (2026-11-23): likely superseded on the current core — design
+> below kept for the record.** Gameplay T1–T4 on the native/stock path
+> (no VFR) show the core's native whole-vsync frame step plus
+> `DM_NVN_ENC_THREAD=1` plus `DM_FPS_HOLD=off` holding flat 60 fps with
+> correct game speed where VFR used to be needed: a 30-picture movie at
+> the right rate, no quick-menu flash, no 30 fps step-up in the T3 problem
+> area (T4: ~5700 frames, p50 16.66 / p95 16.88 / p99 16.96 ms, game time
+> 1.000). 120 Hz pacing (`DM_PRESENT_LINK=2`, `link_vrr_120()`) and
+> FIFO/mailbox (`DM_PRESENT_FIFO`) are native in the current core. The one
+> piece with no exact native equivalent is this design's async present
+> worker + two-ready FIFO with oldest-drop — the core manages that latency
+> via latch/drain/snapshots instead. The `SWX_VFR` patch group stays
+> scaffolded but disabled under `patches/SWX_VFR/` and is a candidate to
+> be archived as superseded (final decision pending). Full T1–T4 evidence
+> in [`patches/PATCHES.md`](../patches/PATCHES.md).
+
 The macOS BOTW 1.9.0 VFR patch uses one pacing policy for the game and
 the Metal presentation layer. It measures simulation time at game
 present, independently of whether a frame reaches the screen.

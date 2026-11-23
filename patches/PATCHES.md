@@ -18,30 +18,75 @@ one at a time, with its gate re-run on the current core, before treating
 it as part of this install. What the generated `.command` actually pins
 is listed under “Current refactor install” below.
 
-**SWX_VFR group (scaffolded, blocked; likely superseded).** The four VFR
-patches (#6, #10, #11, #12) are grouped under `patches/SWX_VFR/` as the
-second umbrella after `SWX_GPU_KEEPALIVE`, in application order framepace →
-present_worker → queue_policy → ratio_load_fix. They are `enabled = false`:
-the current core rewrote the display-link callback (`nvn_mtl.m` ~20520+)
-with a late latch (`nvn_link_latch.h`), a drain (`nvn_link_drain.h`),
-tick-based holds and a new present history / `present_now` signature.
-framepace's display-link integration targets the old period-based path and
-no longer applies (15 hunks drift structurally across `nvn_mtl.m`,
-`hle_nvn.c`, `loader.c`, `front_mac.m`); the worker and policy stack on it.
-The VFR clock and its stock-path isolation are intact (`fstep_tick` not
-called when armed; `dm_fps_state +0` neutral; see `docs/vfr_framepace.md`),
-but the present path must be re-engineered against the latch/drain/tick
-core and re-gated in gameplay before enabling. Until then the `.command`
-keeps `DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off`.
+**SWX_VFR group (scaffolded, disabled; candidate to archive as superseded).**
+The four VFR patches (#6, #10, #11, #12) are grouped under
+`patches/SWX_VFR/` as the second umbrella after `SWX_GPU_KEEPALIVE`, in
+application order framepace → present_worker → queue_policy →
+ratio_load_fix. They are `enabled = false`: the current core rewrote the
+display-link callback (`nvn_mtl.m` ~20520+) with a late latch
+(`nvn_link_latch.h`), a drain (`nvn_link_drain.h`), tick-based holds and a
+new present history / `present_now` signature. framepace's display-link
+integration targets the old period-based path and no longer applies
+(15 hunks drift structurally across `nvn_mtl.m`, `hle_nvn.c`,
+`loader.c`, `front_mac.m`); the worker and policy stack on it. The VFR
+clock and its stock-path isolation are intact (`fstep_tick` not called
+when armed; `dm_fps_state +0` neutral; see `docs/vfr_framepace.md`), but
+the present path must be re-engineered against the latch/drain/tick core
+and re-gated in gameplay before enabling. Until then the `.command` keeps
+the native closed defaults below (`DM_FPS=60 DM_FPS_TARGET=60
+DM_FPS_HOLD=off` + probe ramp + encode thread).
 
-Investigation (2026-11-23, option A): the core's native frame step already
-delivers what VFR aimed for on BOTW — gameplay logs show game time 1.000 of
-real time, held 1800/0/0 vsyncs, 0 up/down/probes at 60 fps. T1 (movie)
-confirmed `20.00 s of pictures in 20.00 s (30 pictures a second)`; T2
-(quick-menu) confirmed no alpha flash on the native whole-vsync step, so
-the quick-menu alpha guard (#13) was removed as superseded. Whether to
-return VFR at all is pending the heavy-scene probe test (T3); the native
-path may make it unnecessary.
+Native-path verdict (2026-11-23, gameplay T1–T4 on the native/stock path
+WITHOUT VFR): the core's native whole-vsync frame step already delivers
+what VFR aimed for on BOTW, so the group is a candidate to be archived as
+superseded rather than re-engineered; the final decision is pending the
+player (optionally confirmed by a real 120 Hz panel run). Evidence:
+- Baseline native frame step across runs: game time 30.00 s in 30.00 s
+  (1.000 of real time); held 1/2/3 vsyncs 1800/0/0 frames, 0 up / 0 down
+  (0 probes, 0 failed trials) — flat 60 fps, correct game speed, no slow
+  motion.
+- T1 (movie): a 30-picture prerendered movie played at the right speed
+  (`20.00 s of pictures in 20.00 s (30 pictures a second)`). The core's
+  `dm_movie_hz` / `fps_step_cap` handles movie picture rate natively
+  (BOTW 1.9.0 is cited in `core/docs/reference/frame-rate.md`).
+- T2 (quick-menu): no black flash opening weapon/bow/shield/rune selectors
+  on the native whole-vsync step. The flash the old VFR
+  `quick_menu_alpha` guard fixed came from VFR's fractional real-time UI
+  step crossing the `frame == 1.0` equality; the native step keeps the
+  stock equality path. That patch (registry #13) stays removed
+  (commit `00314c7`).
+- T3 (the problem area): a specific area stepped the stock controller to
+  30 fps (`hold 1→2`, 3 late frames; frame cost ~1.1 vsyncs but GPU only
+  ~0.87 — the gap was non-GPU submit/translation cost plus rising
+  display-link empty ticks, not a GPU-heavy scene). `DM_FPS_HOLD=on`
+  stepped to 30 with the probe ramp both on and off (the ramp made no
+  difference to this step-up); adding `DM_NVN_ENC_THREAD=1` eliminated the
+  step-up entirely (submit+present p50 ~8.4 → ~4.9 ms, held 1800/0/0,
+  0 up/down, empty ticks stable, flat 60) by moving encoding off the
+  submit critical path so frames stop arriving late.
+- T4 (longer run, `DM_FPS_HOLD=off` + `DM_FSTEP_PROBE_RAMP=1` +
+  `DM_NVN_ENC_THREAD=1`): ~5700 frames, frame time p50 16.66 / p95 16.88 /
+  p99 16.96 ms, submit+present p50 ~1.58 ms warm, held 1800/0/0, game time
+  1.000, no 30 fps plateau. Player verdict: this combination is a strong
+  candidate to replace the VFR patch. Residuals were a recurring
+  texture-upload burst at area entry (~159 first uploads / ~30 MB /
+  ~175 ms, 0 new pipelines — texture-pool territory, that patch is
+  disabled in the current A/B) and a minor ~24 ms submit hiccup; neither
+  is pipeline compilation nor pacing.
+- Capability check against the current core: 60 fps on a 120 Hz panel is
+  native (`DM_PRESENT_LINK=2` runs a 120 Hz link — a frame every other
+  tick, catching up on the next 8.33 ms tick when behind;
+  `link_vrr_120()` auto-detects variable-refresh ≥120 Hz fullscreen and
+  paces 60 via the 120 Hz link without an env var), and FIFO/mailbox are
+  native (`DM_PRESENT_FIFO` default = frames in order, at most one tick
+  behind; `=0` = newest frame each tick). The one piece with no exact
+  native equivalent is VFR's async present worker + 2-ready FIFO with
+  oldest-drop: the core paces latency via latch/drain/snapshots instead
+  (the display-link callback still does `ext_wait` /
+  `snap_commit_wait` / `sub_commit_wait` inline). On the player's
+  Mac/route the stock path + encode thread held flat 60 without that
+  worker, so its benefit did not appear as a deficit; a real 120 Hz panel
+  run would confirm whether native 120 Hz pacing matches VFR's.
 
 | # | Patch | Flag | Status | Effect + metric | Evidence |
 |---|-------|------|--------|-----------------|----------|
@@ -114,9 +159,18 @@ which pins:
 
 | Key | Value | Note |
 |-----|-------|------|
-| `DM_FPS` / `DM_FPS_TARGET` / `DM_FPS_HOLD` | `60` / `60` / `off` | 60 fps pacing defaults |
+| `DM_FPS` / `DM_FPS_TARGET` / `DM_FPS_HOLD` | `60` / `60` / `off` | 60 fps pacing defaults (approved: hold=off, T3/T4) |
+| `DM_FSTEP_PROBE_RAMP` | `1` | probe ramp; approved pacing default alongside hold=off (T3/T4) |
+| `DM_NVN_ENC_THREAD` | `1` | core env switch (not a TOML patch): NVN encoding on its own thread; eliminated the T3 30 fps step-up |
 | `SWX_GPU_KEEPALIVE` / `SWX_GPU_KEEPALIVE_YIELD` | `1` / `1` | the only active patches; macOS install defaults |
 | `DM_SAVE` / `DM_PSO_USER` / `DM_PSO_ARCHIVE` / `DM_PSO_PAIRS` / `DM_NVN_SHMAP` | `<I>` paths | self-contained install layout |
+
+`DM_FPS_HOLD=off` + `DM_FSTEP_PROBE_RAMP=1` + `DM_NVN_ENC_THREAD=1` are the
+approved closed pacing defaults from the T3/T4 gameplay runs (2026-11-23):
+together they held flat 60 fps with game time 1.000 where the stock
+controller previously stepped to 30 fps. `DM_NVN_ENC_THREAD` is a core env
+switch read by the vendored host, not a patch flag — no `patches.toml`
+entry enables it.
 
 `DM_PSO_MANIFEST` is deliberately unset: with it set, `warm_paths()` reads
 only that list and the device's `pso_user.tsv` learning is never prewarmed;

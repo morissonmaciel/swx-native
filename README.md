@@ -55,10 +55,15 @@ Needs testing: iCloud Drive saves (`--icloud-drive-save`).
 
 ## On Tests (experimental, installed by default)
 
-- `SWX_VFR=relaxed` + `SWX_VFR_HZ=auto` locks the game to 60 fps.
-  The display link runs at the panel rate and paces the game by refreshes
-  where the rates divide exactly. `SWX_VFR=0` restores stock frame timing.
-  See [VFR and display pacing](docs/vfr_framepace.md).
+- Native 60 fps pacing (current default; the old `SWX_VFR=relaxed` +
+  `SWX_VFR_HZ=auto` lock is superseded and disabled): the core's native
+  whole-vsync frame step holds 60 fps with correct game speed
+  (`DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off` +
+  `DM_FSTEP_PROBE_RAMP=1` + `DM_NVN_ENC_THREAD=1`, baked into the
+  generated `.command`; T1–T4 gameplay 2026-11-23). `SWX_VFR=0` is no
+  longer needed to restore stock timing — stock is the path.
+  See [VFR and display pacing](docs/vfr_framepace.md) (status note) and
+  `patches/PATCHES.md` (evidence).
 - `DM_PRESENT_SNAP=2` (stock snapshot ring; the installer leaves the
   compiled default unless set for A/B, `snap 4` is an optional smoothness
   experiment, not the default): the frame-ahead overlap (`DM_NVN_SYNC_LAG`)
