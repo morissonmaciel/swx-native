@@ -163,7 +163,7 @@ which pins:
 | `DM_FSTEP_PROBE_RAMP` | `1` | probe ramp; approved pacing default alongside hold=off (T3/T4) |
 | `DM_NVN_ENC_THREAD` | `1` | core env switch (not a TOML patch): NVN encoding on its own thread; eliminated the T3 30 fps step-up |
 | `SWX_GPU_KEEPALIVE` / `SWX_GPU_KEEPALIVE_YIELD` | `1` / `1` | the only active patches; macOS install defaults |
-| `SWX_NATIVE_RES` | `0` (off; absent by default) | core env switch (not a patch): native-resolution presets `0` / `1080p` / `1440p` / `2160p`, first-class in `core/nxnative`; macOS only, needs docked mode; player may arm via `<I>/env.txt` |
+| `SWX_NATIVE_RES` | `0` (off; absent by default) | core env switch (not a patch): native-resolution presets `0` / `1080p` / `1440p` / `2160p`, first-class in `core/nxnative`; macOS only, needs docked mode; player may arm via `<I>/env.txt`. Interaction with `DM_RENDER_SCALE`: the preset defines the base, `DM_RENDER_SCALE` multiplies it (e.g. 2160p+0.5 validated 2026-11-23) |
 | `DM_SAVE` / `DM_PSO_USER` / `DM_PSO_ARCHIVE` / `DM_PSO_PAIRS` / `DM_NVN_SHMAP` | `<I>` paths | self-contained install layout |
 
 `DM_FPS_HOLD=off` + `DM_FSTEP_PROBE_RAMP=1` + `DM_NVN_ENC_THREAD=1` are the
@@ -209,3 +209,13 @@ lines, 0 bases compiled), 13–14 archive files kept (~1.9 GiB, no sweep, no
   validation — see `core/nxnative/dm/games/settings.tsv` and
   `core/nxnative/dm/host/loader.c`). `swx_botw_disable_drs.patch` (#20,
   `SWX_DISABLE_DRS`) is unaffected and stays experimental/opt-in.
+- Render scale with preset active, core fix (2026-11-23): `loader.c` is
+  now the sole writer of the factor at state `+0x10` (validated
+  `DM_RENDER_SCALE`); `front_mac.m` `bp_force_internal` publishes only
+  `+0xB4`; the cadence `setWaitVsyncInterval` stub no longer writes
+  `+0x10`; the scale stub (`main+0x1266880`) accepts a factor < 1.0 with a
+  preset active (`1.0` preserves the game's DRS over the preset base).
+  Gate: 2160p+0.5 → scene 1920×1080 with canvas/HUD/swapchain/crop at
+  3840×2160; control 2160p+1.0 → scene 3840×2160; stock without preset
+  unchanged. This supersedes the historical `+0x10 = 1.0f` wording kept in
+  removed row #26 above.
