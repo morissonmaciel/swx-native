@@ -3,7 +3,7 @@
 How the community shader/pipeline knowledge (mac-nativegames' shared list)
 becomes tables the nxnative host reads, maps one-to-one, and warms up on
 every launch. Slices 1+2 (coverage measurement) are done
-(`wrapper/shader_list.py`); this doc designs slices 3+.
+(`pipelines/shader_list.py`); this doc designs slices 3+.
 
 ## Piece 1 — Shader identity dictionary
 
@@ -27,7 +27,7 @@ prebuild. More packaging compile time, always correct, no variant semantics
 needed. `A` rows (392, bind states without joinable keys) resolve here, via
 the seed's `.variants` index or via the v1 fallback.
 
-## Piece 3 — Pipeline dictionary (BUILT: `wrapper/shader_convert.py`)
+## Piece 3 — Pipeline dictionary (BUILT: `pipelines/shader_convert.py`)
 
 An MNG `R/B/T` row carries the runtime's 544-byte `pso_skey`, packed as
 `<vs variant>:<fs variant>:<other 384 bytes hex>` with zero-runs compressed
@@ -90,7 +90,7 @@ accumulates each session's needs, the derived manifest is the base, and
 learnings. The only periodic addition: re-fetch the community list so other
 players' new rows flow in.
 
-## V1 scope (implemented: pairs via `wrapper/shader_derive.py`, exact R rows via `wrapper/shader_convert.py`)
+## V1 scope (implemented: pairs via `pipelines/shader_derive.py`, exact R rows via `pipelines/shader_convert.py`)
 
 - Pair extraction from all R/B/T rows: 95.4% both-shaders-known; genuinely
   new pairs vs the profile's tables were only 336. Delivered via

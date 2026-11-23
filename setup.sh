@@ -112,13 +112,22 @@ if [ -n "$INSTALL_DIR" ]; then
   if [ -f "$ENV_FILE" ]; then
     ok "env.txt (kept, user-managed)" "$ENV_FILE"
   else
+    # Template only: no active keys. Baked defaults live in the .command
+    # ($HERE-based, self-contained); the build uses its own managed file
+    # below. Anything set here wins at game launch.
     {
-      printf 'DM_SAVE=%s\n' "$INSTALL_DIR/saves"
-      printf 'DM_PSO_USER=%s\n' "$INSTALL_DIR/shaders/pso_user.tsv"
-      printf 'DM_PSO_ARCHIVE=%s\n' "$INSTALL_DIR/shaders/pso_archive"
-      printf 'DM_PSO_PAIRS=%s\n' "$INSTALL_DIR/shaders/swx_pairs.tsv"
+      printf '# SWX runtime overrides (optional).\n'
+      printf '# Baked defaults live in "Breath of the Wild.command"; any KEY=VALUE here wins.\n'
+      printf '# Examples (current baked values shown commented out):\n'
+      printf '# DM_SAVE=%s/saves\n' "$INSTALL_DIR"
+      printf '# DM_PSO_USER=%s/shaders/pso_user.tsv\n' "$INSTALL_DIR"
+      printf '# DM_PSO_ARCHIVE=%s/shaders/pso_archive\n' "$INSTALL_DIR"
+      printf '# DM_PSO_PAIRS=%s/shaders/swx_pairs.tsv\n' "$INSTALL_DIR"
+      printf '# DM_NVN_SHMAP=%s/shaders/shader_map.tsv\n' "$INSTALL_DIR"
+      printf '# DM_PSO_MANIFEST=%s/shaders/pso_manifest.tsv\n' "$INSTALL_DIR"
+      printf '# DM_LANG=pt-BR\n'
     } > "$ENV_FILE" || fail "cannot write $ENV_FILE"
-    ok "env.txt (created)" "$ENV_FILE"
+    ok "env.txt (template created)" "$ENV_FILE"
   fi
 fi
 
@@ -129,12 +138,18 @@ fi
 # prints the command that runs the game. Packing the .app comes later.
 if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]; then
   TITLE_ID="01007EF00011E000"
+  # Community pipelines first: derive swx_pairs.tsv + derived/<id>/ overlay
+  # into <I>/shaders BEFORE the build, so DM_PSO_PAIRS (via --env-file below)
+  # and DM_GAMES_DIR/FIRST (build env below) feed the prebuild with community
+  # coverage.
+  "$VENV/bin/python" "$ROOT/pipelines/append_shaders.py" --install-dir "$INSTALL_DIR" \
+    || fail "append_shaders failed (see output above)."
   # Patches first: clone the pristine core to /tmp and patch the copy, so the
   # build below compiles the modified files. Prints SWX_PATCHED_CORE=<dir> last.
-  PATCHED_LINE="$(sh "$ROOT/patches/apply_patches.sh" --core "$ROOT/core/nxnative" | tail -1)" \
-    || fail "apply_patches.sh failed (see output above)."
+  PATCHED_LINE="$("$VENV/bin/python" "$ROOT/patches/apply_patches.py" --core "$ROOT/core/nxnative" | tail -1)" \
+    || fail "apply_patches.py failed (see output above)."
   NX="$(printf '%s' "$PATCHED_LINE" | sed -n 's/^SWX_PATCHED_CORE=//p')"
-  [ -n "$NX" ] && [ -d "$NX" ] || fail "apply_patches.sh did not return a core dir (got: $PATCHED_LINE)"
+  [ -n "$NX" ] && [ -d "$NX" ] || fail "apply_patches.py did not return a core dir (got: $PATCHED_LINE)"
   ok "patched core" "$NX"
   NX_SCRIPT="$NX/scripts/build_ipa_from_nsp.py"
   [ -f "$NX_SCRIPT" ] || fail "nxnative script missing: $NX_SCRIPT (populate core/nxnative)"
@@ -149,6 +164,18 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     fi
   done
   GAME_DIR="$INSTALL_DIR/game"
+  # Managed build env (setup-owned, rewritten every run): the structural
+  # SAVE/PSO_* values the prebuild needs. The user's <I>/env.txt stays purely
+  # a runtime override file and is never read here.
+  BUILD_ENV_FILE="$GAME_DIR/build/build.env"
+  mkdir -p "$GAME_DIR/build" || fail "cannot create $GAME_DIR/build"
+  {
+    printf 'DM_SAVE=%s\n' "$INSTALL_DIR/saves"
+    printf 'DM_PSO_USER=%s\n' "$INSTALL_DIR/shaders/pso_user.tsv"
+    printf 'DM_PSO_ARCHIVE=%s\n' "$INSTALL_DIR/shaders/pso_archive"
+    printf 'DM_PSO_PAIRS=%s\n' "$INSTALL_DIR/shaders/swx_pairs.tsv"
+  } > "$BUILD_ENV_FILE" || fail "cannot write $BUILD_ENV_FILE"
+  ok "build.env" "$BUILD_ENV_FILE"
   for src in "$BASE" "$UPDATE"; do
     dst="$GAME_DIR/$(basename "$src")"
     if [ -e "$dst" ] || [ -L "$dst" ]; then rm -f "$dst"; fi
@@ -156,25 +183,35 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     ok "staged" "$dst"
   done
   say "building via nxnative (--platform mac, no .app yet)..."
-  DM_GAME="$TITLE_ID" "$VENV/bin/python" "$NX_SCRIPT" "$GAME_DIR" \
+  DM_GAME="$TITLE_ID" DM_GAMES_DIR="$INSTALL_DIR/shaders/derived" DM_GAMES_FIRST=1 \
+    "$VENV/bin/python" "$NX_SCRIPT" "$GAME_DIR" \
     -k "$KEYS" \
     --platform mac \
     --work-dir "$GAME_DIR/build" \
-    --env-file "$INSTALL_DIR/env.txt" \
+    --env-file "$BUILD_ENV_FILE" \
     || fail "nxnative build failed (see output above)."
   ok "nxnative" "--platform mac ok (no .app yet)"
 
-  # ---- shader tables trio into <I>/shaders (self-contained <I>) ----
+  # ---- shader tables into <I>/shaders (self-contained <I>) ----
   # shader_map.tsv is a static profile input; c1_full.tsv/cb_extent.tsv are
-  # (re)made in the profile folder by this build's Mac shader step, so copy
-  # only after the build: the trio stays consistent (stamp-named tables match
-  # the just-built libraries). The .command then points DM_NVN_SHMAP at <I>.
+  # (re)made in the profile folder by this build's Mac shader step. Copy only
+  # after the build: the trio stays consistent (stamp-named tables match the
+  # just-built libraries). The prewarm seed (pso_manifest.tsv) comes from the
+  # derived overlay (profile + community R rows) installed by append_shaders
+  # above — the host reads it beside DM_NVN_SHMAP, and without it the prewarm
+  # is skipped ([RED] seed list does not exist) and every new pipeline stalls
+  # in game. The .command then points DM_NVN_SHMAP/DM_PSO_MANIFEST at <I>.
   for t in shader_map.tsv c1_full.tsv cb_extent.tsv; do
     src="$ROOT/core/nxnative/dm/games/$TITLE_ID/$t"
     [ -f "$src" ] || fail "shader table not found after build: $src"
     cp -f "$src" "$INSTALL_DIR/shaders/$t" || fail "cannot copy $t to $INSTALL_DIR/shaders"
     ok "shader table" "$INSTALL_DIR/shaders/$t"
   done
+  MANIFEST_SRC="$INSTALL_DIR/shaders/derived/$TITLE_ID/pso_manifest.tsv"
+  [ -f "$MANIFEST_SRC" ] || fail "derived manifest not found: $MANIFEST_SRC (append_shaders above must install it)"
+  cp -f "$MANIFEST_SRC" "$INSTALL_DIR/shaders/pso_manifest.tsv" \
+    || fail "cannot copy pso_manifest.tsv to $INSTALL_DIR/shaders"
+  ok "shader table" "$INSTALL_DIR/shaders/pso_manifest.tsv"
 
   # ---- <I>/Breath of the Wild.command (double-click to play) ----
   # Replicates build_ipa_from_nsp.py mac_run for --platform mac:
@@ -219,12 +256,16 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     printf 'mkdir -p "$RUN/save" "$RUN/temp"\n'
     printf 'export DM_ROOT="%s"\n' "$(esc "$WORK")"
     printf 'export DM_ROMFS="%s"\n' "$(esc "$ROMFS_ARG")"
-    printf 'export DM_SAVE="$RUN/save"\n'
+    printf 'export DM_SAVE="$HERE/saves"\n'
     printf 'export DM_TEMP="$RUN/temp"\n'
+    printf 'export DM_PSO_USER="$HERE/shaders/pso_user.tsv"\n'
+    printf 'export DM_PSO_ARCHIVE="$HERE/shaders/pso_archive"\n'
+    printf 'export DM_PSO_PAIRS="$HERE/shaders/swx_pairs.tsv"\n'
     printf 'export DM_MSL_DIR="%s"\n' "$(esc "$MSL_DIR")"
     printf 'export DM_FONT_DIR="%s"\n' "$(esc "$FONT_DIR")"
     printf 'export DM_OBSOLETE="%s"\n' "$(esc "$WORK/obsolete")"
-    printf 'export DM_NVN_SHMAP="%s"\n' "$(esc "$SHMAP")"
+    printf 'export DM_NVN_SHMAP="$HERE/shaders/shader_map.tsv"\n'
+    printf 'export DM_PSO_MANIFEST="$HERE/shaders/pso_manifest.tsv"\n'
     printf 'export DM_WINDOW=1 DM_AUDIO=1\n'
     printf 'export DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off\n'
     printf '# <I>/env.txt wins over the baked defaults (handles values with spaces).\n'

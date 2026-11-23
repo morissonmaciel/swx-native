@@ -1,4 +1,4 @@
-# Only SWX_GPU_KEEPALIVE/** applies for now (testing with apply_patches.sh).
+# Only SWX_GPU_KEEPALIVE/** applies for now (testing with apply_patches.py).
 # The rest is commented out; uncomment to restore the full stack (git history
 # has the original order). patch_nxnative.sh is historical reference only.
 SWX_GPU_KEEPALIVE/nvn_mtl.m.patch
