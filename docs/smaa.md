@@ -1,5 +1,7 @@
 # SWX_AA — game AA control for BOTW (experimental, harness-only)
 
+> **Status (2026-11-23): deferred.** `patches/swx_botw_smaa.patch` is disabled and does not apply on the current core (`patch --dry-run` fails in six files; pre-existing drift, independent of `SWX_FIDELITYFX_CAS`). Rebase planned before enabling; the gates below document the 2026-11-20 runs against the then-current core.
+
 Never pin it in the player's `env.txt`: the installer strips `SWX_AA` on
 reinstall (keep-out list in `wrapper/main.py`) and the harness sets it per
 run. Launcher Graphics → Anti-aliasing (macOS): Off / FXAA / SMAA.
@@ -14,7 +16,7 @@ Read once at launch. `fxaa` is the public name (the launcher, the parser
 and `settings.tsv` agree on `off|fxaa|smaa`); `txaa` was never a name and is
 rejected into the fxaa fallback with the one `[RED]` warning. `ab_test.py`
 has no `SWX_AA` knob, so SMAA runs go through the harness env directly
-(`SWX_AA=smaa` per run), never through the installed `env.txt`. Order with `SWX_FXCAS`: CAS sharpens first; SMAA/copy consume its output (the skipped draw's one-shot swap is disarmed in the hook).
+(`SWX_AA=smaa` per run), never through the installed `env.txt`. Order with `SWX_FIDELITYFX_CAS` (macOS default on): CAS sharpens first; SMAA/copy consume its output (the skipped draw's one-shot swap is disarmed in the hook).
 
 ## What it does
 
@@ -34,7 +36,7 @@ gathers the four neighbours' weights, picks the dominant axis and mixes the
 two taps on it, as the reference does. The sampler,
 coordinates and format stay the draw's own. Any failure (library, LUTs,
 pipeline, no room, validation) leaves the original draw with the original
-source (sharpened when FXCAS is armed).
+source (sharpened when CAS is armed, i.e. `SWX_FIDELITYFX_CAS` on).
 
 Kernels live in `dm/gfx/msl/smaa.metal`, built with the host's shaders
 (`host_msl.py` wildcard) and loaded by name; until the anchor is set the
@@ -51,10 +53,10 @@ completion (slot ring vs `g_done`).
 composite (scene → canvas, `blend=0`, `wm=0x7` RGB-only, integral viewport),
 1×/frame with a unique VS pairing (PASSDUMP F3115–3117,
 `SWX_NATIVE_RES=1440p`). Keys match the first 16 chars (`strncmp`, as
-FXCAS does — runtime keys carry a `_b`-style suffix). The other
+CAS does — runtime keys carry a `_b`-style suffix). The other
 fullscreen no-blend draws in the frame are depth-only (`wm=0xffffff0f` on
 a depth target, `wm=0` depth write) and are excluded. Source is the 2D
-scene (FXCAS-sharpened when `SWX_FXCAS=1`), never a snapshot of the
+scene (CAS-sharpened when `SWX_FIDELITYFX_CAS` is on, the macOS default), never a snapshot of the
 destination — so SMAA runs after CAS on the same draw (sharpen, then AA
 last).
 
@@ -94,16 +96,17 @@ bilinear RGB-only. FXAA replacement before the HUD stays independent work.
   exit 0) and at 2160p + shadow High (`filtered 3840x2160 (format 90)`,
   texel-for-texel into the canvas, draw skipped, zero `[RED]`, exit 0;
   the 4K anchor holds with the same fs key). The 1440p retained run had
-  `SWX_FXCAS=0`; the 2160p anchor runs cover both orders — CAS off and
-  the combo `SWX_FXCAS=1` (`BOTW scene 3840x2160 sharpened before its
-  composite draw`, then filtered + copied + skipped, zero `[RED]`,
-  exit 0). The `=off`/`fxaa` permutations ran per player report
+  `SWX_FIDELITYFX_CAS=0`; the 2160p anchor runs cover both orders — CAS off
+  and the combo `SWX_FIDELITYFX_CAS=1` (`BOTW scene 3840x2160 sharpened
+  before its composite draw`, then filtered + copied + skipped, zero
+  `[RED]`, exit 0). These 2026-11-20 runs used the flag's former name
+  `SWX_FXCAS`. The `=off`/`fxaa` permutations ran per player report
   (screenshots taken); their structural lines are not in the retained
   logs. Unknown-value warning path unchanged (warns once, keeps the
   game draw).
 - Visual/order: PASS per player report 2026-11-20 (new binary, skip-draw
   path) — screenshots compared with zoom across `fxaa`/`=off`/`=smaa` ×
-  `SWX_FXCAS=0/1`: AA differences perceptible under zoom, CAS sharpening
+  `SWX_FIDELITYFX_CAS=0/1`: AA differences perceptible under zoom, CAS sharpening
   differences perceptible with `=1`; no blur/flicker/glitch reported.
   Prior binding-swap runs (F1674-76 solo, F2065-67 combo) validated the
   anchor only, not this skip-draw path.
