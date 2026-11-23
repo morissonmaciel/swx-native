@@ -1,3 +1,5 @@
+> **Superseded (2026-11-23):** this experimental opt-in (`SWX_FXCAS=1`) was promoted to the `SWX_FIDELITYFX_CAS` patch group (`patches/SWX_FIDELITYFX_CAS/`, enabled in `patches.toml`, macOS default on, BOTW only), with configurable sharpness via `SWX_FIDELITYFX_CAS_SHARPNESS`. Kept as design/provenance record for the 2026-11-20 gates; see `patches/SWX_FIDELITYFX_CAS/fidelityfx_cas.md` for the current doc.
+
 # SWX_FXCAS — FidelityFX CAS sharpen-only on BOTW's 3D scene (experimental)
 
 Opt-in, off by default. Add to the player's `env.txt`:

@@ -285,6 +285,8 @@ if [ -n "$BASE" ] && [ -n "$UPDATE" ] && [ -n "$KEYS" ] && [ -n "$INSTALL_DIR" ]
     printf 'export DM_NVN_ENC_THREAD=1\n'
     printf '# install defaults on macOS (managed env; override in <I>/env.txt to opt out).\n'
     printf 'export SWX_GPU_KEEPALIVE=1 SWX_GPU_KEEPALIVE_YIELD=1\n'
+    printf '# graphics default on macOS (override with SWX_FIDELITYFX_CAS=0 in <I>/env.txt to opt out).\n'
+    printf 'export SWX_FIDELITYFX_CAS=1\n'
     printf '# <I>/env.txt wins over the baked defaults (handles values with spaces).\n'
     printf 'ENV_FILE="$HERE/env.txt"\n'
     printf 'if [ -f "$ENV_FILE" ]; then\n'

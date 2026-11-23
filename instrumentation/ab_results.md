@@ -673,6 +673,7 @@ Gameplay (player report, same intense-combat region as the earlier runs,
 `SWX_NATIVE_RES=1440p` with `SWX_DISABLE_DRS=0`): holds stable 60 fps.
 
 ## BOTW FidelityFX CAS sharpen-only — gates (patch #27, validated 2026-11-20)
+> Superseded 2026-11-23: promoted to the `SWX_FIDELITYFX_CAS` patch group (`patches/SWX_FIDELITYFX_CAS/`, enabled in `patches.toml`, macOS default on, BOTW only); the single-file `swx_botw_fxcas.patch` was removed and sharpness is now configurable. The records below keep their original names and dates.
 
 `swx_botw_fxcas.patch` + `docs/fxcas.md`: opt-in `SWX_FXCAS=1` (absent/`0`
 off). Before the composite draw (fs `bd7ffdd435c6c3bc` + vs

@@ -1,43 +1,46 @@
-# BOTW FidelityFX CAS sharpen-only (SWX_FXCAS=1, experimental opt-in).
-# Before the FXAA/upscale composite draw of BOTW 1.9.0 (fs bd7ffdd435c6c3bc + vs 5e9f57168d89a543: fullscreen triangle into a single RGB10A2Unorm 2D canvas, same-format 2D scene at or under canvas size, no blending, full viewport), the scene runs through fs_cas (AMD CAS sharpen-only, fixed 0.25, MIT) into a private same-format scratch texture; only that draw's scene binding is swapped (one-shot in encode_args_, cache invalidated on entry and exit, arm scoped to the arming draw). Anything else keeps the original texture; absent/0 disables all passes.
-# verify: dm/gfx/msl/fxcas.metal:fs_cas
+# SWX_FIDELITYFX_CAS group (FidelityFX CAS sharpen-only on BOTW 1.9.0's 3D scene): toggle SWX_FIDELITYFX_CAS (BOTW only, macOS default on; the gate itself is absent/0 = off) — before the FXAA/upscale composite draw (anchor fs bd7ffdd435c6c3bc + vs 5e9f57168d89a543) the scene runs through fs_cas (AMD CAS sharpen-only, default 0.25 via SWX_FIDELITYFX_CAS_SHARPNESS, MIT) into a private same-format scratch texture and only that draw's scene binding is swapped (one-shot in encode_args_, cache invalidated on entry and exit); anything else keeps the original texture, absent/0 disables all passes.
 # verify: dm/gfx/nvn/nvn_mtl.m:fxcas_run
 # verify: dm/gfx/nvn/nvn_mtl.m:fxcas_scene_ser
 # verify: dm/gfx/nvn/nvn_mtl.m:MTLPixelFormatRGB10A2Unorm
-# verify: dm/gfx/nvn/nvn_mtl.m:SWX_FXCAS=1: AMD CAS sharpen-only
+# verify: dm/gfx/nvn/nvn_mtl.m:SWX_FIDELITYFX_CAS=1: AMD CAS sharpen-only
+# See SWX_FIDELITYFX_CAS/fidelityfx_cas.md.
 --- a/dm/gfx/nvn/nvn_mtl.m	2026-11-19 23:32:16
 +++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-20 00:00:02
-@@ -13485,6 +13485,99 @@
+@@ -13485,6 +13485,104 @@
          MLOG("[RED]   its indirect dispatch of %s: %u x %u x %u groups now at %#llx", g_ind_fly[i].key, g[0], g[1], g[2], (unsigned long long)g_ind_fly[i].ind);
      }
      pthread_mutex_unlock(&g_cbs_mu);
 +}
-+// ---- SWX_FXCAS=1: AMD CAS sharpen-only on BOTW 1.9.0's 3D scene (opt-in) ----
++// ---- SWX_FIDELITYFX_CAS=1: AMD CAS sharpen-only on BOTW 1.9.0's 3D scene (opt-in) ----
 +// The anchor is the FXAA/upscale draw (fs key bd7ffdd435c6c3bc with vs 5e9f57168d89a543): a fullscreen triangle
 +// (prim 4, 3 verts, indexed) into a single RGB10A2Unorm 2D canvas, sampling a same-format 2D scene texture,
 +// no blending, full viewport (PASSDUMP-confirmed 2026-11-2x: exactly one such draw per gameplay frame; no such draw
 +// with the inventory open, so menus never trigger). Before that draw, the scene runs through fs_cas into a private
 +// scratch texture of the same format and size, and only this draw's scene binding is swapped to it (UVs, sampler,
 +// other readers unchanged); a reused scratch while the config holds, retired on change. Anything else (another
-+// format, an oversized scene, HUD layouts) leaves the draw on the original texture. SWX_FXCAS absent or 0: zero passes.
++// format, an oversized scene, HUD layouts) leaves the draw on the original texture. SWX_FIDELITYFX_CAS absent or 0: zero passes.
 +#define FXCAS_FS "bd7ffdd435c6c3bc"
 +#define FXCAS_VS "5e9f57168d89a543"
-+static int fxcas_on(void) { static int v = -2; if (v == -2) { const char *e = getenv("SWX_FXCAS"); v = (e && atoi(e)) ? 1 : 0;
-+    if (v) MLOG("SWX_FXCAS=1: AMD CAS sharpen-only (fixed 0.25) on BOTW's 3D scene before its composite draw"); } return v; }
++static float fxcas_sharpness(void) { static float v = -2.0f; if (v == -2.0f) { const char *e = getenv("SWX_FIDELITYFX_CAS_SHARPNESS"); v = 0.25f;
++    if (e) { char *end = NULL; float f = strtof(e, &end); if (end == e || *end || !(f >= 0.0f && f <= 1.0f)) MLOG("[RED] SWX_FIDELITYFX_CAS_SHARPNESS=%s: must be 0 to 1; using 0.25", e); else v = f; } } return v; }
++static int fxcas_on(void) { static int v = -2; if (v == -2) { const char *e = getenv("SWX_FIDELITYFX_CAS"); v = (e && atoi(e)) ? 1 : 0;
++    if (v) MLOG("SWX_FIDELITYFX_CAS=1: AMD CAS sharpen-only (sharpness %.2f) on BOTW's 3D scene before its composite draw", fxcas_sharpness()); } return v; }
 +static id<MTLTexture> fxcas_tex = nil; static uint64_t fxcas_scene_ser = 0; static int fxcas_armed = 0;
 +static const p_draw *fxcas_dw = NULL; static const p_draw_idx *fxcas_di = NULL;
 +static unsigned long long fxcas_n = 0;
 +static id<MTLTexture> fxcas_run(id<MTLTexture> src) {
 +    static id<MTLTexture> scratch = nil; static NSUInteger sw = 0, sh = 0; static MTLPixelFormat spf = 0;
 +    static NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *pso; static id<MTLFunction> vf, ff;
-+    static id<MTL4ArgumentTable> at; static int failed;
++    static id<MTL4ArgumentTable> at; static id<MTLBuffer> sbuf; static int failed;
 +    if (failed || !src) return nil;
 +    if (!vf) {
 +        NSError *e = nil; id<MTLLibrary> lib = host_lib("fxcas", &e);
 +        vf = [lib newFunctionWithName:@"vs_cas"]; ff = [lib newFunctionWithName:@"fs_cas"];
-+        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1;
++        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount = 1; ad.maxBufferBindCount = 1;
 +        at = rec_table([g_dev newArgumentTableWithDescriptor:ad error:&e]);
-+        if (!vf || !ff || !at) { failed = 1; MLOG("[RED] cannot create the FXCAS pipelines: %s", e.localizedDescription.UTF8String); return nil; }
++        sbuf = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
++        if (sbuf) *(float *)sbuf.contents = fxcas_sharpness();
++        if (!vf || !ff || !at || !sbuf) { failed = 1; MLOG("[RED] cannot create the FXCAS pipelines: %s", e.localizedDescription.UTF8String); return nil; }
 +        pso = [NSMutableDictionary dictionary];
 +    }
 +    if (!scratch || sw != src.width || sh != src.height || spf != src.pixelFormat) {
@@ -64,6 +67,7 @@
 +    ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
 +    [en setArgumentTable:at atStages:MTLRenderStageFragment];
 +    [at setTexture:src.gpuResourceID atIndex:0];
++    [at setAddress:sbuf.gpuAddress atIndex:0];
 +    [en setViewport:(MTLViewport){0, 0, (double)sw, (double)sh, 0, 1}];
 +    [en setScissorRect:(MTLScissorRect){0, 0, (NSUInteger)sw, (NSUInteger)sh}];
 +    [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
@@ -122,44 +126,7 @@
  static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
  static void draw_(const p_draw *dw, const p_draw_idx *di) {
      g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
-+    if (fxcas_on()) fxcas_try(dw, di);   // SWX_FXCAS: sharpen the scene before its composite draw (one-shot binding swap in encode_args_)
++    if (fxcas_on()) fxcas_try(dw, di);   // SWX_FIDELITYFX_CAS: sharpen the scene before its composite draw (one-shot binding swap in encode_args_)
      if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
          PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
             p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
---- /dev/null	2026-11-19 23:34:59
-+++ b/dm/gfx/msl/fxcas.metal	2026-11-19 23:32:22
-@@ -0,0 +1,34 @@
-+// AMD FidelityFX CAS, sharpen-only (MIT, Copyright (c) Advanced Micro Devices, Inc.): port of Savage Wind's
-+// cas.frag (runtime/nvn/vulkan/shaders.c) to Metal. Runs on BOTW's 3D scene right before the draw that composites
-+// it onto the canvas; the draw then samples the sharpened copy (nvn_mtl.m SWX_FXCAS).
-+#include <metal_stdlib>
-+using namespace metal;
-+struct V { float4 p [[position]]; };
-+vertex V vs_cas(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }
-+// Fixed 0.25 intensity (SWX_FXCAS=1): 3x3 taps clamped to the texture (valid under DRS), alpha passes through.
-+fragment float4 fs_cas(V in [[stage_in]], texture2d<float> t [[texture(0)]]) {
-+    int2 ip = int2(in.p.xy);
-+    int2 lo = int2(0), hi = int2(t.get_width(), t.get_height()) - 1;
-+    float3 a = t.read(uint2(clamp(ip + int2(-1, -1), lo, hi))).rgb;
-+    float3 b = t.read(uint2(clamp(ip + int2( 0, -1), lo, hi))).rgb;
-+    float3 c = t.read(uint2(clamp(ip + int2( 1, -1), lo, hi))).rgb;
-+    float3 d = t.read(uint2(clamp(ip + int2(-1,  0), lo, hi))).rgb;
-+    float3 f = t.read(uint2(clamp(ip + int2( 1,  0), lo, hi))).rgb;
-+    float3 g = t.read(uint2(clamp(ip + int2(-1,  1), lo, hi))).rgb;
-+    float3 h = t.read(uint2(clamp(ip + int2( 0,  1), lo, hi))).rgb;
-+    float3 i = t.read(uint2(clamp(ip + int2( 1,  1), lo, hi))).rgb;
-+    float4 e4 = t.read(uint2(clamp(ip, lo, hi)));
-+    float3 e = e4.rgb;
-+    float3 mn = min(min(min(d, e), min(f, b)), h);
-+    float3 mn2 = min(min(min(mn, a), min(c, g)), i);
-+    mn += mn2;
-+    float3 mx = max(max(max(d, e), max(f, b)), h);
-+    float3 mx2 = max(max(max(mx, a), max(c, g)), i);
-+    mx += mx2;
-+    float3 amp = clamp(min(mn, 2.0 - mx) / max(mx, float3(1.0 / 65536.0)), 0.0, 1.0);
-+    amp = sqrt(amp);
-+    float peak = -1.0 / mix(8.0, 5.0, 0.25);
-+    float w = amp.g * peak;
-+    float3 r = (b * w + d * w + f * w + h * w + e) / (1.0 + 4.0 * w);
-+    return float4(max(r, 0.0), e4.a);
-+}

@@ -145,7 +145,28 @@ platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
 note = "launcher UI"
 
-# ---- SWX_VFR group (third umbrella; applies after SWX_GPU_KEEPALIVE and SWX_NATIVE_RES) ----
+# ---- SWX_FIDELITYFX_CAS group (graphics improvements; third umbrella; applies after SWX_NATIVE_RES) ----
+# Tested group: BOTW anchor draw composite sharpen + new CAS Metal shader.
+# Order = application order (toggle SWX_FIDELITYFX_CAS; BOTW-only; default macOS on).
+[[patch]]
+path = "SWX_FIDELITYFX_CAS/nvn_mtl.m.patch"
+enabled = true
+flag = "SWX_FIDELITYFX_CAS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "BOTW anchor draw composite sharpen (sharpness via SWX_FIDELITYFX_CAS_SHARPNESS)"
+
+[[patch]]
+path = "SWX_FIDELITYFX_CAS/fxcas.metal.patch"
+enabled = true
+flag = "SWX_FIDELITYFX_CAS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "new CAS Metal shader"
+
+# ---- SWX_VFR group (fourth umbrella; applies after SWX_GPU_KEEPALIVE, SWX_NATIVE_RES and SWX_FIDELITYFX_CAS) ----
 # Display pacing + real-time game step. SWX_VFR=relaxed/uncapped arms the VFR
 # clock, which isolates the stock DM_FPS/DM_FPS_TARGET/DM_FPS_HOLD path
 # (fstep_tick not called; dm_fps_state +0 stays neutral). SWX_VFR=0 restores
@@ -311,14 +332,6 @@ note = "superseded by SWX_NVN_UP_BLIT_REC/* (rebased port); kept for provenance"
 
 
 [[patch]]
-path = "swx_botw_fxcas.patch"
-enabled = false
-flag = "SWX_FXCAS"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "BOTW anchor draw; scope tbd, see PATCHES.md #27"
-
-[[patch]]
 path = "swx_botw_shadow_resolution.patch"
 enabled = false
 flag = "SWX_SHADOW_RESOLUTION"
@@ -332,7 +345,7 @@ enabled = false
 flag = "SWX_AA"
 games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
-note = "BOTW anchor draw; scope tbd, see PATCHES.md #29"
+note = "BOTW anchor draw; does not apply on the current core (dry-run fails, pre-existing); rebase planned, see PATCHES.md #29"
 
 [[patch]]
 path = "swx_botw_draw_distance.patch"
