@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """patches/apply_patches.py — copy core/nxnative to /tmp and patch the copy.
 
-Self-contained (stdlib only): no dependencies outside this folder.
+Self-contained (stdlib only: no dependencies outside this folder).
 The pristine checkout is never touched: every run deletes the destination,
 clones the source fresh (APFS copy-on-write when available) and applies
-patches/series in order (real apply + `# verify:` sentinels per patch).
-No dry-run gate: patch(1) dry-run checks each hunk against the pristine
-file without prior hunks' effects, so it can never validate hunks that
-depend on earlier hunks of the same file; the disposable copy makes the
-dry-run redundant — apply straight, verify with sentinels.
-patches/patch_nxnative.sh is kept as historical reference only.
+patches/patches.toml in order — only entries with enabled = true whose
+games/platforms match --game/--platform (real apply + `# verify:` sentinels
+per patch, no dry-run gate: patch(1) dry-run checks each hunk against the
+pristine file without prior hunks' effects, so it can never validate hunks
+that depend on earlier hunks of the same file; the disposable copy makes
+the dry-run redundant — apply straight, verify with sentinels).
+patches/patch_nxnative.sh + the old `series` file are historical only.
 
-Usage: apply_patches.py [--core <dir>] [--dest <dir>] [--check]
+Usage: apply_patches.py [--core <dir>] [--dest <dir>] [--platform mac|ios] [--game <id>] [--check]
 Prints SWX_PATCHED_CORE=<dest> as its last stdout line, so a caller
 (e.g. setup.sh) can capture the folder to point the extract/install
 command at instead of core/nxnative.
@@ -23,6 +24,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11: use the venv (3.14) instead
+    tomllib = None
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -43,36 +49,63 @@ def ok(msg):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         prog="apply_patches.py",
-        description="Copy <core> to a fresh /tmp dir and apply patches/series in order there.",
+        description="Copy <core> to a fresh /tmp dir and apply in-scope patches/patches.toml entries in order there.",
     )
     ap.add_argument("--core", default=str(ROOT / "core" / "nxnative"),
                     help="pristine nxnative checkout")
     ap.add_argument("--dest", default="",
                     help="where to build the patched copy "
                          "(default: /tmp/swx-nxnative-<hash>)")
+    ap.add_argument("--platform", default="mac",
+                    help="target platform family (default: mac); only matching entries apply")
+    ap.add_argument("--game", default="*",
+                    help="title id (default: * = any game); only matching entries apply")
     ap.add_argument("--check", action="store_true",
                     help="same full pipeline; only differs in intent")
     return ap.parse_args(argv)
 
 
-def series_entries(series_path):
-    entries = []
-    with open(series_path, encoding="utf-8") as f:
-        for line in f:
-            s = line.strip()
-            if s and not s.startswith("#"):
-                entries.append(s)
-    return entries
+def load_stack(toml_path):
+    if tomllib is None:
+        die("tomllib missing (need Python >= 3.11): use the repo .venv")
+    with open(toml_path, "rb") as f:
+        data = tomllib.load(f)
+    patches = data.get("patch", [])
+    if not isinstance(patches, list):
+        die(f"bad patches file (no [[patch]] list): {toml_path}")
+    return patches
 
 
-def inputs_hash(series_path, entries):
+def matches(entry, platform, game):
+    games = entry.get("games", ["*"])
+    platforms = entry.get("platforms", ["mac", "ios"])
+    return (game == "*" or "*" in games or game in games) and platform in platforms
+
+
+def select_entries(stack, platform, game):
+    """(to-apply, skipped): enabled + scope match, in file order."""
+    apply, skipped = [], []
+    for entry in stack:
+        path = entry.get("path", "")
+        if not entry.get("enabled", False):
+            skipped.append((path, "disabled"))
+        elif not matches(entry, platform, game):
+            skipped.append((path, "out of scope"))
+        else:
+            apply.append(entry)
+    return apply, skipped
+
+
+def inputs_hash(toml_path, entries, platform, game):
+    """Identity of this filtered stack: scope + registry + patch contents."""
     h = hashlib.sha256()
-    h.update(series_path.read_bytes())
+    h.update(f"{platform}\n{game}\n".encode())
+    h.update(toml_path.read_bytes())
     for e in entries:
-        p = HERE / e
+        p = HERE / e["path"]
         if not p.is_file():
-            die(f"patch file not found: {p} (series entry: {e})")
-        h.update(e.encode())
+            die(f"patch file not found: {p} (entry: {e['path']})")
+        h.update(e["path"].encode())
         h.update(p.read_bytes())
     return h.hexdigest()[:12]
 
@@ -127,7 +160,7 @@ def check_sentinels(patch_path, dest):
 
 
 def apply_one(entry, dest):
-    patch_path = HERE / entry
+    patch_path = HERE / entry["path"]
     data = patch_path.read_bytes()
     patch_bin = shutil.which("patch")
     if patch_bin is None:
@@ -136,26 +169,31 @@ def apply_one(entry, dest):
                        input=data, cwd=str(dest),
                        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     if r.returncode != 0:
-        die(f"apply failed: {entry}")
+        die(f"apply failed: {entry['path']}")
     if not check_sentinels(patch_path, dest):
-        die(f"sentinels do not hold after applying: {entry}")
-    ok(f"applied {entry}")
+        die(f"sentinels do not hold after applying: {entry['path']}")
+    flag = entry.get("flag", "")
+    ok(f"applied {entry['path']}" + (f" [{flag}]" if flag else ""))
 
 
 def main(argv=None):
     args = parse_args(argv)
-    series_path = HERE / "series"
+    toml_path = HERE / "patches.toml"
     core = Path(args.core)
-    if not series_path.is_file():
-        die(f"series not found: {series_path}")
+    if not toml_path.is_file():
+        die(f"patches.toml not found: {toml_path}")
     if not core.is_dir():
         die(f"core dir not found: {core} (pass --core <dir>)")
-    entries = series_entries(series_path)
+    stack = load_stack(toml_path)
+    entries, skipped = select_entries(stack, args.platform, args.game)
+    for path, why in skipped:
+        print(f"skip {path} ({why})")
+    # The destination covers the filtered set: different scope, different tree.
     dest = Path(args.dest) if args.dest else Path(
-        f"/tmp/swx-nxnative-{inputs_hash(series_path, entries)}")
+        f"/tmp/swx-nxnative-{inputs_hash(toml_path, entries, args.platform, args.game)}")
     clone_tree(core, dest)
     if not entries:
-        print("nothing to do (series empty or all commented).")
+        print("nothing to do (no enabled in-scope entries).")
     for entry in entries:
         apply_one(entry, dest)
     mode = "check" if args.check else "apply"

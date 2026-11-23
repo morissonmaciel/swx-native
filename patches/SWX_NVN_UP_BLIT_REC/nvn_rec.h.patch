@@ -1,0 +1,39 @@
+# SWX_NVN_UP_BLIT_REC group (toggle SWX_NVN_UP_BLIT_REC): hook dm/gfx/nvn/nvn_rec.h — RO_COMMIT_UBATCH record kind, replay case, rec_commit_ubatch writer.
+# verify: dm/gfx/nvn/nvn_rec.h:RO_COMMIT_UBATCH
+# verify: dm/gfx/nvn/nvn_rec.h:case RO_COMMIT_UBATCH:
+# verify: dm/gfx/nvn/nvn_rec.h:rec_commit_ubatch
+# Split of dm_up_blit_rec.patch (repositioned onto the new core; original rationale in that file's header).
+--- a/dm/gfx/nvn/nvn_rec.h
++++ b/dm/gfx/nvn/nvn_rec.h
+@@ -93,7 +93,8 @@
+     RO_T_ADDR, RO_T_TEX, RO_T_SAMP, RO_T_RESOURCE,
+     RO_C_AS_BUILD, RO_C_AS_REFIT, RO_C_AS_COPY, RO_C_AS_SIZE,
+     RO_LABEL, RO_R_TS, RO_C_TS,   // diagnostics: DM_NVN_ENC_LABEL, DM_NVN_GPUPROF
+     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
++    RO_COMMIT_UBATCH,   // SWX_NVN_UP_BLIT_REC prototype: a whole upload batch of buffer->texture copies (a[0] options, a[1] command buffer, a[2] tb tag, a[3] up_ubatch payload)
+ };
+ typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
+ enum { REC_BLK = 256 };
+@@ -270,6 +271,10 @@
+         rx_mark_locked(); pthread_mutex_unlock(&g_res_commit_mu);
+         q4_commit_slow(elapsed, (const char *)(uintptr_t)a[2]);
+         break; }
++    case RO_COMMIT_UBATCH: {   // SWX_NVN_UP_BLIT_REC prototype: the batch's blits run on the encode thread, in queue order after everything recorded before it
++        rx_flush();
++        up_ubatch_replay(a[0], a[1], a[2], a[3]);
++        break; }
+     case RO_SIGNAL:
+         if (after && g_rx_npend && g_rx_npost < (int)(sizeof g_rx_post / sizeof *g_rx_post)) { g_rx_post_ev[g_rx_npost] = rec_id(a[0]); g_rx_post[g_rx_npost].v = a[1]; g_rx_post[g_rx_npost++].p = NULL; g_rx_after = 1; break; }   // its command buffer is not committed yet
+         rx_flush(); [g_q4 signalEvent:rec_id(a[0]) value:a[1]]; break;
+@@ -566,6 +571,11 @@
+     rx_mark();
+     q4_commit_slow(elapsed, "rec_commit_upload (upload batch)");
+ }
++// A SWX_NVN_UP_BLIT_REC upload batch: the same queue slot as rec_commit_upload, but the buffer->texture blits are still unencoded (up_flush validated the
++// whole batch first): the payload carries the copies, and the encode thread emits them in up_ubatch_replay before ending and committing the command buffer.
++static void rec_commit_ubatch(id cb, MTL4CommitOptions *o, uintptr_t tag, uint64_t up) {
++    rec_t *r = rec_put(RO_COMMIT_UBATCH, 2); r->a[0] = rec_obj(o); r->a[1] = rec_obj(cb); r->a[2] = tag; r->a[3] = up;
++}
+ // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch
+ // committed after it and after the command buffers committed before it
+ static void rec_queue_block(void (^block)(void)) { if (rec_on() && g_rb_started) rec_put(RO_Q_BLOCK, 1)->a[0] = rec_obj([block copy]); else block(); }

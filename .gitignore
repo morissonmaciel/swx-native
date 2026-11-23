@@ -34,3 +34,5 @@ shader/
 
 # Agents
 .agents/
+.worktrees/
+session-*.md

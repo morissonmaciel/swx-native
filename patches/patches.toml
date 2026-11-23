@@ -1,0 +1,271 @@
+# patches/patches.toml — ordered patch stack with scope.
+# apply_patches.py applies entries with enabled = true whose games/platforms
+# match --game/--platform. Order = application order (a later patch may depend
+# on an earlier one's context). Replaces the old `series` flat list.
+# Scope rules:
+#   games = ["*"]  host mechanism, game-agnostic (profile supplies per-game data)
+#   games = ["<title id>", ...]  touches that game's builds/addresses/stubs
+#   platforms      OS the code runs on (mac and/or ios)
+#   default        effective default in a managed install (optional; absent = off/experimental)
+
+[[patch]]
+path = "SWX_GPU_KEEPALIVE/nvn_mtl.m.patch"
+enabled = true
+flag = "SWX_GPU_KEEPALIVE"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+
+[[patch]]
+path = "SWX_GPU_TEXTURE_POOL/nvn_mtl.m.patch"
+enabled = false
+flag = "SWX_GPU_TEXTURE_POOL"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "off", ios = "off" }
+note = "disabled for control A/B (was: install default mac on)"
+
+[[patch]]
+path = "SWX_GPU_KEEPALIVE/swx_keepalive.m.patch"
+enabled = true
+flag = "SWX_GPU_KEEPALIVE"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+
+[[patch]]
+path = "SWX_GPU_KEEPALIVE/hle_nvn.c.patch"
+enabled = true
+flag = "SWX_GPU_KEEPALIVE"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+
+# ---- experimental (enabled = false; arm per-run via DM_AB/.command, never pinned) ----
+
+[[patch]]
+path = "SWX_NVN_UP_BLIT_REC/nvn_rec.h.patch"
+enabled = false
+flag = "SWX_NVN_UP_BLIT_REC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "experimental, A/B only"
+
+[[patch]]
+path = "SWX_NVN_UP_BLIT_REC/nvn_mtl.m.patch"
+enabled = false
+flag = "SWX_NVN_UP_BLIT_REC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "experimental, A/B only"
+
+# ---- legacy stack (from the old series; scope to confirm while grouping) ----
+# Host mechanisms: game-agnostic code, validated on BOTW unless noted.
+
+[[patch]]
+path = "dm_save_async.patch"
+enabled = false
+flag = "SWX_SAVE_ASYNC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #2"
+
+[[patch]]
+path = "dm_pso_user_async.patch"
+enabled = false
+flag = "DM_PSO_USER_ASYNC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #3"
+
+[[patch]]
+path = "dm_gpu_bind_once.patch"
+enabled = false
+flag = "SWX_GPU_BIND_ONCE"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #5"
+
+[[patch]]
+path = "dm_vfr_framepace.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd (display pacing core + game stubs), see PATCHES.md #6"
+
+[[patch]]
+path = "dm_residency_ub_ring.patch"
+enabled = false
+flag = "SWX_RESIDENCY_UB_RING"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #8"
+
+[[patch]]
+path = "dm_rt_heap_reserve.patch"
+enabled = false
+flag = "SWX_RT_HEAP_RESERVE"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #9"
+
+[[patch]]
+path = "dm_present_worker.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd (validated on BOTW), see PATCHES.md #11"
+
+[[patch]]
+path = "dm_vfr_queue_policy.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd (validated on BOTW), see PATCHES.md #12"
+
+[[patch]]
+path = "swx_save_cleanup_worker.patch"
+enabled = false
+flag = "SWX_SAVE_ASYNC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #18"
+
+[[patch]]
+path = "dm_texture_burst_attribution.patch"
+enabled = false
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "instrumentation, opt-in via DM_NVN_TSV; scope tbd, see PATCHES.md #15"
+
+[[patch]]
+path = "dm_texture_burst_attribution_host_lifetime.patch"
+enabled = false
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "instrumentation, opt-in via DM_NVN_TSV; scope tbd, see PATCHES.md #16"
+
+[[patch]]
+path = "dm_up_blit_rec.patch"
+enabled = false
+flag = "SWX_NVN_UP_BLIT_REC"
+games = ["*"]
+platforms = ["mac", "ios"]
+note = "superseded by SWX_NVN_UP_BLIT_REC/* (rebased port); kept for provenance"
+
+# ---- BOTW-only (touches 01007EF00011E000 builds/addresses/stubs) ----
+
+[[patch]]
+path = "dm_vfr_ratio_load_fix.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW delta-time stubs; scope tbd, see PATCHES.md #10"
+
+[[patch]]
+path = "dm_vfr_quick_menu_alpha.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW 1.9.0 capture-alpha; scope tbd, see PATCHES.md #13"
+
+[[patch]]
+path = "swx_botw_render_scale.patch"
+enabled = false
+flag = "DM_RENDER_SCALE"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #19"
+
+[[patch]]
+path = "swx_botw_disable_drs.patch"
+enabled = false
+flag = "SWX_DISABLE_DRS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #20"
+
+[[patch]]
+path = "swx_botw_native_1080p.patch"
+enabled = false
+flag = "SWX_RES_BYPASS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #21"
+
+[[patch]]
+path = "swx_botw_native_1440p.patch"
+enabled = false
+flag = "SWX_RES_BYPASS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #22"
+
+[[patch]]
+path = "swx_botw_native_1440p_scene.patch"
+enabled = false
+flag = "SWX_RES_BYPASS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #23"
+
+[[patch]]
+path = "swx_botw_native_4k.patch"
+enabled = false
+flag = "SWX_NATIVE_RES"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "superseded by swx_botw_native_res; scope tbd, see PATCHES.md #24"
+
+[[patch]]
+path = "swx_botw_native_res.patch"
+enabled = false
+flag = "SWX_NATIVE_RES"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #25"
+
+[[patch]]
+path = "swx_botw_native_keep_drs.patch"
+enabled = false
+flag = "SWX_NATIVE_RES"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "scope tbd, see PATCHES.md #26"
+
+[[patch]]
+path = "swx_botw_fxcas.patch"
+enabled = false
+flag = "SWX_FXCAS"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW anchor draw; scope tbd, see PATCHES.md #27"
+
+[[patch]]
+path = "swx_botw_shadow_resolution.patch"
+enabled = false
+flag = "SWX_SHADOW_RESOLUTION"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW sun table; scope tbd, see PATCHES.md #28"
+
+[[patch]]
+path = "swx_botw_smaa.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW anchor draw; scope tbd, see PATCHES.md #29"
+
+[[patch]]
+path = "swx_botw_draw_distance.patch"
+enabled = false
+flag = "SWX_DRAW_DISTANCE"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW actor addresses; scope tbd, see PATCHES.md #30"

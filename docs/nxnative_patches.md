@@ -2,31 +2,36 @@
 
 `core/nxnative` is a vendored snapshot: we read it, never fork it. Upstream
 fixes and features are imported by replacing the directory; our deviations
-live as patch files in `patches/`, re-applied by `patches/patch_nxnative.sh`
-on every `scripts/install.sh` run. A transparent core update = fresh snapshot +
-re-run; conflicts surface loudly instead of silently rotting.
+live as patch files in `patches/`, applied by `patches/apply_patches.py`
+(a /tmp copy per `patches/patches.toml`, which also declares each patch's
+games/platforms scope) before every `setup.sh` build. A transparent core
+update = fresh snapshot + re-run; conflicts surface loudly instead of
+silently rotting. (`patches/patch_nxnative.sh` + `series` are historical.)
 
 ## Layout
 
 | Path | Role |
 |---|---|
-| `patches/series` | ordered list of patch files (`#` comments allowed); entries are paths relative to `patches/` — instrumentation (diag-only) patches live in `instrumentation/` and are listed as `../instrumentation/<name>.patch` |
+| `patches/patches.toml` | ordered `[[patch]]` stack with scope (`enabled`, `games`, `platforms`, `flag`); order is application order |
 | `patches/*.patch` | unified diffs, `-p1`, paths relative to `core/nxnative`, with `# verify:` sentinel headers (see below) |
-| `core/nxnative/.swx-patches-applied` | marker with the hash of series + patch contents (state lives with the patched tree; `core/` itself is not versioned here) |
 
 ## When patches apply
 
-`scripts/install.sh` calls `patches/patch_nxnative.sh <core dir>` after verifying the
-core exists and before creating the venv. Rationale: everything downstream
-(venv deps, wrapper, build) runs against the patched tree, so patching is a
-precondition, not an afterthought. `SWX_SKIP_PATCHES=1` skips it for
-debugging (the wrapper then runs against a pristine core).
+`setup.sh` calls `patches/apply_patches.py --platform mac --game <title id>`
+after the venv is ready and before staging the game. Rationale: everything
+downstream (nxnative build) runs against the patched copy, so patching is a
+precondition, not an afterthought. The pristine checkout is never touched.
 
-## Semantics
+## Semantics (apply_patches.py; patch_nxnative.sh semantics below are historical)
 
-The series is an ordered stack: a later patch may depend on an earlier
-one's context (e.g. batch instrumentation on top of the count split), so
-application walks in order and `--force` reverts walk in reverse.
+The toml stack is an ordered stack: a later patch may depend on an earlier
+one's context, so application walks in order (enabled + in-scope entries
+only) and stops at the first failure. Points 1–4 below describe the
+historical `patch_nxnative.sh` (kept for the record: dry-run gates, marker
+trust, `--force` normalization); `apply_patches.py` instead always starts
+from a fresh /tmp clone, applies for real, and verifies `# verify:`
+sentinels — no dry-run gate (proven unable to validate dependent hunks),
+no marker, no revert (delete the copy and re-run).
 
 1. Check-then-apply, in order: each patch dry-runs just before it applies
    (`patch --batch -p1 --dry-run`; `--batch`, and a single stdin redirect —
