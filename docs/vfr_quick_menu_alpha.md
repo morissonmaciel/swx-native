@@ -10,7 +10,7 @@ transparent during the transition.
 
 ## Patch behavior
 
-`dm_vfr_quick_menu_alpha.patch` changes only the branch at `main+0xe26a38`
+`SWX_VFR/quick_menu_alpha.patch` changes only the branch at `main+0xe26a38`
 in the BOTW 1.9.0 game profile. The original `fcmp s0, s1` compares the
 animation frame against `1.0`; the following `b.ne` skips the game's alpha
 correction when the values differ. The guard preserves that exact comparison

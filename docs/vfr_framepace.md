@@ -42,7 +42,7 @@ for coverage, interpretation and the final player acceptance.
 BOTW's VFR delta-time and UI-step stubs read the published ratio at state
 `+0xA0`; the stock FPS target at `+0` must not feed either VFR consumer.
 
-## Etapa 2 — four snapshots and two ready frames (`dm_vfr_queue_policy.patch`)
+## Etapa 2 — four snapshots and two ready frames (`SWX_VFR/queue_policy.patch`)
 
 With VFR active, the host uses four physical snapshot slots and targets two
 GPU-safe ready frames. The display callback consumes the oldest ready ticket;
@@ -65,7 +65,7 @@ The VFR-only quick-menu capture alpha guard is documented in
 frame-1 comparison and uses BOTW's existing alpha correction on positive
 fractional UI frames when VFR owns the clock. Its visual A/B remains pending.
 
-## Etapa 1 — present worker + ready FIFO (`dm_present_worker.patch`)
+## Etapa 1 — present worker + ready FIFO (`SWX_VFR/present_worker.patch`)
 
 Active whenever VFR is armed (`SWX_VFR=relaxed`/`uncapped` with a resolved
 rate); `SWX_VFR=0` keeps the stock take/wait/present path byte-for-byte.

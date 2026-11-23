@@ -41,6 +41,70 @@ games = ["*"]
 platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
 
+# ---- SWX_VFR group (second umbrella; applies after SWX_GPU_KEEPALIVE) ----
+# Display pacing + real-time game step. SWX_VFR=relaxed/uncapped arms the VFR
+# clock, which isolates the stock DM_FPS/DM_FPS_TARGET/DM_FPS_HOLD path
+# (fstep_tick not called; dm_fps_state +0 stays neutral). SWX_VFR=0 restores
+# stock. Order: framepace -> present_worker -> queue_policy (host mechanisms
+# stacking on nvn_mtl.m/hle_nvn.c), then ratio_load_fix -> quick_menu_alpha
+# (BOTW patches.py). The launcher exports SWX_VFR=relaxed SWX_VFR_HZ=auto.
+# See docs/vfr_framepace.md; gates #6/#11/#12/#10/#13 in PATCHES.md.
+#
+# BLOCKED (enabled = false): the current core rewrote the display-link callback
+# (nvn_mtl.m ~20520+) with a late latch (nvn_link_latch.h), a drain
+# (nvn_link_drain.h), tick-based holds (hold_ticks/tick_period) and a new
+# present history / present_now signature. framepace's display-link integration
+# (and the worker/policy that stack on it) targets the OLD period-based path
+# and no longer applies: 15 hunks drift structurally across nvn_mtl.m,
+# hle_nvn.c, loader.c, front_mac.m. The VFR clock/isolation design is intact;
+# the present path must be re-engineered against the latch/drain/tick core and
+# re-gated in gameplay before enabling. The .command keeps DM_FPS* until then.
+
+[[patch]]
+path = "SWX_VFR/framepace.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "blocked: display-link integration needs rebase onto latch/drain/tick core"
+
+[[patch]]
+path = "SWX_VFR/present_worker.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "blocked: stacks on framepace present path"
+
+[[patch]]
+path = "SWX_VFR/queue_policy.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "blocked: stacks on framepace/worker present path"
+
+[[patch]]
+path = "SWX_VFR/ratio_load_fix.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "applies clean; held with the group until the present path is rebased"
+
+[[patch]]
+path = "SWX_VFR/quick_menu_alpha.patch"
+enabled = false
+flag = "SWX_VFR"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "applies clean; held with the group until the present path is rebased"
+
 # ---- experimental (enabled = false; arm per-run via DM_AB/.command, never pinned) ----
 
 [[patch]]
@@ -86,13 +150,7 @@ games = ["*"]
 platforms = ["mac", "ios"]
 note = "scope tbd, see PATCHES.md #5"
 
-[[patch]]
-path = "dm_vfr_framepace.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["*"]
-platforms = ["mac", "ios"]
-note = "scope tbd (display pacing core + game stubs), see PATCHES.md #6"
+
 
 [[patch]]
 path = "dm_residency_ub_ring.patch"
@@ -110,21 +168,9 @@ games = ["*"]
 platforms = ["mac", "ios"]
 note = "scope tbd, see PATCHES.md #9"
 
-[[patch]]
-path = "dm_present_worker.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["*"]
-platforms = ["mac", "ios"]
-note = "scope tbd (validated on BOTW), see PATCHES.md #11"
 
-[[patch]]
-path = "dm_vfr_queue_policy.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["*"]
-platforms = ["mac", "ios"]
-note = "scope tbd (validated on BOTW), see PATCHES.md #12"
+
+
 
 [[patch]]
 path = "swx_save_cleanup_worker.patch"
@@ -158,21 +204,9 @@ note = "superseded by SWX_NVN_UP_BLIT_REC/* (rebased port); kept for provenance"
 
 # ---- BOTW-only (touches 01007EF00011E000 builds/addresses/stubs) ----
 
-[[patch]]
-path = "dm_vfr_ratio_load_fix.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "BOTW delta-time stubs; scope tbd, see PATCHES.md #10"
 
-[[patch]]
-path = "dm_vfr_quick_menu_alpha.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "BOTW 1.9.0 capture-alpha; scope tbd, see PATCHES.md #13"
+
+
 
 [[patch]]
 path = "swx_botw_render_scale.patch"
