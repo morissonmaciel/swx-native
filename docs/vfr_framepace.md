@@ -60,10 +60,11 @@ support the pair-by-pair Gate 2 protocol in
 accepted steady 60/60 and the remaining Gate 2 coverage on 2026-11-20.
 The 30 fps movie and return-to-gameplay have separate passing evidence below.
 
-The VFR-only quick-menu capture alpha guard is documented in
-[`vfr_quick_menu_alpha.md`](vfr_quick_menu_alpha.md). It preserves the stock
-frame-1 comparison and uses BOTW's existing alpha correction on positive
-fractional UI frames when VFR owns the clock. Its visual A/B remains pending.
+The VFR-only quick-menu capture alpha guard (`quick_menu_alpha.patch`) was
+removed: its black flash came from VFR's fractional real-time UI step crossing
+the `frame == 1.0` equality. The core's native whole-vsync frame step keeps the
+stock equality path, and a 2026-11-23 gameplay test (T2) confirmed no quick-menu
+flash without the guard, so the patch is unnecessary on the native path.
 
 ## Etapa 1 — present worker + ready FIFO (`SWX_VFR/present_worker.patch`)
 

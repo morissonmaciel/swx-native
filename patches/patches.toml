@@ -46,9 +46,9 @@ default = { mac = "on", ios = "off" }
 # clock, which isolates the stock DM_FPS/DM_FPS_TARGET/DM_FPS_HOLD path
 # (fstep_tick not called; dm_fps_state +0 stays neutral). SWX_VFR=0 restores
 # stock. Order: framepace -> present_worker -> queue_policy (host mechanisms
-# stacking on nvn_mtl.m/hle_nvn.c), then ratio_load_fix -> quick_menu_alpha
-# (BOTW patches.py). The launcher exports SWX_VFR=relaxed SWX_VFR_HZ=auto.
-# See docs/vfr_framepace.md; gates #6/#11/#12/#10/#13 in PATCHES.md.
+# stacking on nvn_mtl.m/hle_nvn.c), then ratio_load_fix (BOTW patches.py).
+# The launcher exports SWX_VFR=relaxed SWX_VFR_HZ=auto.
+# See docs/vfr_framepace.md; gates #6/#11/#12/#10 in PATCHES.md.
 #
 # BLOCKED (enabled = false): the current core rewrote the display-link callback
 # (nvn_mtl.m ~20520+) with a late latch (nvn_link_latch.h), a drain
@@ -89,15 +89,6 @@ note = "blocked: stacks on framepace/worker present path"
 
 [[patch]]
 path = "SWX_VFR/ratio_load_fix.patch"
-enabled = false
-flag = "SWX_VFR"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-default = { mac = "on", ios = "off" }
-note = "applies clean; held with the group until the present path is rebased"
-
-[[patch]]
-path = "SWX_VFR/quick_menu_alpha.patch"
 enabled = false
 flag = "SWX_VFR"
 games = ["01007EF00011E000"]

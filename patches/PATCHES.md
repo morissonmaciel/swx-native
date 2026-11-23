@@ -18,21 +18,30 @@ one at a time, with its gate re-run on the current core, before treating
 it as part of this install. What the generated `.command` actually pins
 is listed under “Current refactor install” below.
 
-**SWX_VFR group (scaffolded, blocked).** The five VFR patches (#6, #10,
-#11, #12, #13) are grouped under `patches/SWX_VFR/` as the second umbrella
-after `SWX_GPU_KEEPALIVE`, in application order framepace → present_worker
-→ queue_policy → ratio_load_fix → quick_menu_alpha. They are `enabled =
-false`: the current core rewrote the display-link callback (`nvn_mtl.m`
-~20520+) with a late latch (`nvn_link_latch.h`), a drain
-(`nvn_link_drain.h`), tick-based holds and a new present history /
-`present_now` signature. framepace's display-link integration targets the
-old period-based path and no longer applies (15 hunks drift structurally
-across `nvn_mtl.m`, `hle_nvn.c`, `loader.c`, `front_mac.m`); the worker and
-policy stack on it. The VFR clock and its stock-path isolation are intact
-(`fstep_tick` not called when armed; `dm_fps_state +0` neutral; see
-`docs/vfr_framepace.md`), but the present path must be re-engineered
-against the latch/drain/tick core and re-gated in gameplay before enabling.
-Until then the `.command` keeps `DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off`.
+**SWX_VFR group (scaffolded, blocked; likely superseded).** The four VFR
+patches (#6, #10, #11, #12) are grouped under `patches/SWX_VFR/` as the
+second umbrella after `SWX_GPU_KEEPALIVE`, in application order framepace →
+present_worker → queue_policy → ratio_load_fix. They are `enabled = false`:
+the current core rewrote the display-link callback (`nvn_mtl.m` ~20520+)
+with a late latch (`nvn_link_latch.h`), a drain (`nvn_link_drain.h`),
+tick-based holds and a new present history / `present_now` signature.
+framepace's display-link integration targets the old period-based path and
+no longer applies (15 hunks drift structurally across `nvn_mtl.m`,
+`hle_nvn.c`, `loader.c`, `front_mac.m`); the worker and policy stack on it.
+The VFR clock and its stock-path isolation are intact (`fstep_tick` not
+called when armed; `dm_fps_state +0` neutral; see `docs/vfr_framepace.md`),
+but the present path must be re-engineered against the latch/drain/tick
+core and re-gated in gameplay before enabling. Until then the `.command`
+keeps `DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off`.
+
+Investigation (2026-11-23, option A): the core's native frame step already
+delivers what VFR aimed for on BOTW — gameplay logs show game time 1.000 of
+real time, held 1800/0/0 vsyncs, 0 up/down/probes at 60 fps. T1 (movie)
+confirmed `20.00 s of pictures in 20.00 s (30 pictures a second)`; T2
+(quick-menu) confirmed no alpha flash on the native whole-vsync step, so
+the quick-menu alpha guard (#13) was removed as superseded. Whether to
+return VFR at all is pending the heavy-scene probe test (T3); the native
+path may make it unnecessary.
 
 | # | Patch | Flag | Status | Effect + metric | Evidence |
 |---|-------|------|--------|-----------------|----------|
@@ -48,7 +57,7 @@ Until then the `.command` keeps `DM_FPS=60 DM_FPS_TARGET=60 DM_FPS_HOLD=off`.
 | 10 | `SWX_VFR/ratio_load_fix.patch` | `SWX_VFR` | VFR guest timing fix; movie + resume path approved (ratio held across 60→30→60); residual VFR checks accepted by the player (2026-11-20) | BOTW delta-time and UI-step VFR stubs load the published ratio at state `+0xA0` | `docs/vfr_framepace.md` |
 | 11 | `SWX_VFR/present_worker.patch` | `SWX_VFR` | experimental (active whenever VFR armed; no new flags); movie + resume approved via ready FIFO (150/150 per 300 refreshes, 0 empty/0 drops); full Gate 2 accepted by the player (2026-11-20) | worker waits for source-safe completion, keeps cancellation observable without advancing `g_pq_done` over unfinished reads, and blocks promotion after purge; ready FIFO of 2; `SWX_VFR=0` stock untouched | `docs/vfr_framepace.md`, `ab_results.md` |
 | 12 | `SWX_VFR/queue_policy.patch` | `SWX_VFR` | experimental (Etapa 2; movie + resume approved with zero empty/drops in transition; steady 60/60 and full Gate 2 accepted by the player (2026-11-20)) | four physical snapshots, two-ready FIFO, oldest drop on overflow, bounded one-period priming at startup/resume, acquire cadence credits, and per-window queue/simulation telemetry using the cached display-link rate; no new environment key | `docs/vfr_framepace.md`, `ab_results.md` |
-| 13 | `SWX_VFR/quick_menu_alpha.patch` | `SWX_VFR` | experimental (two player-reported VFR runs passed; broader selector matrix and stock control unrecorded) | Runs BOTW 1.9.0's existing capture-alpha correction at every positive VFR animation frame, while preserving the stock equality branch and movie/scripted-override paths | `docs/vfr_quick_menu_alpha.md` |
+| 13 | ~~`SWX_VFR/quick_menu_alpha.patch`~~ | `SWX_VFR` | **removed** (2026-11-23): superseded by the core's native whole-vsync frame step; gameplay T2 confirmed no quick-menu flash without it | the black flash came from VFR's fractional UI step crossing `frame == 1.0`; the native step keeps the stock equality path | gameplay T2 2026-11-23 |
 | 14 | `SWX_GPU_TEXTURE_POOL/nvn_mtl.m.patch` (fix hunks) | `SWX_GPU_TEXTURE_POOL` | correctness repair for the pool (currently disabled with it) | Preserves upload-block ownership through GPU feedback, checks batch budget before pool take/fallback allocation, and reports materialized private pool capacity separately from useful reserved bytes; two pool-only gameplay runs had zero misses and 64 MiB materialized | `docs/texture_burst_measurement_and_dispatch_plan.md`, `instrumentation/ab_results.md` |
 | 15 | `dm_texture_burst_attribution.patch` | (opt-in via `DM_NVN_TSV`, no new flag) | batch-correlated texture-upload attribution (encode/publish/gpu events with stable full-ID joins; missing fields unavailable, never zero) | per-batch wall-clock buckets for area-entry bursts; 554/159 fully joined batches, zero overflow/slot-waits | `docs/texture_burst_measurement_and_dispatch_plan.md`, `instrumentation/ab_results.md` |
 | 16 | `dm_texture_burst_attribution_host_lifetime.patch` | (same opt-in) | host-side lifetime handoff for burst records (TSV drained on the game thread, GPU feedback publishes timestamps) | supports the #15 attribution path | `docs/texture_burst_measurement_and_dispatch_plan.md` |
