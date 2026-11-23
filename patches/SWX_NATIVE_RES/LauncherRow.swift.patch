@@ -1,0 +1,32 @@
+# SWX_NATIVE_RES group (LauncherRow.swift.patch): fixed render-scale shown as percent label
+# verify: dm/ios/Sources/LauncherRow.swift:lockedChoicePercent
+diff --git a/dm/ios/Sources/LauncherRow.swift b/dm/ios/Sources/LauncherRow.swift
+index e6f79ea8..df08c828 100644
+--- a/dm/ios/Sources/LauncherRow.swift
++++ b/dm/ios/Sources/LauncherRow.swift
+@@ -32,12 +32,20 @@ struct SettingRow: View {
+         Group {
+             switch s.kind {
+             case "choice":
+-                Picker(selection: m.binding(s)) {
+-                    ForEach(offeredOptions(s, current: m.values[s.env]), id: \.[0]) { Text($0[1]).tag($0[0]) }
+-                } label: {
+-                    settingLabel
++                if let pct = m.lockedChoicePercent(s) {
++                    HStack {
++                        settingLabel
++                        Spacer()
++                        Text(pct).monospacedDigit().foregroundStyle(.secondary)
++                    }
++                } else {
++                    Picker(selection: m.binding(s)) {
++                        ForEach(offeredOptions(s, current: m.values[s.env]), id: \.[0]) { Text($0[1]).tag($0[0]) }
++                    } label: {
++                        settingLabel
++                    }
++                    .pickerStyle(.menu)
+                 }
+-                .pickerStyle(.menu)
+             case "range":
+                 VStack(alignment: .leading, spacing: 8) {
+                     HStack {

@@ -1,0 +1,47 @@
+# SWX_NATIVE_RES group (LauncherSettings.swift.patch): numeric saved render-scale normalization + fixed percent
+# verify: dm/ios/Sources/LauncherSettings.swift:normalizedSaved
+diff --git a/dm/ios/Sources/LauncherSettings.swift b/dm/ios/Sources/LauncherSettings.swift
+index 29e9e734..5becc733 100644
+--- a/dm/ios/Sources/LauncherSettings.swift
++++ b/dm/ios/Sources/LauncherSettings.swift
+@@ -67,7 +67,7 @@ final class LauncherModel: ObservableObject {
+         for s in settings {
+             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
+             let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
+-            values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
++            values[s.env] = saved.flatMap { self.normalizedSaved(s, $0) } ?? s.def   // a saved choice the game no longer offers: its default
+         }
+     }
+ 
+@@ -97,6 +97,18 @@ final class LauncherModel: ObservableObject {
+         guard size.count == 2 else { return p }
+         return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+     }
++    func normalizedSaved(_ s: Setting, _ v: String) -> String? {   // a saved choice the game still offers: a render-scale percent compares as a number (the slider wrote 1.00 for 1.0)
++        if s.env == "DM_RENDER_SCALE", s.kind == "choice" {
++            guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite else { return nil }   // no hex: launcher.c's check agrees
++            return s.options?.first { !$0.isEmpty && Double($0[0]) == n }?[0]
++        }
++        return s.accepts(v) ? v : nil
++    }
++    func lockedChoicePercent(_ s: Setting) -> String? {   // a fixed render-scale choice as a percent (the Mac window shows it instead of the picker): nil when it is no such row
++        guard s.env == "DM_RENDER_SCALE", s.kind == "choice", fixed.contains(s.env),
++              let n = Double(values[s.env] ?? s.def), n.isFinite else { return nil }
++        return "\(Int((n * 100).rounded())) %"
++    }
+     var changed: Bool { settings.contains { !fixed.contains($0.env) && !$0.isDefault(values[$0.env] ?? $0.def) } }
+ 
+     // Reset every launcher choice to the game's defaults on the screen; values fixed by an env file or at launch stay. The saved choices are forgotten when Play applies
+@@ -123,9 +135,9 @@ final class LauncherModel: ObservableObject {
+     // A choice made while the game runs (the iOS in-game menu, GameMenu.swift): saved as Play saves it, so the settings screen shows it at the next start, and put in the environment.
+     // A value an env file or the launch fixed stays
+     func choose(_ s: Setting, _ v: String) {
+-        guard !fixed.contains(s.env), s.accepts(v) else { return }
+-        values[s.env] = v; store(s, v); setenv(s.env, v, 1)
+-        fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
++        guard !fixed.contains(s.env), let w = normalizedSaved(s, v) else { return }
++        values[s.env] = w; store(s, w); setenv(s.env, w, 1)
++        fputs("launcher: \(s.env)=\(w) (in-game menu)\n", stderr)
+     }
+ 
+     // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written

@@ -1,0 +1,104 @@
+# SWX_NATIVE_RES group (hle_svc.c.patch): grow guest AS + app pool by bypass headroom
+# verify: dm/host/hle_svc.c:swx_mem_reserve_fixed
+# verify: dm/host/hle_svc.c:g_app_pool_eff
+diff --git a/dm/host/hle_svc.c b/dm/host/hle_svc.c
+index 79b4a7e9..da8aba47 100644
+--- a/dm/host/hle_svc.c
++++ b/dm/host/hle_svc.c
+@@ -31,6 +31,10 @@
+ #define RESERVE DM_GAME_MEM_RESERVE   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+ static uint8_t *g_as;              // ASLR region base = the whole block
+ static size_t g_reserve;           // its size: RESERVE less the profile's alias region plus the one in use (mem_init_once)
++static int g_mem_reserve_fixed;    // 1 after the guest address space reservation above has been made (swx_mem_reserve_fixed, for the bypass heap request in loader.c)
++int swx_mem_reserve_fixed(void) { return g_mem_reserve_fixed; }   // 1 when the guest reservation is already fixed: a bypass heap request then takes the stock path
++__attribute__((weak)) size_t swx_res_bypass_mem_extra(void) { return 0; }   // loader.c overrides: +960 MiB on a confirmed 2160p boot, +512 MiB on 1440p (unit tests without the loader get 0)
++static size_t g_app_pool_eff;      // the application pool in force: APP_POOL, +960 MiB on a confirmed 2160p boot, +512 MiB on 1440p
+ static uint8_t *g_heap; static _Atomic size_t g_heap_cur; static size_t g_heap_cap;
+ static size_t g_heap_seen;        // the largest heap opened so far: with the guest in files, SetHeapSize zeroes a heap that grows back below it
+ // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
+@@ -324,7 +328,8 @@ static void mem_init_once(void) {
+     // Edition (two 60 GB reservations) at start. It is address space, not memory: the application pool bounds what is mapped. DM_ALIAS_SIZE=<bytes> sets another size, the heap and
+     // stacks as they are; the profile's value reproduces an iPhone's address space on the Mac (the NSP script's heap check)
+     size_t alias = dm_alias_size_for(dm_sdk_ounce());
+-    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias;
++    size_t mem_extra = swx_res_bypass_mem_extra();   // 2160p: +960 MiB, 1440p: +512 MiB headroom, published by the frontend at boot
++    g_reserve = RESERVE - DM_GAME_MEM_ALIAS + alias + mem_extra;
+     g_as = mmap(NULL, g_reserve, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+     if (g_as == MAP_FAILED) {
+ #if TARGET_OS_IPHONE
+@@ -333,6 +338,7 @@ static void mem_init_once(void) {
+ #endif
+         die("reserve guest AS (%.2f GiB, errno %d)", g_reserve / 1073741824.0, errno);
+     }
++    g_mem_reserve_fixed = 1;   // the block above is the guest's address space now; a later bypass heap request finds it fixed
+     guest_file_init();
+     // Fixed partition (all inside the reserved block): 256 MB in front, the heap, the stacks, then the alias region. Mario: a heap region of 1.625 GB, stack 256 MB, alias 2.875 GB.
+     // The alias region is last because a Switch's addresses stay below 2^39 and a 64 GB alias region cannot: macOS 27 reserves 0x1000000000-0x7000000000, which leaves exactly 64 GB below
+@@ -343,9 +349,10 @@ static void mem_init_once(void) {
+     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
+     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
+     // The alias and stack sizes come from the game profile (mem_alias / mem_stack, the Mac's alias region as above), the heap takes the rest of mem_reserve
+-    g_heap  = g_as + 0x10000000; g_heap_cap = RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000;
++    g_heap  = g_as + 0x10000000; g_heap_cap = RESERVE - DM_GAME_MEM_ALIAS - DM_GAME_MEM_STACK - 0x10000000 + mem_extra;
+     g_stack = g_heap + g_heap_cap; g_stack_cap = DM_GAME_MEM_STACK;
+     g_alias = g_stack + g_stack_cap; g_alias_cap = alias;
++    g_app_pool_eff = DM_GAME_APP_POOL + mem_extra;
+     if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("alias region page bitmap calloc");
+     if (!(g_alias_exposed = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_exposed))) die("alias exposure bitmap calloc");
+     if (!(g_alias_rel = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_rel)) || !(g_alias_aged = calloc(g_alias_cap / pg / 64 + 1, sizeof *g_alias_aged))) die("alias release bitmap calloc");
+@@ -355,7 +362,7 @@ static void mem_init_once(void) {
+         if (!rc) pthread_detach(th);
+         else LOG("[RED] [mem] guest file: no thread to watch it (error %d): no 10-s line, and nothing stops the game when its disk fills", rc);
+     }
+-    LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack);
++    LOG("guest AS %p +%#llx  heap %p alias %p stack %p (heap region %.2f GB, application pool %.2f GB)", g_as, (unsigned long long)g_reserve, g_heap, g_alias, g_stack, g_heap_cap / 1073741824.0, g_app_pool_eff / 1073741824.0);
+     if ((uint64_t)(uintptr_t)g_alias > UINT64_C(1) << 39) LOG("[mem] the heap and stacks reach past 2^39, which a Switch's addresses never do: a crash on a cut-off pointer points here (DM_ALIAS_SIZE=<profile's mem_alias> keeps them lower)");
+     const char *aw = getenv("DM_ALIAS_WINDOWS");
+     if (aw && atoi(aw) > 0) { pthread_t th; if (!pthread_create(&th, NULL, alias_windows_thread, (void *)(uintptr_t)atoi(aw))) pthread_detach(th); }
+@@ -914,16 +921,16 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         size_t size = regs[1];
+         // Larger than the heap region: ResultOutOfMemory (0xD001), as Horizon's KPageTable::SetHeapSize returns. nn::os::SetMemoryHeapSize turns only that, 103 and LimitReached into
+         // os::ResultOutOfMemory and aborts on anything else; Donkey Kong Country: Tropical Freeze finds its heap size by a binary search between 3 and 6 GB, which needs the error back
+-        if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD001; return 0; }
++        if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx (bypass headroom %s)", size, g_heap_cap, swx_res_bypass_mem_extra() ? "on" : "off"); regs[0] = 0xD001; return 0; }
+         pthread_mutex_lock(&g_map_lock);
+         size_t previous = g_heap_cur;
+         if (size < previous && (map_source_busy((uintptr_t)g_heap + size, previous - size) || device_shared((uintptr_t)g_heap + size, previous - size, "SetHeapSize shrinking over"))) {
+             pthread_mutex_unlock(&g_map_lock); regs[0] = 0xD401; return 0;
+         }
+         uint64_t used = used_beside_heap();
+-        if (used > APP_POOL || size > APP_POOL - used) {   // ResultLimitReached: more than the total less the used memory GetInfo reports; games retry in 2 MB decrements
++        if (used > g_app_pool_eff || size > g_app_pool_eff - used) {   // ResultLimitReached: more than the total less the used memory GetInfo reports; games retry in 2 MB decrements
+             // Logged once (Mario's retries would repeat it)
+-            static int once; if (!once++) LOG("[mem] SetHeapSize %#zx > app pool %#llx less used memory %#llx", size, (unsigned long long)APP_POOL, (unsigned long long)used);
++            static int once; if (!once++) LOG("[mem] SetHeapSize %#zx > app pool %#llx less used memory %#llx", size, (unsigned long long)g_app_pool_eff, (unsigned long long)used);
+             pthread_mutex_unlock(&g_map_lock); regs[0] = 0x10801; return 0;
+         }
+         int rc = 0;
+@@ -1186,7 +1193,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         // UnmapPhysicalMemory of the 3.15 GB block and the same map again). Without the limit the mapped total went past the pool in the first minute and the freed block stayed mapped.
+         // Off by default on Switch 1: Ace Attorney Investigations Collection maps a little more than the 1 GB pool its profile reports
+         if (mem_map_limit_on() && num == 0x2C) {
+-            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + used_beside_heap());   // used_beside_heap holds the mapped pages with mem_map_limit
++            int64_t room = (int64_t)g_app_pool_eff - (int64_t)(g_heap_cur + used_beside_heap());   // used_beside_heap holds the mapped pages with mem_map_limit
+             if (need && need > room) {
+                 pthread_mutex_unlock(&g_map_lock);
+                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
+@@ -1226,7 +1233,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
+         { int64_t d = alias_pages(off, size, commit) * 4096, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
+           pthread_mutex_unlock(&g_map_lock);
+-          if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
++          if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, g_app_pool_eff / 1073741824.0); }
+         regs[0] = 0; return 0;
+     }
+     case 0x15: {  // CreateTransferMemory(→w1 handle; x1 address, x2 size, w3 owner permission)
+@@ -1265,7 +1272,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
+         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;
+         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = g_reserve;   break;
+         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
+-        case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
++        case I_TotalMem: case I_TotalNonSys: v = g_app_pool_eff; break;
+         case I_UsedMem:  case I_UsedNonSys:  pthread_mutex_lock(&g_map_lock);
+                                              // profile mem_used (64 MB unless the game's hardware heap needs more: mem_used in dm/games/README.md) and the giant bss; with mem_map_limit the pages
+                                              // mapped in the alias region count too, as on Horizon. SetHeapSize and MapPhysicalMemory charge the same figure

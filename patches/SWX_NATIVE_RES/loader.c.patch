@@ -1,0 +1,79 @@
+# SWX_NATIVE_RES group (loader.c.patch): SWX_NATIVE_RES env validation + state +0xB4/+0xB8/+0xC0 + heap headroom
+# verify: dm/host/loader.c:swx_res_bypass_requested
+# verify: dm/host/loader.c:swx_res_bypass_mem_extra
+diff --git a/dm/host/loader.c b/dm/host/loader.c
+index 5fdd9d75..6b4b1b07 100644
+--- a/dm/host/loader.c
++++ b/dm/host/loader.c
+@@ -383,6 +383,9 @@ static void read_layout(module_t *m, const char *dir) {
+         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
+         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
++        else if (!strcmp(key, "SWX_NATIVE_1080P")) m->swx_native_1080p = v != 0;
++        else if (!strcmp(key, "SWX_NATIVE_1440P")) m->swx_native_1440p = v != 0;
++        else if (!strcmp(key, "SWX_NATIVE_4K")) m->swx_native_4k = v != 0;
+         else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
+         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+         else if (!strcmp(key, "FRAME_STEP_120")) m->fstep_t120 = v != 0;
+@@ -444,11 +447,24 @@ int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in
+ static const char *g_fps_mod;   // the module holding the state page (for the log)
+ static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+ static int g_fstep_t120;                  // the frame step stub takes ticks of 1/120 s (the FRAME_STEP_120 capability): the page's unit (+0x38) is 120, and 40 fps is taken
++static int g_native_1080p, g_native_1440p, g_native_4k;   // the build's native-resolution bypass stubs (SWX_NATIVE_* in its fixups table): the SWX_NATIVE_RES presets they take
++static int g_bypass_req, g_bypass_mem_1440, g_bypass_mem_4k;   // the validated preset's mode (0 = off, 1 = 1080p, 2 = 1440p, 3 = 2160p) and the front end's heap requests for it
++int swx_res_bypass_requested(void) { return g_bypass_req; }   // 1 when SWX_NATIVE_RES named a preset this build takes: the front end forces state +0xB4 at boot from it
++int swx_mem_reserve_fixed(void);   // hle_svc.c: 1 after the guest address space reservation has been made (its stub stands in for the unit tests, as mtl_present_screen's does)
++static int swx_res_bypass_mem(int on, int *flag, const char *preset) {   // the front end's heap request for a bypass preset, before the first guest reservation
++    if (swx_mem_reserve_fixed()) { LOG("[RED] SWX_NATIVE_RES=%s: the guest reservation is already fixed; using the stock path", preset); return 0; }
++    *flag = on ? 1 : 0; return 1;
++}
++int swx_res_bypass_mem_1440(int on) { return swx_res_bypass_mem(on, &g_bypass_mem_1440, "1440p"); }
++int swx_res_bypass_mem_4k(int on) { return swx_res_bypass_mem(on, &g_bypass_mem_4k, "2160p"); }
++size_t swx_res_bypass_mem_extra(void) { return g_bypass_mem_4k ? (size_t)960 << 20 : g_bypass_mem_1440 ? (size_t)512 << 20 : 0; }   // hle_svc.c: headroom for heap, stack and alias regions
+ static void install_fps_state(module_t *m) {
+     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
+     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+     g_fstep_t120 = m->fstep_t120;
++    g_native_1080p = m->swx_native_1080p; g_native_1440p = m->swx_native_1440p; g_native_4k = m->swx_native_4k;
++    g_bypass_req = 0;   // validated again in dm_fps_state_apply below, from the environment
+ }
+ // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
+ // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+@@ -466,6 +482,36 @@ void dm_fps_state_apply(void) {
+     const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
+     if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
+     memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
++    // Native-resolution presets (SWX_NATIVE_RES, macOS only): 0 keeps the stock sizes, 1080p / 1440p / 2160p bypass them (state +0xB4 1 / 2 / 3, read by the build's
++    // stubs; the front end forces the mode at boot, the loader keeps it 0, the request stays host-side). Only a build whose stubs declare the preset's capability
++    // (SWX_NATIVE_* in its fixups table) takes it, and only docked; anything else keeps the stock path
++    uint32_t bypass = 0;
++    const char *nres = getenv("SWX_NATIVE_RES");
++    if (!nres || !*nres || !strcmp(nres, "0")) bypass = 0;   // off: the stock path
++    else {
++        int mode = !strcmp(nres, "1080p") ? 1 : !strcmp(nres, "1440p") ? 2 : !strcmp(nres, "2160p") ? 3 : 0;
++        if (!mode) LOG("[RED] SWX_NATIVE_RES=%s: 1080p, 1440p, 2160p or 0; using the stock path", nres);
++        else {
++            int capable = mode == 3 ? g_native_4k : mode == 2 ? g_native_1440p : g_native_1080p;
++            const char *oe = getenv("DM_OPMODE"); int docked = oe ? atoi(oe) : DM_GAME_OPMODE;
++            if (!capable) LOG("[RED] SWX_NATIVE_RES=%s: this build declares no SWX_NATIVE_%s stub; using the stock path", nres, mode == 3 ? "4K" : mode == 2 ? "1440P" : "1080P");
++            else if (!docked) LOG("[RED] SWX_NATIVE_RES=%s: needs docked mode; using the stock path", nres);
++            else { bypass = (uint32_t)mode; g_bypass_req = mode; LOG("%s: SWX_NATIVE_RES=%s active (1080p/1440p/2160p bypass active)", g_fps_mod, nres); }
++        }
++    }
++    memcpy(dm_fps_state + 0xB4, &bypass, sizeof bypass);
++    uint64_t canvas = 0; float canvas_wf = 0.0f;
++    if (bypass) {
++        int pw = bypass == 3 ? 3840 : bypass == 2 ? 2560 : 1920;
++        int ph = bypass == 3 ? 2160 : bypass == 2 ? 1440 : 1080;
++        uint32_t cw = (uint32_t)((float)pw * sc);
++        uint32_t ch = (uint32_t)((float)ph * sc);
++        canvas = (uint64_t)cw | ((uint64_t)ch << 32);
++        canvas_wf = (float)cw;
++        if (sc < 1.0f) { float one = 1.0f; memcpy(dm_fps_state + 0x10, &one, sizeof one); }
++    }
++    memcpy(dm_fps_state + 0xB8, &canvas, sizeof canvas);
++    memcpy(dm_fps_state + 0xC0, &canvas_wf, sizeof canvas_wf);
+     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
+     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
+     const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");

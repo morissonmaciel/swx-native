@@ -8,6 +8,7 @@
 #   platforms      OS the code runs on (mac and/or ios)
 #   default        effective default in a managed install (optional; absent = off/experimental)
 
+# ---- SWX_GPU_KEEPALIVE group (first umbrella; host GPU keep-alive) ----
 [[patch]]
 path = "SWX_GPU_KEEPALIVE/nvn_mtl.m.patch"
 enabled = true
@@ -15,15 +16,6 @@ flag = "SWX_GPU_KEEPALIVE"
 games = ["*"]
 platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
-
-[[patch]]
-path = "SWX_GPU_TEXTURE_POOL/nvn_mtl.m.patch"
-enabled = false
-flag = "SWX_GPU_TEXTURE_POOL"
-games = ["*"]
-platforms = ["mac", "ios"]
-default = { mac = "off", ios = "off" }
-note = "disabled for control A/B (was: install default mac on)"
 
 [[patch]]
 path = "SWX_GPU_KEEPALIVE/swx_keepalive.m.patch"
@@ -41,7 +33,119 @@ games = ["*"]
 platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
 
-# ---- SWX_VFR group (second umbrella; applies after SWX_GPU_KEEPALIVE) ----
+# ---- SWX_NATIVE_RES group (second umbrella; applies after SWX_GPU_KEEPALIVE) ----
+# Tested group: host bypass + frontend force + settings catalog + launcher UI.
+# Order = application order (core host state first, then frontend, then game
+# stubs/tooling, then settings catalog, then launcher UI).
+[[patch]]
+path = "SWX_NATIVE_RES/dm.h.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "host bypass state"
+
+[[patch]]
+path = "SWX_NATIVE_RES/loader.c.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "host bypass plumbing"
+
+[[patch]]
+path = "SWX_NATIVE_RES/hle.h.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "host HLE declarations"
+
+[[patch]]
+path = "SWX_NATIVE_RES/hle_svc.c.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "host service handling"
+
+[[patch]]
+path = "SWX_NATIVE_RES/front_mac.m.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "frontend force"
+
+[[patch]]
+path = "SWX_NATIVE_RES/hle_lifecycle.c.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "host lifecycle hooks"
+
+[[patch]]
+path = "SWX_NATIVE_RES/botw_patches.py.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "game stubs"
+
+[[patch]]
+path = "SWX_NATIVE_RES/settings.tsv.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "settings catalog"
+
+[[patch]]
+path = "SWX_NATIVE_RES/settings.py.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "settings build tooling"
+
+[[patch]]
+path = "SWX_NATIVE_RES/launcher.c.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "launcher wiring"
+
+[[patch]]
+path = "SWX_NATIVE_RES/LauncherRow.swift.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "launcher UI"
+
+[[patch]]
+path = "SWX_NATIVE_RES/LauncherSettings.swift.patch"
+enabled = true
+flag = "SWX_NATIVE_RES"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "on", ios = "off" }
+note = "launcher UI"
+
+# ---- SWX_VFR group (third umbrella; applies after SWX_GPU_KEEPALIVE and SWX_NATIVE_RES) ----
 # Display pacing + real-time game step. SWX_VFR=relaxed/uncapped arms the VFR
 # clock, which isolates the stock DM_FPS/DM_FPS_TARGET/DM_FPS_HOLD path
 # (fstep_tick not called; dm_fps_state +0 stays neutral). SWX_VFR=0 restores
@@ -97,6 +201,15 @@ default = { mac = "on", ios = "off" }
 note = "applies clean; held with the group until the present path is rebased"
 
 # ---- experimental (enabled = false; arm per-run via DM_AB/.command, never pinned) ----
+
+[[patch]]
+path = "SWX_GPU_TEXTURE_POOL/nvn_mtl.m.patch"
+enabled = false
+flag = "SWX_GPU_TEXTURE_POOL"
+games = ["*"]
+platforms = ["mac", "ios"]
+default = { mac = "off", ios = "off" }
+note = "disabled for control A/B (was: install default mac on)"
 
 [[patch]]
 path = "SWX_NVN_UP_BLIT_REC/nvn_rec.h.patch"
@@ -162,7 +275,6 @@ note = "scope tbd, see PATCHES.md #9"
 
 
 
-
 [[patch]]
 path = "swx_save_cleanup_worker.patch"
 enabled = false
@@ -198,7 +310,6 @@ note = "superseded by SWX_NVN_UP_BLIT_REC/* (rebased port); kept for provenance"
 
 
 
-
 [[patch]]
 path = "swx_botw_render_scale.patch"
 enabled = false
@@ -213,7 +324,7 @@ enabled = false
 flag = "SWX_DISABLE_DRS"
 games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
-note = "experimental opt-in (default off; never pinned by the installer). Fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including 1.0 (1600×900 docked). Independent of SWX_NATIVE_RES (which is now first-class in the core)."
+note = "experimental opt-in (default off; never pinned by the installer). Fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including 1.0 (1600×900 docked). Independent of SWX_NATIVE_RES (now the SWX_NATIVE_RES patch group in patches/SWX_NATIVE_RES/, applied via patches.toml; not a first-class core feature)."
 
 [[patch]]
 path = "swx_botw_fxcas.patch"

@@ -1,0 +1,14 @@
+# SWX_NATIVE_RES group (settings.tsv.patch): SWX_NATIVE_RES choice row
+# verify: dm/games/settings.tsv:SWX_NATIVE_RES
+diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
+index 8cfacbaf..e83b760e 100644
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -18,6 +18,7 @@
+ DM_FPS_TARGET	choice	30=30 fps,40=40 fps?fixups:FRAME_STEP_120,60=60 fps,120=120 fps?DM_GAME_FPS_MAX==120	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate		level=basic
+ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
++SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Renders the scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler

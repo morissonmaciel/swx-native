@@ -1,0 +1,20 @@
+# SWX_NATIVE_RES group (hle.h.patch): state-page layout + bypass request API
+# verify: dm/host/hle.h:swx_res_bypass_mem_1440
+# verify: dm/host/hle.h:+0xB8 u32 canvas width
+diff --git a/dm/host/hle.h b/dm/host/hle.h
+index 37430fff..a063fbfe 100644
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -137,7 +137,11 @@ void dm_applet_leave(void);
+ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
+ #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
+ // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)
+-extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
++extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_hz() != 0, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped, +0xB4 u32 bypass mode (0 = off, 1 = 1080p, 2 = 1440p, 3 = 2160p; forced by the macOS front end at boot, the loader keeps it 0, the request stays host-side; SWX_NATIVE_RES), +0xB8 u32 canvas width, +0xBC u32 canvas height, +0xC0 f32 canvas width (0 = off); NULL when the build has none
++int swx_res_bypass_requested(void);   // 1 when SWX_NATIVE_RES named a preset this build takes: its stubs read state +0xB4 (loader.c; validated there, the request stays host-side)
++int swx_res_bypass_mem_1440(int on);   // the front end's heap request for the 1440p preset, before the first guest reservation: 1 taken, 0 the reservation is already fixed (loader.c)
++int swx_res_bypass_mem_4k(int on);   // the same for the 2160p preset (loader.c)
++size_t swx_res_bypass_mem_extra(void);   // loader.c: +960 MiB on a confirmed 2160p boot, +512 MiB on 1440p, else 0 (hle_svc.c)
+ extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs give the game (patch_nso.py ctx.step_max; 0 = FSTEP_MAX)
+ int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
+ void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none

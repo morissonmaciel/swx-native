@@ -1,0 +1,20 @@
+# SWX_NATIVE_RES group (dm.h.patch): native-resolution bypass presets the build takes
+# verify: dm/host/dm.h:swx_native_1080p
+diff --git a/dm/host/dm.h b/dm/host/dm.h
+index 38eb09e1..01a609bb 100644
+--- a/dm/host/dm.h
++++ b/dm/host/dm.h
+@@ -109,6 +109,7 @@ typedef struct {
+     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
+     uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX
+     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
++    int swx_native_1080p, swx_native_1440p, swx_native_4k;   // native-resolution bypass presets the build's stubs take (the fixups table's SWX_NATIVE_* keys): the SWX_NATIVE_RES presets 1080p / 1440p / 2160p read state +0xB4 (loader.c)
+     int fstep_t120;            // the frame step stub takes its step in ticks of 1/120 s (the FRAME_STEP_120 capability: state +0x38 120, and 40 fps)
+     int movie_native_color_keys; // the movie SDK's MediaData uses the native buffer's colour index directly (MOVIE_NATIVE_COLOR_KEYS)
+     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+@@ -296,4 +297,4 @@ void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gf
+ void dm_gfx_shot_at(long k, const char *path);   // graphics side: screenshot of the k-th frame after the current presented frame (nvn_mtl.m)
+ void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
+ void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)
+-void dm_host_shutdown(const char *why);   // Graceful exit (hle_lifecycle.c): stop background threads and audio, stop the pipeline prewarm, drain graphics, write the pipeline archive, then _exit(0); used by SIGTERM and oe::ExecuteProgram
++void dm_host_shutdown(const char *why);   // Graceful exit (hle_lifecycle.c): stop background threads and audio, stop the pipeline prewarm, drain graphics, write the pipeline archive, then _exit(0); used by the Mac player's quit (⌘Q, closing the window), SIGTERM and oe::ExecuteProgram

@@ -1,0 +1,151 @@
+# SWX_NATIVE_RES group (botw_patches.py.patch): BOTW canvas stubs + native heap presets + render-scale rule
+# verify: dm/games/01007EF00011E000/patches.py:canvas_width
+# verify: dm/games/01007EF00011E000/patches.py:heap_preset
+diff --git a/dm/games/01007EF00011E000/patches.py b/dm/games/01007EF00011E000/patches.py
+index 5e462ac1..289425d2 100644
+--- a/dm/games/01007EF00011E000/patches.py
++++ b/dm/games/01007EF00011E000/patches.py
+@@ -36,6 +36,8 @@ CUTS = {
+ # at both entries
+ def frame_step(ctx):
+     here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
++    for cap in ('SWX_NATIVE_1080P', 'SWX_NATIVE_1440P', 'SWX_NATIVE_4K', 'RENDER_SCALE_DRS'):
++        ctx.capabilities.add(cap)   # native-resolution bypass presets (state +0xB4, loader.c SWX_NATIVE_RES, macOS only) and their render-scale rule: the fixups table carries them to the loader and the launcher
+     fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
+     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+     for w in (0xb9400211,   # ldr w17,[x16]          target fps (0 = off)
+@@ -45,7 +47,7 @@ def frame_step(ctx):
+     for w in (0xb4000131,   # cbz x17,orig (+9)
+               0x3940a631,   # ldrb w17,[x17,#0x29]   the VFR's override
+               0x350000f1,   # cbnz w17,orig (+7)     the framework keeps the game's interval
+-              0xb9402211,   # ldr w17,[x16,#0x20]    step in vsyncs
++              0xb9402211,   # scale: ldr w17,[x16,#0x20]    step in vsyncs
+               0x340000b1,   # cbz w17,orig (+5)      not decided yet
+               0x2a1103e1,   # mov w1,w17
+               0xf9401a11,   # ldr x17,[x16,#0x30]
+@@ -96,11 +98,11 @@ def frame_step(ctx):
+               0x1e2e1001,   # fmov s1,#1.0
+               0x1e212000,   # fcmp s0,s1
+               0x54000040,   # b.eq orig (+2)         1.0: the game's own scale
+-              0x1e204008,   # fmov s8,s0             the host's scale
++              0x1e204008,   # fmov s8,s0             the host's scale, also with a preset active
+               0xf940ae88):  # orig: ldr x8,[x20,#0x158]
+         emit(w)
+     emit(B(here(), 0x1266884))
+-    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s dynamic resolution)'); ctx.render_scale = 1
++    fs_put(0x1266880, [B(0x1266880, apply)], '3D view scale = the host render scale (1.0 = the game\'s own scale, also with a preset active)'); ctx.render_scale = 1
+     start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+     for w in (0xb9401108,   # ldr w8,[x8,#0x10]      render scale (float bits)
+               0x34000088,   # cbz w8,skip (+4)       not set
+@@ -126,17 +128,106 @@ def frame_step(ctx):
+     OUT, LAY, LAYF = 0xb9404a10, 0xb9404e10, 0xb9405210   # ldr w16,[x16,#0x48] / #0x4c / #0x50
+     HI9, HI8, W4, W9 = 0xb3607e09, 0xb3607e08, 0x2a1003e4, 0x2a1003e9   # bfi x9 / x8,x16,#32,#32 (the pair's height); mov w4,w16; mov w9,w16
+     for site, orig, load, apply, why in (
+-            (0xc61ef4, '0987c0f2', OUT, HI9, 'output size static, nnMain: 1920x1080 → the host\'s height'),
+-            (0xc61f28, '0987c0f2', OUT, HI9, 'output size static, nnMain (second path)'),
+-            (0x12618c4, '0987c0f2', OUT, HI9, 'output size static, its getter'),
+             (0xc61f5c, '085ac0f2', LAY, HI8, 'layout size static, nnMain: 1280x720 → the host\'s layout height'),
+             (0x1261920, '095ac0f2', LAY, HI9, 'layout size static, its getter'),
+-            (0x12660d4, '0887c0f2', OUT, HI8, 'docked display size 1920x1080'),
+-            (0x12660f0, '04878052', OUT, W4, 'docked viewport height 1080'),
+             (0x1266124, '085ac0f2', LAY, HI8, 'handheld display size 1280x720'),
+             (0x1266188, '045a8052', LAY, W4, 'handheld viewport height 720'),
+             (0x1266134, '8986a852', LAYF, W9, 'scaled display height 720.0')):
+         taller(site, orig, load, apply, why)
++    # Generic canvas (loader.c dm_fps_state_apply; state +0xB8 u64 canvas {width,height}, +0xC0 f32 width; 0 = stock): the docked display size, viewport and canvas pairs take the canvas size when set, so any canvas (2880x1620, 1920x1080, 3264x1836, 1280x720, 960x540) works; with 0 the stock word stays and heights fall back to the screen-aspect height above. x16 is free at every site, as for the screen-shape stubs
++    CANVAS_H = 0xb940be10   # ldr w16,[x16,#0xBC]
++    def canvas_width(site, orig, mov, why):
++        fs_site(site, orig)
++        start = here(); emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
++        emit(ADRP(16, here(), FS_STATE_OFF))
++        for w in (0xb940ba10, 0x34000050, mov):   # ldr w16,[x16,#0xB8] (canvas width); cbz w16,+8 (0: stock); mov dst,w16
++            emit(w)
++        emit(B(here(), site + 4))
++        fs_put(site, [B(site, start)], why)
++    def canvas_height(site, orig, apply, why):
++        fs_site(site, orig)
++        start = here(); emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
++        emit(ADRP(16, here(), FS_STATE_OFF))
++        base = here()   # ldr lands here; taller = base+4*4, done = base+7*4
++        done_addr = base + 7 * 4
++        emit(CANVAS_H)
++        emit(0x34000070)   # cbz w16,taller (+3)
++        emit(apply)
++        emit(B(here(), done_addr))   # b done
++        emit(0xb9404a10)   # taller: ldr w16,[x16,#0x48] (the screen-aspect output height)
++        emit(0x34000050)   # cbz w16,done (+2: 0: the game's size)
++        emit(apply)
++        emit(B(here(), site + 4))   # done
++        fs_put(site, [B(site, start)], why)
++    # Canvas pairs (1920x1080 stock: movz x9,#0x780 at 0xc61ee8/0xc61f1c/0x12618b8, movk x9,#0x438,lsl#32 at 0xc61ef4/0xc61f28/0x12618c4). Widths take the canvas width (0: stock); heights take the canvas height, else the screen-aspect height above, so DM_SCREEN_ASPECT is preserved. One stub per address.
++    canvas_height(0xc61ef4, '0987c0f2', HI9, 'canvas height, nnMain: the canvas height, else the host\'s height')
++    canvas_height(0xc61f28, '0987c0f2', HI9, 'canvas height, nnMain (second path): the canvas height, else the host\'s height')
++    canvas_height(0x12618c4, '0987c0f2', HI9, 'canvas height, its getter: the canvas height, else the host\'s height')
++    canvas_width(0xc61ee8, '09f080d2', 0x2a1003e9, 'canvas width, nnMain: the canvas width (mov w9,w16)')
++    canvas_width(0xc61f1c, '09f080d2', 0x2a1003e9, 'canvas width, nnMain (second path): the canvas width')
++    canvas_width(0x12618b8, '09f080d2', 0x2a1003e9, 'canvas width, its getter: the canvas width')
++    # Viewport width (w3, movz w3,#1920 stock).
++    canvas_width(0x1266104, '03f08052', 0x2a1003e3, 'docked viewport width: the canvas width (mov w3,w16)')
++    # TV pair 0x12660d0 (movz x8,#1920) / 0x12660d4 (movk x8,#1080,lsl#32): no sibling stub at 0x12660d0. The stub below produces the full {width,height} pair and overwrites whatever 0x12660d0 wrote (consecutive pair, no reader between). The loader sets width and height together (both 0 = stock), so one width check covers both: canvas width + canvas height, else the screen-aspect height with the stock width.
++    def canvas_pair(site, orig, mov_w, bfi_x, why):
++        fs_site(site, orig)
++        start = here(); emit(struct.unpack('<I', bytes.fromhex(orig))[0])   # the original instruction
++        emit(ADRP(16, here(), FS_STATE_OFF))
++        base = here()   # ldr lands here; taller = base+6*4, shared bfi = base+8*4
++        bfi_addr = base + 8 * 4
++        emit(0xb940ba10)   # ldr w16,[x16,#0xB8] (canvas width)
++        emit(0x340000b0)   # cbz w16,taller (+5: 0: stock width, screen-aspect height)
++        emit(mov_w)   # mov w8,w16 (the canvas width)
++        emit(ADRP(16, here(), FS_STATE_OFF))
++        emit(CANVAS_H)
++        emit(B(here(), bfi_addr))   # b bfi (shared tail)
++        emit(0xb9404a10)   # taller: ldr w16,[x16,#0x48] (the screen-aspect output height)
++        emit(0x34000050)   # cbz w16,done (+2: 0: the game's size)
++        emit(bfi_x)   # bfi x8,x16,#32,#32 (taller height); the canvas path shares this tail
++        emit(B(here(), site + 4))   # done
++        fs_put(site, [B(site, start)], why)
++    canvas_pair(0x12660d4, '0887c0f2', 0x2a1003e8, 0xb3607e08, 'docked display size: the canvas size, else the host\'s height (mov w8,w16 + bfi x8)')
++    canvas_height(0x12660f0, '04878052', 0x2a1003e4, 'docked viewport height: the canvas height, else the host\'s height (mov w4,w16)')
++    # Native-resolution heaps (state +0xB4 u32: 0 = off, 1 = 1080p, 2 = 1440p, 3 = 2160p). Each site's immediate
++    # grows with the preset while mode 1 (1080p) and mode 0 keep the stock word: 1080p already passes with the
++    # stock heaps. Values (MNG-tested): display 80/112 MiB, GPU 192/448 MiB, memory 3632/4080 MiB,
++    # RootHeap 3600/4048 MiB. cbz/tbz never touch the flags and the scratch register is each site's own
++    # destination, so no guest state leaks into the check. x16-free: ADRP targets the destination itself.
++    def _heap_cbz(r, words): return 0x34000000 | (r & 31) | ((words & 0x7ffff) << 5)
++    def _heap_tbz(r, bit, words): return 0x36000000 | ((bit & 31) << 19) | ((words & 0x3fff) << 5) | (r & 31)   # tbz: branch if the bit is zero, flags untouched
++    def _heap_ldr_b4(r): return 0xB9400000 | (45 << 10) | ((r & 31) << 5) | (r & 31)   # ldr wR,[xR,#0xB4]
++    def heap_preset(site, orig, new2, new3, rd, why):
++        fs_site(site, orig)
++        o = struct.unpack('<I', bytes.fromhex(orig))[0]
++        h = here(); emit(ADRP(rd, here(), FS_STATE_OFF)); emit(_heap_ldr_b4(rd))
++        emit(_heap_cbz(rd, 7)); emit(_heap_tbz(rd, 1, 6)); emit(_heap_tbz(rd, 0, 3))
++        emit(new3); emit(B(here(), site + 4))
++        emit(new2); emit(B(here(), site + 4))
++        emit(o); emit(B(here(), site + 4))
++        fs_put(site, [B(site, h)], why)
++    for site, orig, new2, new3, rd, why in (
++            (0x1261704, '0ae6a052', 0x52a1800a, 0x52a3800a, 10, 'native heaps: GPU heap 192 MiB (1440p) / 448 MiB (2160p)'),
++            (0x71c, '0060b852', 0x52bc6000, 0x52bfe000, 0, 'native heaps: memory 3632 MiB (1440p) / 4080 MiB (2160p)'),
++            (0xc617c0, '0820b852', 0x52bc2008, 0x52bfa008, 8, 'native heaps: RootHeap 3600 MiB (1440p) / 4048 MiB (2160p)'),
++            (0xc61b14, '0060a052', 0x52a0a000, 0x52a0e000, 0, 'native heaps: display heap 80 MiB (1440p) / 112 MiB (2160p)')):
++        heap_preset(site, orig, new2, new3, rd, why)
++    # Docked render width (float pair at gfx+0x1210): the docked display routine (main+0x1266074) stores
++    # {screen width, render width} as two floats: movz x8 (0x12660bc) sets the low half to 1920.0f and
++    # movk x8 (0x12660c8) the high half to 1600.0f, then str x8,[x19,#0x1210] (0x12660cc). With a canvas
++    # the stub duplicates its float width into both halves so the scene is sized from the canvas width
++    # instead of 1600. x8-only: the float load reuses x8 (the low half it clobbers is the constant
++    # 1920.0f, rebuilt in the stock path), so no scratch register is needed. Encodings:
++    # 1920.0f = 0x44F00000, 1600.0f = 0x44C80000
++    for site, orig in ((0x12660bc, '089ea8d2'), (0x12660c0, 'e2030091'), (0x12660c4, 'e1031f2a'),
++                       (0x12660c8, '0899e8f2'), (0x12660cc, '680a09f9')):
++        fs_site(site, orig)
++    bypass_f = here(); emit(ADRP(8, here(), FS_STATE_OFF))
++    emit(0xb940c108)   # ldr w8,[x8,#0xC0] (canvas float width; 0 = stock)
++    emit(0x34000068)   # cbz w8,stock (+3)
++    emit(0xb3607d08)   # bfi x8,x8,#32,#32 (both halves = the canvas width)
++    emit(B(here(), 0x12660cc))   # b done (the str site)
++    emit(0xd2a89e08); emit(0xf2e89908); emit(B(here(), 0x12660cc))   # stock: {1920.0f, 1600.0f} as shipped
++    fs_put(0x12660c8, [B(0x12660c8, bypass_f)], 'docked render width = the canvas width in both halves, 1600 as shipped')
+     # The game's conversions between output pixels and the 1280x720 layout space, and the layout objects built with that size: each takes the layout height too, while
+     # its bit of state +0x54 is set (loader.c DM_SCREEN_ASPECT_SITES, all by default), so one build can try them one by one. 720.0 constants: main+0xdf19ac divides the
+     # output size by (1280, 720) for the layout scale; the others pair 720.0 with 1280.0 the same way. 1280x720 pairs: layout objects' defaults

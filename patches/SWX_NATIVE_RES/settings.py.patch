@@ -1,0 +1,54 @@
+# SWX_NATIVE_RES group (settings.py.patch): Mac Graphics section + render-scale percent choice
+# verify: dm/games/settings.py:MAC_GRAPHICS_ORDER
+# verify: dm/games/settings.py:RENDER_SCALE_PCTS
+diff --git a/dm/games/settings.py b/dm/games/settings.py
+index 08c7270f..eafd0e94 100644
+--- a/dm/games/settings.py
++++ b/dm/games/settings.py
+@@ -10,7 +10,7 @@ HERE = Path(__file__).resolve().parent
+ sys.path.insert(0, str(HERE)); sys.path.insert(0, str(HERE.parent / 'tools'))
+ import game, nacp, nso_syms
+ 
+-SECTIONS = ('Game', 'Controls', 'Performance')   # headings on the single settings screen
++SECTIONS = ('Game', 'Graphics', 'Controls', 'Performance')   # headings on the single settings screen
+ SCHEMA = 1   # launcher.json's version (docs/launcher.schema.json); it grows only by optional fields, so a reader of 1 reads every 1
+ # The meta column's keys, each with the pattern its value must match. A key is added here, in docs/frontends.md and in
+ # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
+@@ -58,6 +58,29 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table, as
+ 
+ UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
+ 
++MAC_GRAPHICS_ORDER = ('DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_PRESENT_UPSCALE', 'SWX_DISABLE_DRS', 'DM_SCREEN_ASPECT')   # the Mac Graphics section's rows, in the order shown (a row this build lacks is skipped)
++RENDER_SCALE_PCTS = (('0.5', '50%'), ('0.75', '75%'), ('1.0', '100%'), ('1.1', '110%'), ('1.2', '120%'))   # the Mac render-scale choice, in percent
++
++
++def mac_graphics(out, keys):
++    """macOS only: the picture rows (MAC_GRAPHICS_ORDER) move to a Graphics section after Game, in that order, and DM_RENDER_SCALE becomes a percent choice up to the stub's ceiling"""
++    ceil = float(int(keys.get('RENDER_SCALE', '1'), 16))   # the stub's largest scale (the fixups table's RENDER_SCALE, hex as every header value), as in build()
++    by_env = {s['env']: s for s in out}
++    if 'DM_RENDER_SCALE' in by_env:
++        rs = by_env['DM_RENDER_SCALE']
++        rs['kind'] = 'choice'
++        rs['options'] = [[v, l] for v, l in RENDER_SCALE_PCTS if float(v) <= ceil]
++        if rs['default'] not in [o[0] for o in rs['options']]: rs['default'] = rs['options'][0][0]   # a default the stub does not take: its first
++        for k in ('min', 'max', 'step', 'base'): rs.pop(k, None)
++    order = [e for e in MAC_GRAPHICS_ORDER if e in by_env]
++    if not order: return
++    for e in order: by_env[e]['section'] = 'Graphics'
++    rest = [s for s in out if s['env'] not in order]
++    at = 0
++    for i, s in enumerate(rest):
++        if s['section'] == 'Game': at = i + 1   # after Game: the last Game row left in place
++    out[:] = rest[:at] + [by_env[e] for e in order] + rest[at:]
++
+ 
+ def build(gid, patched, control, other_programs=()):
+     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
+@@ -134,6 +157,7 @@ def build(gid, patched, control, other_programs=()):
+             s.update(on=on_off[0], off=on_off[1], default=on_off[0] if s['default'] == '1' else on_off[1])   # the default as the value the variable takes
+         else: sys.exit(f'settings.tsv:{n}: unknown kind {kind}')
+         out.append(s)
++    if platform == 'mac': mac_graphics(out, keys)
+     return {'schema': SCHEMA, 'game': g.id, 'settings': out}
+ 
+ 

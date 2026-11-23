@@ -1,0 +1,165 @@
+# SWX_NATIVE_RES group (front_mac.m.patch): windowed 1:1 / fullscreen upscale + graceful quit
+# verify: dm/host/front_mac.m:bp_enforce_windowed
+# verify: dm/host/front_mac.m:dm_host_shutdown("window close")
+# NOTE (orthogonal, same-file diff): includes graceful shutdown — observers NSApplicationWillTerminateNotification → dm_host_shutdown("quit") and NSWindowWillCloseNotification → dm_host_shutdown("window close").
+# NOTE (same-file diff): includes Retina/windowed sizing (bp_enforce_windowed) — window sized in points to preset / scale so backing lands on preset.
+diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
+index 9f0cc6d9..be601934 100644
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -847,6 +847,10 @@ static void pads_start(void) {
+ static _Atomic double g_picture_aspect = 16.0 / 9.0;
+ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
+ @interface DmGameView : NSView @end
++// Native-resolution bypass windowed enforcement (defined beside g_bp_* below): fitDrawable must come before those
++// definitions, so it only sees this forward declaration. The drawable always follows the view's real backing;
++// windowed bypass sizes the window in points to preset / scale so the backing lands on the preset.
++static int bp_enforce_windowed(void);
+ @implementation DmGameView
+ - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
+ - (void)mouseDragged:(NSEvent *)e {
+@@ -869,7 +873,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect =
+     l.drawableSize = px; dm_fstep_settle(); LOG("front end: drawable %.0fx%.0f", px.width, px.height);
+ }
+ - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
+-- (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
++- (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; if (!bp_enforce_windowed()) [self fitDrawable]; }
+ @end
+ 
+ // AppKit reports a refused fullscreen request only to the window delegate (there is no notification for it)
+@@ -1734,6 +1738,81 @@ static NSArray<NSURL *> *found_cheat_files(NSString *build) {
+ }
+ @end
+ 
++// Native-resolution bypass (SWX_NATIVE_RES, loader.c dm_fps_state_apply): the game's stubs render the preset's size instead of the stock one (state +0xB4, forced
++// here at boot while the loader keeps it 0). The window shows it 1:1 (the drawable is fixed at the preset), fullscreen scales it per DM_PRESENT_UPSCALE (the drawable
++// follows the view). Only docked, and only a build whose stubs declare the preset (swx_res_bypass_requested, validated by the loader from the same variable)
++static NSWindow *g_bp_win; static int g_bp_on, g_bp_fixed, g_bp_trans; static NSUInteger g_bp_screen; static NSRect g_bp_frame; static int g_bp_mode, g_bp_w = 1920, g_bp_h = 1080;
++static int bp_preset(int *w, int *h) {   // the SWX_NATIVE_RES preset's mode and size, 0 when unset, off or unknown
++    const char *e = getenv("SWX_NATIVE_RES");
++    if (!e || !*e || !strcmp(e, "0")) return 0;
++    if (!strcmp(e, "1080p")) { *w = 1920; *h = 1080; return 1; }
++    if (!strcmp(e, "1440p")) { *w = 2560; *h = 1440; return 2; }
++    if (!strcmp(e, "2160p")) { *w = 3840; *h = 2160; return 3; }
++    return 0;
++}
++static int bp_requested(void) {   // 1 when the preset names a bypass mode and the loader validated it for this build
++    int w = 0, h = 0, mode = bp_preset(&w, &h);
++    if (!mode || !swx_res_bypass_requested()) return 0;
++    g_bp_mode = mode; g_bp_w = w; g_bp_h = h; return 1;
++}
++// Windowed bypass enforcement: size the window in points to preset / scale so its backing lands on the
++// preset, then let fitDrawable measure the view's real backing (no contentsScale = 1.0). Fullscreen leaves the
++// drawable to the view so DM_PRESENT_UPSCALE (metalfx) upscales the preset to the screen. Returns 1 when the
++// window was (or already is) enforced, 0 when not bypass windowed (fullscreen, transition in flight, no bypass).
++static int bp_enforce_windowed(void) {
++    if (!g_bp_on || !g_bp_fixed || g_bp_trans) return 0;
++    if (!g_bp_win || !g_layer) return 0;
++    if (g_fullscreen || (g_bp_win.styleMask & NSWindowStyleMaskFullScreen) != 0) return 0;
++    NSScreen *scr = g_bp_win.screen ?: NSScreen.mainScreen;
++    if (!scr) return 0;
++    CGFloat scale = scr.backingScaleFactor;
++    if (scale <= 0) scale = 1;
++    CGSize points = CGSizeMake((CGFloat)g_bp_w / scale, (CGFloat)g_bp_h / scale);
++    NSSize cur = g_bp_win.contentView.bounds.size;
++    if (fabs(cur.width - points.width) > 0.5 || fabs(cur.height - points.height) > 0.5)
++        [g_bp_win setContentSize:NSSizeFromCGSize(points)];
++    [(DmGameView *)g_bp_win.contentView fitDrawable];
++    NSRect vis = scr.visibleFrame, fr = g_bp_win.frame;
++    if (NSWidth(fr) > NSWidth(vis) || NSHeight(fr) > NSHeight(vis))
++        LOG("front end: native-resolution bypass window %.0fx%.0f pt is larger than the screen's visible %.0fx%.0f (preset %dx%d, scale %.2f)",
++            NSWidth(fr), NSHeight(fr), NSWidth(vis), NSHeight(vis), g_bp_w, g_bp_h, (double)scale);
++    return 1;
++}
++static void bp_reject(NSWindow *win, int was, const char *why) {   // the bypass cannot hold: state +0xB4 back to 0, the stock path, with the reason in the log
++    (void)win; (void)was;
++    if (dm_fps_state) { uint32_t off = 0; memcpy(dm_fps_state + 0xB4, &off, sizeof off); }
++    g_bp_on = 0; g_bp_fixed = 0;
++    LOG("front end: native-resolution bypass off (%s); using the stock path", why);
++}
++static int bp_force_internal(void) {   // force the preset at boot: publish mode (+0xB4); the loader owns +0x10 (DM_RENDER_SCALE). Windowed sizes the window in points to preset / scale so the backing lands on the preset; fullscreen leaves the drawable to the view so DM_PRESENT_UPSCALE (metalfx) upscales the preset to the screen
++    if (!dm_fps_state || !g_layer) return 0;
++    uint32_t mode = (uint32_t)g_bp_mode; memcpy(dm_fps_state + 0xB4, &mode, sizeof mode);
++    const char *fs = getenv("DM_FULLSCREEN");   // boot-time fullscreen is asked asynchronously below, so g_fullscreen / the style mask are not set yet when forcing
++    if (g_fullscreen || (g_bp_win.styleMask & NSWindowStyleMaskFullScreen) != 0 || (fs && strcmp(fs, "0"))) {
++        g_bp_on = 1; g_bp_fixed = 1;
++        LOG("front end: native-resolution bypass on (%dx%d, SWX_NATIVE_RES); fullscreen leaves the drawable to the view, upscaled per DM_PRESENT_UPSCALE", g_bp_w, g_bp_h);
++        return 1;
++    }
++    g_bp_on = 1; g_bp_fixed = 1;
++    bp_enforce_windowed();
++    NSScreen *scr = g_bp_win.screen ?: NSScreen.mainScreen;
++    double scale = scr ? scr.backingScaleFactor : 1;
++    if (scale <= 0) scale = 1;
++    LOG("front end: native-resolution bypass on (%dx%d, SWX_NATIVE_RES); windowed %.0fx%.0f pt (scale %.2f, backing %dx%d, no upscale)",
++        g_bp_w, g_bp_h, g_bp_w / scale, g_bp_h / scale, scale, g_bp_w, g_bp_h);
++    LOG("front end: native-resolution bypass forced window to %.0fx%.0f pt", g_bp_w / scale, g_bp_h / scale);
++    return 1;
++}
++static void bp_screen_changed(void) {   // on a screen change or a fullscreen transition: fullscreen follows the view, a window keeps the preset's backing size
++    if (!g_bp_on || !g_bp_fixed || g_bp_trans) return;   // not bypassing, or a transition is in flight (its did-enter / did-exit runs this again)
++    if (!g_bp_win) return;
++    NSScreen *scr = g_bp_win.screen;
++    NSUInteger now = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : 0;
++    if (now != g_bp_screen) g_bp_screen = now;   // the window moved to another screen
++    if (g_fullscreen) [(DmGameView *)g_bp_win.contentView fitDrawable];   // the drawable follows the view
++    else bp_enforce_windowed();   // windowed: preset / scale pt so the backing lands on the preset
++}
++
+ void front_run(void (*guest)(void)) {
+     // Keep the latency-critical activity token alive for the host process, including windowless play.
+     static id<NSObject> game_activity;
+@@ -1814,7 +1893,7 @@ void front_run(void (*guest)(void)) {
+                 if (!entering) return;
+                 entering = 0;
+                 LOG("front end: fullscreen was refused (app active %d, window on the active Space %d)%s", NSApp.isActive, win.isOnActiveSpace, retried ? "" : ", asking once more");
+-                if (retried) { g_fs_starting = 0; return; }
++                if (retried) { g_fs_starting = 0; g_bp_trans = 0; bp_screen_changed(); return; }
+                 retried = 1; want = 1; dispatch_async(dispatch_get_main_queue(), enter); };
+             [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
+             [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
+@@ -1842,19 +1921,23 @@ void front_run(void (*guest)(void)) {
+             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
+             return nil;   // Swallow it to avoid the system beep
+         }];
++        // Quits go through the graceful exit (hle_lifecycle.c): ⌘Q and the Home prompt terminate the app, closing the window ends it here. _exit runs no atexit
++        // handler, so the rumble's cleanup runs in the shutdown itself (exit_end), and the install's .command reports the exit status
++        [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationWillTerminateNotification object:nil queue:nil
++                                                      usingBlock:^(NSNotification *n) { (void)n; dm_host_shutdown("quit"); }];
+         [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:win queue:nil
+-                                                      usingBlock:^(NSNotification *n) { (void)n; exit(0); }];
++                                                      usingBlock:^(NSNotification *n) { (void)n; dm_host_shutdown("window close"); }];
+         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
+         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
+         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
+-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
++        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) { g_layer.contentsScale = win.backingScaleFactor; } screen_match_apply(); bp_screen_changed(); dm_fstep_settle(); }];
++        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); bp_screen_changed(); }];
+         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
+         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
+         for (NSNotificationName nm in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
+-            [nc addObserverForName:nm object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_fstep_settle(); }];
+-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
+-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
++            [nc addObserverForName:nm object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_bp_trans = 1; dm_fstep_settle(); }];   // a transition is in flight: bp_screen_changed waits for its did-enter / did-exit
++        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; g_bp_trans = 0; bp_screen_changed(); dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
++        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_bp_trans = 0; bp_screen_changed(); dm_fstep_settle(); }];
+         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
+         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
+         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
+@@ -1863,6 +1946,14 @@ void front_run(void (*guest)(void)) {
+         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
++        // Native-resolution bypass (SWX_NATIVE_RES): the heap request goes before the first guest reservation, the force before the guest thread starts
++        if (bp_requested()) {
++            g_bp_win = win; g_bp_frame = win.frame;
++            g_bp_screen = win.screen ? [win.screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : 0;
++            if (g_bp_mode == 2) swx_res_bypass_mem_1440(1);
++            else if (g_bp_mode == 3) swx_res_bypass_mem_4k(1);
++            if (!bp_force_internal()) bp_reject(win, g_bp_mode, "no frame step state page");
++        }
+         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
+         static guest_arg ga; ga.fn = guest;
+         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
