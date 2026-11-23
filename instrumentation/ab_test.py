@@ -7,7 +7,7 @@ log rotation can never lose data. Comparison via instrumentation/log_report.py.
 
 Usage:
   ab_test.py status [--install-dir I]
-  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|disable-drs|native-res on|off|clear
+  ab_test.py set keepalive|snap|save|pso|pool|bind_once|vfr|yield|residency-ub-ring|rt-heap-reserve|up-blit-rec|native-res on|off|clear
                    (native-res also takes 1080p|1440p|2160p explicitly; on stays 1080p;
                     res-bypass is a legacy alias for native-res taking 1080p|1440p|4k;
                     4k reads as 2160p; clear removes both keys)
@@ -52,7 +52,6 @@ KEYS = {
     "residency-ub-ring": "SWX_RESIDENCY_UB_RING",
     "rt-heap-reserve": "SWX_RT_HEAP_RESERVE",
     "up-blit-rec": "SWX_NVN_UP_BLIT_REC",
-    "disable-drs": "SWX_DISABLE_DRS",
     "native-res": "SWX_NATIVE_RES",
     "res-bypass": "SWX_RES_BYPASS",
 }

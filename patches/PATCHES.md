@@ -108,8 +108,8 @@ player (optionally confirmed by a real 120 Hz panel run). Evidence:
 | 16 | `dm_texture_burst_attribution_host_lifetime.patch` | (same opt-in) | host-side lifetime handoff for burst records (TSV drained on the game thread, GPU feedback publishes timestamps) | supports the #15 attribution path | `docs/texture_burst_measurement_and_dispatch_plan.md` |
 | 17 | `SWX_NVN_UP_BLIT_REC/nvn_rec.h.patch`, `SWX_NVN_UP_BLIT_REC/nvn_mtl.m.patch` | `SWX_NVN_UP_BLIT_REC` | experimental, disabled in patches.toml (default 0, never pinned by installer) | defers whole buffer→texture upload batches to the encode thread as one `RO_COMMIT_UBATCH`; GPU executes the same copies in the same order; ported to the new core (deswizzle-inline, RO_COMMIT_REAL commit model, res_commit_q completion); A/B recorded | `instrumentation/ab_results.md` |
 | 18 | `swx_save_cleanup_worker.patch` | `SWX_SAVE_ASYNC` | promoted (default ON) | persistent `QOS_CLASS_BACKGROUND` cleanup worker, FIFO depth 4, per-generation `mkdtemp` staging, orphan recovery on mount; single-install A/B: 5.47–5.97 ms/commit off vs 1.10–1.18 ms on (≈4–5 ms sync-path saving); isolated 74.6 ms frame shows no commit link | `instrumentation/ab_results.md` |
-| 19 | `swx_botw_render_scale.patch` | `DM_RENDER_SCALE` | promoted as opt-in on macOS for BOTW 1.9.0; default `1.0` | raises the internal render-scale ceiling to `1.2`; both `1.2` gameplay runs held 16.67 ms on-screen p99 in every reported window | `instrumentation/ab_results.md` |
-| 20 | `swx_botw_disable_drs.patch` | `SWX_DISABLE_DRS` | experimental opt-in, still present (default off; never pinned by the installer) | fixes the 3D views at `DM_RENDER_SCALE`, including `1.0` (1600×900 docked); compatibility gate passed 2026-11-19 (M4 Pro): 1.0+flag → 1600×900 scene, 1.2 → 1920×1080, no cadence regression; effect under load unproven. Independent of `SWX_NATIVE_RES` (now the `SWX_NATIVE_RES` patch group in `patches/SWX_NATIVE_RES/`, applied via `patches.toml`; not first-class in the core). | `instrumentation/ab_results.md` |
+| 19 | ~~`swx_botw_render_scale.patch`~~ | `DM_RENDER_SCALE` | **removed** (2026-11-23): render scale under core nxnative control (`DM_RENDER_SCALE` validated by the loader; ceiling from the build stubs) | raises the internal render-scale ceiling to `1.2`; both `1.2` gameplay runs held 16.67 ms on-screen p99 in every reported window | `instrumentation/ab_results.md` |
+| 20 | ~~`swx_botw_disable_drs.patch`~~ | `SWX_DISABLE_DRS` | **removed** (2026-11-23): DRS under core nxnative control (`DM_DYNAMIC_RESOLUTION` toggle); no wrapper patch needed | fixes the 3D views at `DM_RENDER_SCALE`, including `1.0` (1600×900 docked); compatibility gate passed 2026-11-19 (M4 Pro): 1.0+flag → 1600×900 scene, 1.2 → 1920×1080, no cadence regression; effect under load unproven. Independent of `SWX_NATIVE_RES` (now the `SWX_NATIVE_RES` patch group in `patches/SWX_NATIVE_RES/`, applied via `patches.toml`; not first-class in the core). | `instrumentation/ab_results.md` |
 | 21 | ~~`swx_botw_native_1080p.patch`~~ | `SWX_RES_BYPASS` | **removed** (2026-11-23): superseded — replaced by the `SWX_NATIVE_RES` patch group (12 patches in `patches/SWX_NATIVE_RES/`, enabled in `patches.toml`; the legacy single-file patches were removed) | scene, canvas and VFR snapshots at 1920×1080 docked. v2 gameplay accepted on M4 Pro, with windowed 1:1 and fullscreen MetalFX verified in retained logs. Fullscreen without MetalFX passed by player report. | `instrumentation/ab_results.md` |
 | 22 | ~~`swx_botw_native_1440p.patch`~~ | `SWX_RES_BYPASS=1440p` | **removed** (2026-11-23): superseded — replaced by the `SWX_NATIVE_RES` patch group (12 patches in `patches/SWX_NATIVE_RES/`, enabled in `patches.toml`; the legacy single-file patches were removed) | canvas, swapchain, TV and viewport at 2560×1440 with scene held at 1920×1080; +512 MiB heap headroom gated on confirmed boot. Boot verified (canvas/swapchain/drawable 2560×1440, pool 3797 MiB). **Gate 1 PASS** (frame 1421, pass 143733: 4 color + 1 depth targets at 1920×1080; output chain at 2560×1440). | `instrumentation/ab_results.md` |
 | 23 | ~~`swx_botw_native_1440p_scene.patch`~~ | `SWX_RES_BYPASS=1440p` | **removed** (2026-11-23): superseded — replaced by the `SWX_NATIVE_RES` patch group (12 patches in `patches/SWX_NATIVE_RES/`, enabled in `patches.toml`; the legacy single-file patches were removed) | native 1440p scene: docked stub emits {2560.0f, 2560.0f}, canvas/swapchain/crop/snapshots/drawable 2560×1440, heaps as in #22. **2B PASS** (fullscreen run: output chain 2560×1440, MetalFX → 3840×2160, present p95 1.23–1.26 ms, 16.67 ms avg over 255 s, zero `[RED]`, exit 0). 2C and Gate 3 closed by player acceptance (2026-11-20), with the remaining controls and formal 1080p-vs-1440p A/B waived. | `instrumentation/ab_results.md` |
@@ -136,7 +136,7 @@ install” below); kept as the record of what the wrapper pinned.
 launcher logs each line at boot (`launcher: env K=V`). Experimental keys
 (`DM_NVN_ENC_THREAD`, `SWX_NVN_UP_BLIT_REC`, `SWX_GPU_BIND_ONCE`,
 `DM_NVN_TSV*`, `DM_NVN_WAITS*`, `SWX_RT_HEAP_RESERVE`,
-`SWX_DISABLE_DRS`, `SWX_NATIVE_RES`) stay absent:
+`SWX_NATIVE_RES`) stay absent:
 compiled defaults apply. Legacy `SWX_RES_BYPASS` is never pinned (rewritten to canonical on reinstall).
 
 | Key | Value | Status |
@@ -211,8 +211,11 @@ lines, 0 bases compiled), 13–14 archive files kept (~1.9 GiB, no sweep, no
   `settings.py` tooling, launcher wiring + UI; see `core/nxnative/dm/games/settings.tsv` and
   `core/nxnative/dm/host/loader.c` for the patched targets). The vendored core is
   reverted to upstream; native resolution is not first-class in the core.
-  `swx_botw_disable_drs.patch` (#20,
-  `SWX_DISABLE_DRS`) is unaffected and stays experimental/opt-in.
+  `swx_botw_disable_drs.patch` (#20) and `swx_botw_render_scale.patch`
+  (#19) were removed 2026-11-23: DRS and render scale are under core
+  nxnative control (`DM_DYNAMIC_RESOLUTION` toggle; `DM_RENDER_SCALE`
+  validated by the loader, ceiling from the build stubs), so no wrapper
+  patch is needed.
 - Render scale with preset active, core fix (2026-11-23): `loader.c` is
   now the sole writer of the factor at state `+0x10` (validated
   `DM_RENDER_SCALE`); `front_mac.m` `bp_force_internal` publishes only

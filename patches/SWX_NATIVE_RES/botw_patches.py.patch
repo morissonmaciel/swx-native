@@ -9,7 +9,7 @@ index 5e462ac1..289425d2 100644
  # at both entries
  def frame_step(ctx):
      here, emit, fs_site, fs_put, FS_STATE_OFF = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state
-+    for cap in ('SWX_NATIVE_1080P', 'SWX_NATIVE_1440P', 'SWX_NATIVE_4K', 'RENDER_SCALE_DRS'):
++    for cap in ('SWX_NATIVE_1080P', 'SWX_NATIVE_1440P', 'SWX_NATIVE_4K'):
 +        ctx.capabilities.add(cap)   # native-resolution bypass presets (state +0xB4, loader.c SWX_NATIVE_RES, macOS only) and their render-scale rule: the fixups table carries them to the loader and the launcher
      fs_site(0x11269b8, 'fd7bbea9'); fs_site(0x151d3d0, 'fd7bbea9')
      start = here(); emit(ADRP(16, here(), FS_STATE_OFF))

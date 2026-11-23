@@ -207,12 +207,6 @@ UP_BLIT_PREFIX_HASH="95af732262d69275"
 SAVE_WORKER="swx_save_cleanup_worker.patch"
 SAVE_WORKER_PREFIX_COUNT=17
 SAVE_WORKER_PREFIX_HASH="2e8ec3cfb8de1dfb"
-BOTW_RENDER_SCALE="swx_botw_render_scale.patch"
-BOTW_RENDER_SCALE_PREFIX_COUNT=18
-BOTW_RENDER_SCALE_PREFIX_HASH="e0ca96f9fb6d2422"
-DISABLE_DRS="swx_botw_disable_drs.patch"
-DISABLE_DRS_PREFIX_COUNT=19
-DISABLE_DRS_PREFIX_HASH="910e19c811ed7f2a"
 BYPASS_1080P="swx_botw_native_1080p.patch"
 BYPASS_1080P_PREFIX_COUNT=20
 BYPASS_1080P_PREFIX_HASH="42192787b15ac8d3"
@@ -340,18 +334,6 @@ append_save_worker() (
         patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
         patch --batch -V none -p1 -d "$CORE" < "$HERE/$SAVE_WORKER" >/dev/null || exit 1
         is_applied "$SAVE_WORKER" || exit 1
-    fi
-    stack_verified || exit 1
-    echo "$WANT" > "$MARKER"
-)
-append_botw_render_scale() (
-    [ "$(hash_series_prefix "$BOTW_RENDER_SCALE_PREFIX_COUNT")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ] || exit 1
-    [ "$(cat "$MARKER")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ] || exit 1
-    verify_series_prefix "$BOTW_RENDER_SCALE_PREFIX_COUNT" || exit 1
-    if ! is_applied "$BOTW_RENDER_SCALE"; then
-        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
-        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BOTW_RENDER_SCALE" >/dev/null || exit 1
-        is_applied "$BOTW_RENDER_SCALE" || exit 1
     fi
     stack_verified || exit 1
     echo "$WANT" > "$MARKER"
@@ -503,31 +485,6 @@ append_bypass_1440p_scene_tip() (
     [ "$(hash_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ] || exit 1
     [ "$(cat "$MARKER")" = "$BYPASS_1440P_SCENE_PREFIX_HASH" ] || exit 1
     verify_series_prefix "$BYPASS_1440P_SCENE_PREFIX_COUNT" || exit 1
-    append_bypass_1440p_scene || exit 1
-    append_bypass_4k || exit 1
-    append_native_res || exit 1
-    append_keep_drs || exit 1
-    stack_verified || exit 1
-    echo "$WANT" > "$MARKER"
-)
-append_disable_drs() (
-    [ "$(hash_series_prefix "$DISABLE_DRS_PREFIX_COUNT")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
-    [ "$(cat "$MARKER")" = "$DISABLE_DRS_PREFIX_HASH" ] || exit 1
-    verify_series_prefix "$DISABLE_DRS_PREFIX_COUNT" || exit 1
-    if ! is_applied "$DISABLE_DRS"; then
-        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
-        patch --batch -V none -p1 -d "$CORE" < "$HERE/$DISABLE_DRS" >/dev/null || exit 1
-        is_applied "$DISABLE_DRS" || exit 1
-    fi
-    # Chained: a #19 tree upgrades straight to the current tip (#26). The
-    # marker is written only after the whole stack verifies, never between
-    # patches, so a #19 install cannot strand itself at #20.
-    if ! is_applied "$BYPASS_1080P"; then
-        patch --batch -V none -p1 --dry-run -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
-        patch --batch -V none -p1 -d "$CORE" < "$HERE/$BYPASS_1080P" >/dev/null || exit 1
-        is_applied "$BYPASS_1080P" || exit 1
-    fi
-    append_bypass_1440p_tip || exit 1
     append_bypass_1440p_scene || exit 1
     append_bypass_4k || exit 1
     append_native_res || exit 1
@@ -884,22 +841,6 @@ if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BYPASS_108
         exit 1
     fi
     echo "patches: appended BOTW native 1080p bypass ($WANT)."
-    exit 0
-fi
-if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$DISABLE_DRS_PREFIX_HASH" ]; then
-    if ! append_disable_drs; then
-        echo "[ERROR] append-only BOTW disable-DRS flag failed preflight/apply; core left unchanged where possible." >&2
-        exit 1
-    fi
-    echo "patches: appended BOTW disable-DRS flag ($WANT)."
-    exit 0
-fi
-if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$BOTW_RENDER_SCALE_PREFIX_HASH" ]; then
-    if ! append_botw_render_scale; then
-        echo "[ERROR] append-only BOTW render scale ceiling failed preflight/apply; core left unchanged where possible." >&2
-        exit 1
-    fi
-    echo "patches: appended BOTW render scale ceiling ($WANT)."
     exit 0
 fi
 if [ "$FORCE" -eq 0 ] && [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$SAVE_WORKER_PREFIX_HASH" ]; then

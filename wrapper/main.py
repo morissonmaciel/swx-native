@@ -484,7 +484,7 @@ def redirect_saves(cfg, master, phase_log):
                                                  "SWX_GPU_KEEPALIVE=", "SWX_GPU_KEEPALIVE_YIELD=",
                                                  "SWX_RESIDENCY_UB_RING=",
                                                  "SWX_GPU_TEXTURE_POOL=", "SWX_GPU_BIND_ONCE=",
-                                                 "SWX_DISABLE_DRS=", "SWX_AA="))]
+                                                 "SWX_AA="))]
     # Keep explicit player VFR choices across reinstalls. A new install
     # uses the VFR 60 fps lock and derives display-link rate from the panel.
     # DM_NVN_SYNC_LAG is not pinned either and must stay out of the env.
@@ -496,10 +496,10 @@ def redirect_saves(cfg, master, phase_log):
     # of installed env files and remains available through the A/B harness.
     # SWX_AA (SMAA 1x) likewise stays out: experimental, armed per run via
     # the harness env, never pinned.
-    # SWX_DISABLE_DRS (fixed internal resolution) follows the same rule:
-    # gated by the RENDER_SCALE_DRS fixups capability, exposed in the
-    # launcher and armed per run via the harness (ab_test.py disable-drs)
-    # or the launcher, never pinned. SWX_NATIVE_RES (native 1080p/1440p/2160p presets)
+    # The legacy fixed-internal-resolution toggle (DRS/render scale are
+    # core-controlled now) is not stripped either: an explicit player line
+    # passes through kept untouched; nothing pins it here.
+    # SWX_NATIVE_RES (native 1080p/1440p/2160p presets)
     # is gated by the SWX_NATIVE_1080P fixups capability and exposed in
     # the launcher; an explicit choice passes through via kept and a new
     # install leaves it absent (default off). Legacy SWX_RES_BYPASS

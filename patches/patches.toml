@@ -311,22 +311,6 @@ note = "superseded by SWX_NVN_UP_BLIT_REC/* (rebased port); kept for provenance"
 
 
 [[patch]]
-path = "swx_botw_render_scale.patch"
-enabled = false
-flag = "DM_RENDER_SCALE"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "scope tbd, see PATCHES.md #19"
-
-[[patch]]
-path = "swx_botw_disable_drs.patch"
-enabled = false
-flag = "SWX_DISABLE_DRS"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "experimental opt-in (default off; never pinned by the installer). Fixes BOTW 1.9.0's 3D views at DM_RENDER_SCALE, including 1.0 (1600×900 docked). Independent of SWX_NATIVE_RES (now the SWX_NATIVE_RES patch group in patches/SWX_NATIVE_RES/, applied via patches.toml; not a first-class core feature)."
-
-[[patch]]
 path = "swx_botw_fxcas.patch"
 enabled = false
 flag = "SWX_FXCAS"
