@@ -1,0 +1,172 @@
+# SWX_AA group (smaa.metal.patch): new host Metal shader dm/gfx/msl/smaa.metal (SMAA 1x edge/weights/blend + swxaa copy/scale for the SWX_AA=off/smaa copy pass in nvn_mtl.m). Picked up by the host build via the dm/gfx/msl/*.metal wildcard (dm/host/Makefile MSL_SRC; dm/gfx/tools/host_msl.py) and loaded by name through host_lib("smaa", ...) — like fxcas.metal; no runtime compile. SMAA reference: https://github.com/iryoku/smaa (MIT License; LUT bytes live in nvn_mtl.m).
+# verify: dm/gfx/msl/smaa.metal
+# verify: dm/gfx/msl/smaa.metal:smaa_weights
+--- /dev/null	2026-11-23 19:20:13
++++ b/dm/gfx/msl/smaa.metal	2026-11-23 19:22:32
+@@ -0,0 +1,166 @@
++// SMAA 1x for BOTW 1.9.0 on macOS (SWX_AA tri-state): the anchored composite
++// draw is filtered and the filtered result is copied into the canvas while
++// the game draw is skipped (or the plain scene is copied with AA off). Built with the host's
++// shaders (dm/gfx/tools/host_msl.py, wildcard dm/gfx/msl/*.metal):
++// host_msl.m loads it by name.
++// SMAA reference: https://github.com/iryoku/smaa (MIT License). The LUT byte
++// tables (AreaTex 160x560 RG8, SearchTex 64x16 R8) live in nvn_mtl.m.
++// Copy shaders (swxaa_vs/copy/scale) serve nvn_mtl.m swx_aa_copy.
++// Weights: horizontal/vertical search + AreaTex lookup + corner rounding
++// (reference SMAABlendingWeightCalculationPS, 1x, no diagonals); blend:
++// reference SMAANeighborhoodBlendingPS (4-tap gather, dominant-axis mix).
++#include <metal_stdlib>
++using namespace metal;
++struct V { float4 p [[position]]; float2 uv; };
++vertex V smaa_vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
++// p[0] = (1/w, 1/h, w, h). Luma edge mask, threshold 0.1 (SMAA PRESET_MEDIUM).
++fragment float2 smaa_edge(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
++  float2 texel = p[0].xy;
++  float3 w = float3(0.299, 0.587, 0.114);
++  float c = dot(t.sample(s, in.uv).rgb, w);
++  float l = dot(t.sample(s, in.uv - float2(texel.x, 0.0)).rgb, w);
++  float u = dot(t.sample(s, in.uv - float2(0.0, texel.y)).rgb, w);
++  return float2(step(0.1, abs(c - l)), step(0.1, abs(u - c)));
++}
++// Blend weights from the edge mask and the Area/Search LUTs. Port of the
++// reference H/V path (SMAA_MAX_SEARCH_STEPS 16, subsampleIndices 0 for 1x,
++// corner rounding 25): each axis walks its line with SearchTex refinement,
++// then AreaTex maps (distance, crossing edges) to weights. No dedicated
++// diagonal search: stair-steps on diagonals take the H/V path, and zero
++// weight falls back to the scene colour (residual shimmer may remain).
++#define SMAA_MAX_SEARCH_STEPS 16.0
++#define SMAA_AREATEX_MAX_DISTANCE 16.0
++#define SMAA_AREATEX_PIXEL_X (1.0 / 160.0)
++#define SMAA_AREATEX_PIXEL_Y (1.0 / 560.0)
++#define SMAA_CORNER_NORM (25.0 / 100.0)
++float smaa_search_len(texture2d<float> searchTex, sampler s, float2 e, float offset) {
++  float2 scale = float2(66.0 * 0.5, -33.0);
++  float2 bias = float2(66.0 * offset, 33.0);
++  scale += float2(-1.0, 1.0);
++  bias += float2(0.5, -0.5);
++  scale *= float2(1.0 / 64.0, 1.0 / 16.0);
++  bias *= float2(1.0 / 64.0, 1.0 / 16.0);
++  return searchTex.sample(s, scale * e + bias).r;
++}
++float smaa_search_xleft(texture2d<float> edgesTex, texture2d<float> searchTex, sampler s, float2 texel, float2 tc, float end) {
++  float2 e = float2(0.0, 1.0);
++  for (int i = 0; i < 64; i++) {
++    if (!(tc.x > end && e.y > 0.8281 && e.x == 0.0)) break;
++    e = edgesTex.sample(s, tc).rg;
++    tc.x -= 2.0 * texel.x;
++  }
++  float off = -(255.0 / 127.0) * smaa_search_len(searchTex, s, e, 0.0) + 3.25;
++  return tc.x + off * texel.x;
++}
++float smaa_search_xright(texture2d<float> edgesTex, texture2d<float> searchTex, sampler s, float2 texel, float2 tc, float end) {
++  float2 e = float2(0.0, 1.0);
++  for (int i = 0; i < 64; i++) {
++    if (!(tc.x < end && e.y > 0.8281 && e.x == 0.0)) break;
++    e = edgesTex.sample(s, tc).rg;
++    tc.x += 2.0 * texel.x;
++  }
++  float off = -(255.0 / 127.0) * smaa_search_len(searchTex, s, e, 0.5) + 3.25;
++  return tc.x - off * texel.x;
++}
++float smaa_search_yup(texture2d<float> edgesTex, texture2d<float> searchTex, sampler s, float2 texel, float2 tc, float end) {
++  float2 e = float2(1.0, 0.0);
++  for (int i = 0; i < 64; i++) {
++    if (!(tc.y > end && e.x > 0.8281 && e.y == 0.0)) break;
++    e = edgesTex.sample(s, tc).rg;
++    tc.y -= 2.0 * texel.y;
++  }
++  float off = -(255.0 / 127.0) * smaa_search_len(searchTex, s, e.gr, 0.0) + 3.25;
++  return tc.y + off * texel.y;
++}
++float smaa_search_ydown(texture2d<float> edgesTex, texture2d<float> searchTex, sampler s, float2 texel, float2 tc, float end) {
++  float2 e = float2(1.0, 0.0);
++  for (int i = 0; i < 64; i++) {
++    if (!(tc.y < end && e.x > 0.8281 && e.y == 0.0)) break;
++    e = edgesTex.sample(s, tc).rg;
++    tc.y += 2.0 * texel.y;
++  }
++  float off = -(255.0 / 127.0) * smaa_search_len(searchTex, s, e.gr, 0.5) + 3.25;
++  return tc.y - off * texel.y;
++}
++float2 smaa_area(texture2d<float> areaTex, sampler s, float2 dist, float e1, float e2) {
++  float2 tc = round(4.0 * float2(e1, e2)) * SMAA_AREATEX_MAX_DISTANCE + dist;
++  tc = tc * float2(SMAA_AREATEX_PIXEL_X, SMAA_AREATEX_PIXEL_Y) + 0.5 * float2(SMAA_AREATEX_PIXEL_X, SMAA_AREATEX_PIXEL_Y);
++  return areaTex.sample(s, tc).rg;
++}
++fragment float4 smaa_weights(V in [[stage_in]], texture2d<float> e [[texture(0)]], texture2d<float> area [[texture(1)]], texture2d<float> search [[texture(2)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
++  float2 texel = p[0].xy;
++  float2 wh = float2(p[0].z, p[0].w);
++  float2 pix = in.uv * wh;
++  float2 ed = e.sample(s, in.uv).rg;
++  float4 weights = float4(0.0);
++  if (ed.y > 0.0) { // north edge: horizontal line
++    float2 tL = in.uv + float2(-0.25, -0.125) * texel;
++    float2 tR = in.uv + float2(1.25, -0.125) * texel;
++    float endL = tL.x - 2.0 * SMAA_MAX_SEARCH_STEPS * texel.x;
++    float endR = tR.x + 2.0 * SMAA_MAX_SEARCH_STEPS * texel.x;
++    float dL = smaa_search_xleft(e, search, s, texel, tL, endL);
++    float dR = smaa_search_xright(e, search, s, texel, tR, endR);
++    float row = in.uv.y - 0.25 * texel.y;
++    float e1 = e.sample(s, float2(dL, row)).r;
++    float e2 = e.sample(s, float2(dR + texel.x, row)).r;
++    float2 d = abs(round(float2(dL, dR) * wh.x - pix.xx));
++    float2 aw = smaa_area(area, s, sqrt(d), e1, e2);
++    float2 lr = step(d.xy, d.yx);
++    float2 rnd = (1.0 - SMAA_CORNER_NORM) * lr / (lr.x + lr.y);
++    float2 f = float2(1.0);
++    f.x -= rnd.x * e.sample(s, float2(dL, in.uv.y) + float2(0.0, texel.y)).r;
++    f.x -= rnd.y * e.sample(s, float2(dR, in.uv.y) + float2(texel.x, texel.y)).r;
++    f.y -= rnd.x * e.sample(s, float2(dL, in.uv.y) + float2(0.0, -2.0 * texel.y)).r;
++    f.y -= rnd.y * e.sample(s, float2(dR, in.uv.y) + float2(texel.x, -2.0 * texel.y)).r;
++    weights.rg = aw * clamp(f, 0.0, 1.0);
++  }
++  if (ed.x > 0.0) { // west edge: vertical line
++    float2 tU = in.uv + float2(-0.125 * texel.x, -0.25 * texel.y);
++    float2 tD = in.uv + float2(-0.125 * texel.x, 1.25 * texel.y);
++    float endU = tU.y - 2.0 * SMAA_MAX_SEARCH_STEPS * texel.y;
++    float endD = tD.y + 2.0 * SMAA_MAX_SEARCH_STEPS * texel.y;
++    float dU = smaa_search_yup(e, search, s, texel, tU, endU);
++    float dD = smaa_search_ydown(e, search, s, texel, tD, endD);
++    float col = in.uv.x - 0.25 * texel.x;
++    float e1 = e.sample(s, float2(col, dU)).g;
++    float e2 = e.sample(s, float2(col, dD + texel.y)).g;
++    float2 d = abs(round(float2(dU, dD) * wh.y - pix.yy));
++    float2 aw = smaa_area(area, s, sqrt(d), e1, e2);
++    float2 lr = step(d.xy, d.yx);
++    float2 rnd = (1.0 - SMAA_CORNER_NORM) * lr / (lr.x + lr.y);
++    float2 f = float2(1.0);
++    f.x -= rnd.x * e.sample(s, float2(in.uv.x, dU) + float2(texel.x, 0.0)).g;
++    f.x -= rnd.y * e.sample(s, float2(in.uv.x, dD) + float2(texel.x, texel.y)).g;
++    f.y -= rnd.x * e.sample(s, float2(in.uv.x, dU) + float2(-2.0 * texel.x, 0.0)).g;
++    f.y -= rnd.y * e.sample(s, float2(in.uv.x, dD) + float2(-2.0 * texel.x, texel.y)).g;
++    weights.ba = aw * clamp(f, 0.0, 1.0);
++  }
++  return weights;
++}
++// Neighbourhood blend of the source into the compatible temporary. Colour is
++// filtered, alpha preserved. Port of the reference: gather the four
++// neighbours' weights, pick the dominant axis, mix the two taps on it.
++fragment float4 smaa_blend(V in [[stage_in]], texture2d<float> src [[texture(0)]], texture2d<float> w [[texture(1)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
++  float2 texel = p[0].xy;
++  float4 offset = float4(texel.x, 0.0, 0.0, texel.y) + float4(in.uv, in.uv);
++  float4 a;
++  a.x = w.sample(s, offset.xy).a;
++  a.y = w.sample(s, offset.zw).g;
++  a.wz = w.sample(s, in.uv).xz;
++  if (dot(a, float4(1.0)) < 1e-5) return src.sample(s, in.uv);
++  bool h = max(a.x, a.z) > max(a.y, a.w);
++  float4 blendingOffset = float4(0.0, a.y, 0.0, a.w);
++  float2 blendingWeight = a.yw;
++  if (h) { blendingOffset = float4(a.x, 0.0, a.z, 0.0); blendingWeight = a.xz; }
++  blendingWeight /= dot(blendingWeight, float2(1.0, 1.0));
++  float4 blendingCoord = blendingOffset * float4(texel.x, texel.y, -texel.x, -texel.y) + float4(in.uv, in.uv);
++  float3 rgb = blendingWeight.x * src.sample(s, blendingCoord.xy).rgb + blendingWeight.y * src.sample(s, blendingCoord.zw).rgb;
++  return float4(rgb, src.sample(s, in.uv).a);
++}
++// Copy pass for SWX_AA=off/smaa (nvn_mtl.m swx_aa_copy): the scene (or the
++// SMAA-filtered temporary) into the canvas. Texel-for-texel at same size,
++// bilinear otherwise; the pipeline writes RGB only (writeMask), alpha stays.
++vertex V swxaa_vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); o.uv = uv; return o; }
++fragment float4 swxaa_copy(V in [[stage_in]], texture2d<float, access::read> t [[texture(0)]]) { return t.read(uint2(in.p.xy)); }
++fragment float4 swxaa_scale(V in [[stage_in]], texture2d<float> t [[texture(0)]]) {
++  constexpr sampler s(filter::linear, address::clamp_to_edge); return t.sample(s, in.uv); }

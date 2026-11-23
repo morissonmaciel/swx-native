@@ -1,0 +1,29 @@
+# SWX_AA catalog order (settings.py.patch): Anti-aliasing joins the Mac Graphics section immediately before
+# Picture shape (DM_SCREEN_ASPECT), mirroring the monolithic order and the worktree layout: AA is the last
+# picture row. Rows a build lacks are skipped, so fixups-gated neighbours do not affect this hunk.
+# META needs widens to (DM|SWX)_ as in the monolithic patch, staying consistent with
+# launcher.schema.json.patch (no SWX needs= rows exist yet; preemptive, one line).
+# verify: dm/games/settings.py:SWX_AA
+# verify: dm/games/settings.py:(DM|SWX)_[A-Z0-9_]+
+diff --git a/dm/games/settings.py b/dm/games/settings.py
+index 60282e533d4597c544d9eceecbe3a899644d41fc..17a5ff517858024361e25d1dbded5a2eb7a827bf 100644
+--- a/dm/games/settings.py
++++ b/dm/games/settings.py
+@@ -16,7 +16,7 @@
+ # docs/launcher.schema.json together (test_launcher_settings.py checks that the three agree); a reader ignores keys it does not know
+ META = {
+     'level': r'basic',                       # a setting a front end shows first; without it, the front end decides
+-    'needs': r'DM_[A-Z0-9_]+=[^;=]+',        # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
++    'needs': r'(DM|SWX)_[A-Z0-9_]+=[^;=]+', # <VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value
+ }
+ 
+ 
+@@ -58,7 +58,7 @@
+ 
+ UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
+ 
+-MAC_GRAPHICS_ORDER = ('DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_PRESENT_UPSCALE', 'DM_SCREEN_ASPECT')   # the Mac Graphics section's rows, in the order shown (a row this build lacks is skipped)
++MAC_GRAPHICS_ORDER = ('DM_FULLSCREEN', 'SWX_NATIVE_RES', 'DM_FPS_TARGET', 'DM_RENDER_SCALE', 'DM_PRESENT_UPSCALE', 'SWX_AA', 'DM_SCREEN_ASPECT')   # the Mac Graphics section's rows, in the order shown (a row this build lacks is skipped)
+ RENDER_SCALE_PCTS = (('0.5', '50%'), ('0.75', '75%'), ('1.0', '100%'), ('1.1', '110%'), ('1.2', '120%'))   # the Mac render-scale choice, in percent
+ 
+ 

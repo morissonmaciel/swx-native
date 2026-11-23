@@ -1,0 +1,20 @@
+# SWX_AA catalog row (settings.tsv.patch): the Anti-aliasing choice (off/fxaa/smaa, default fxaa) for macOS.
+# The tsv keeps section Game (the screen order within a section is table order); settings.py's mac_graphics()
+# moves the MAC_GRAPHICS_ORDER picture rows into a Graphics section on mac, so the Mac window shows
+# Anti-aliasing as the last picture row before Picture shape. Condition platform:mac, as in the monolithic patch.
+# launcher.schema.json is widened by its own patch (applied before this one);
+# the schema verify below pins that ordering (documentary invariant, no diff for that file here).
+# verify: dm/games/settings.tsv:SWX_AA	choice
+# verify: docs/launcher.schema.json:(DM|SWX)_[A-Z0-9_]+
+diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
+index e83b760e925ea54f8a6266f26ea8c756a029d2c0..428de2d1a5e04d72b7eff6f0bd0ecf63abc3833b 100644
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -19,6 +19,7 @@
+ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resolution	Lets the game lower its resolution under load. Turn off to keep full resolution for the selected console mode.
+ DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
+ SWX_NATIVE_RES	choice	0=Off,1080p=1080p (1920x1080),1440p=1440p (2560x1440)?platform:mac&fixups:SWX_NATIVE_1440P,2160p=2160p (3840x2160)?platform:mac&fixups:SWX_NATIVE_4K	0	fixups:SWX_NATIVE_1080P	Game	Native resolution	Renders the scene, canvas and snapshot at 1920x1080 docked (1080p), 2560x1440 (1440p, macOS only) or 3840x2160 (2160p, macOS only); window shows it 1:1, fullscreen scales it per DM_PRESENT_UPSCALE; off keeps the stock sizes.
++SWX_AA	choice	off=Off,fxaa=FXAA,smaa=SMAA	fxaa	platform:mac	Game	Anti-aliasing	FXAA is the game's own filter; Off skips it (plain copy); SMAA filters edges before the canvas write.
+ DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+ DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
+ DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler

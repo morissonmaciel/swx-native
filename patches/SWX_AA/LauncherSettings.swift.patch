@@ -1,0 +1,18 @@
+# SWX_AA group (LauncherSettings.swift.patch): a saved "0" reads as "off".
+# Canonical names are off|fxaa|smaa; "0" is the value Off saved before the
+# SWX_AA row was renamed, so normalizedSaved maps it to "off" only where
+# the build offers that option. Mirrors launcher.c saved_choices. Goes
+# before the DM_RENDER_SCALE guard, as in the monolithic patch.
+# verify: dm/ios/Sources/LauncherSettings.swift:SWX_AA off was once
+diff --git a/dm/ios/Sources/LauncherSettings.swift b/dm/ios/Sources/LauncherSettings.swift
+--- a/dm/ios/Sources/LauncherSettings.swift
++++ b/dm/ios/Sources/LauncherSettings.swift
+@@ -100,4 +100,6 @@ final class LauncherModel: ObservableObject {
+         return "\(Int((Double(size[0]) * v).rounded())) × \(Int((Double(size[1]) * v).rounded())) (\(p))"
+     }
+     func normalizedSaved(_ s: Setting, _ v: String) -> String? {   // a saved choice the game still offers: a render-scale percent compares as a number (the slider wrote 1.00 for 1.0)
++        // SWX_AA off was once "0": a saved "0" reads as its "off" option, as launcher.c saved_choices does.
++        if s.env == "SWX_AA", v == "0" { return s.options?.contains { $0[0] == "off" } == true ? "off" : nil }
+         if s.env == "DM_RENDER_SCALE", s.kind == "choice" {
+             guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite else { return nil }   // no hex: launcher.c's check agrees
+             return s.options?.first { !$0.isEmpty && Double($0[0]) == n }?[0]

@@ -1,0 +1,21 @@
+# SWX_AA group (settings.md.patch): document the Anti-aliasing row.
+# The monolithic patch's hunk is obsolete: the base restructured the Mac
+# window doc (no Graphics section, no picture-rows enumeration with Shadow
+# resolution). Anchor is the real per-row Mac-window subsections: Display
+# mode documents DM_FULLSCREEN and Switch 2 controllers documents DM_SW2,
+# so Anti-aliasing documents SWX_AA between them, in the same one-row +
+# env.txt style. Contract: absent or fxaa keeps the game's own FXAA filter,
+# off skips it (plain copy), smaa filters edges first; a saved "0" reads
+# as off (launcher.c saved_choices, LauncherModel.normalizedSaved).
+# verify: docs/settings.md:Anti-aliasing
+diff --git a/docs/settings.md b/docs/settings.md
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -241,3 +241,7 @@
+ **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
+ 
++### Anti-aliasing
++
++**Off**, **FXAA** or **SMAA**: how the game's picture is smoothed. **FXAA** is the game's own filter; **Off** skips it; **SMAA** filters edges before the canvas write. Absent is **FXAA**. A saved `0` reads as **Off**. In an `env.txt`: `SWX_AA=off`, `fxaa` or `smaa`.
++
+ ### Switch 2 controllers

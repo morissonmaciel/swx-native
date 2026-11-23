@@ -145,6 +145,10 @@ platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
 note = "launcher UI"
 
+# ---- Graphical Improvements (macro group) ----
+# 1st: SWX_FIDELITYFX_CAS (BOTW-only, macOS default on). 2nd: SWX_AA (BOTW-only,
+# harness-only, default off) — applies AFTER CAS (CAS sharpens first; SMAA/copy
+# consume its output; the hook disarms the skipped draw's one-shot swap).
 # ---- SWX_FIDELITYFX_CAS group (graphics improvements; third umbrella; applies after SWX_NATIVE_RES) ----
 # Tested group: BOTW anchor draw composite sharpen + new CAS Metal shader.
 # Order = application order (toggle SWX_FIDELITYFX_CAS; BOTW-only; default macOS on).
@@ -165,6 +169,84 @@ games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
 default = { mac = "on", ios = "off" }
 note = "new CAS Metal shader"
+
+# ---- SWX_AA group (graphics improvements, second; applies after SWX_FIDELITYFX_CAS) ----
+# Re-split rebase of the monolithic swx_botw_smaa.patch (removed below; file kept
+# untracked by this stack as provenance): BOTW anchor-draw tri-state off/fxaa/smaa
+# + inline copy pass + 3-pass SMAA. Order = application order; schema lands before
+# the catalog row (its verifies pin the widened patterns).
+# All entries enabled = false (harness-only, never pinned; catalog default fxaa = no-op).
+[[patch]]
+path = "SWX_AA/nvn_mtl.m.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "BOTW anchor draw hook + copy pass + 3-pass SMAA (LUTs)"
+
+[[patch]]
+path = "SWX_AA/smaa.metal.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "new SMAA Metal shader"
+
+[[patch]]
+path = "SWX_AA/launcher.schema.json.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "widen env/needs patterns to (DM|SWX)_"
+
+[[patch]]
+path = "SWX_AA/settings.tsv.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "SWX_AA catalog row (off/fxaa/smaa, default fxaa)"
+
+[[patch]]
+path = "SWX_AA/settings.py.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "Graphics order + META needs widening"
+
+[[patch]]
+path = "SWX_AA/test_launcher_settings.py.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "SWX_AA catalog asserts"
+
+[[patch]]
+path = "SWX_AA/settings.md.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "Anti-aliasing doc row"
+
+[[patch]]
+path = "SWX_AA/launcher.c.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "macOS saved-choice 0->off migration"
+
+[[patch]]
+path = "SWX_AA/LauncherSettings.swift.patch"
+enabled = false
+flag = "SWX_AA"
+games = ["01007EF00011E000"]
+platforms = ["mac", "ios"]
+note = "iOS saved-choice 0->off migration"
 
 # ---- SWX_VFR group (fourth umbrella; applies after SWX_GPU_KEEPALIVE, SWX_NATIVE_RES and SWX_FIDELITYFX_CAS) ----
 # Display pacing + real-time game step. SWX_VFR=relaxed/uncapped arms the VFR
@@ -339,13 +421,15 @@ games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
 note = "BOTW sun table; scope tbd, see PATCHES.md #28"
 
-[[patch]]
-path = "swx_botw_smaa.patch"
-enabled = false
-flag = "SWX_AA"
-games = ["01007EF00011E000"]
-platforms = ["mac", "ios"]
-note = "BOTW anchor draw; does not apply on the current core (dry-run fails, pre-existing); rebase planned, see PATCHES.md #29"
+# Re-split rebased as the SWX_AA/* group (enabled = false, harness-only) above;
+# this monolithic entry is retired (file kept as provenance, untracked by the stack).
+# [[patch]]
+# path = "swx_botw_smaa.patch"
+# enabled = false
+# flag = "SWX_AA"
+# games = ["01007EF00011E000"]
+# platforms = ["mac", "ios"]
+# note = "BOTW anchor draw; does not apply on the current core (dry-run fails, pre-existing); rebase planned, see PATCHES.md #29"
 
 [[patch]]
 path = "swx_botw_draw_distance.patch"

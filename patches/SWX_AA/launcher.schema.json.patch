@@ -1,0 +1,26 @@
+# SWX_AA group (launcher.schema.json.patch): widen env/needs patterns to (DM|SWX)_ so the SWX_AA row validates.
+# The monolithic patch widened both patterns; the rebase keeps the widening as its own one-file patch so
+# settings.tsv.patch's documentary verifies hold (schema lands before the catalog row in the TOML order).
+# verify: docs/launcher.schema.json:(DM|SWX)_[A-Z0-9_]+
+diff --git a/docs/launcher.schema.json b/docs/launcher.schema.json
+index 4bb97df3c08dc4072ae49183a2b100aa5c8addb7..70ae0b1e7ea3944ca7d72b384d0c5c152a4bccca 100644
+--- a/docs/launcher.schema.json
++++ b/docs/launcher.schema.json
+@@ -16,7 +16,7 @@
+       "type": "object",
+       "required": ["env", "kind", "section", "label", "note", "default"],
+       "properties": {
+-        "env": {"description": "The environment switch the setting sets.", "type": "string", "pattern": "^DM_[A-Z0-9_]+$"},
++        "env": {"description": "The environment switch the setting sets.", "type": "string", "pattern": "^(DM|SWX)_[A-Z0-9_]+$"},
+         "kind": {"enum": ["choice", "range", "toggle"]},
+         "section": {"description": "The heading it goes under (Game, Controls and Performance today); sections and rows come in the order to show them. A reader draws a section it does not know like the others, under its name.", "type": "string"},
+         "label": {"type": "string"},
+@@ -31,7 +31,7 @@
+         "base": {"description": "Render scale only: the 3D views' size the scale multiplies, docked and handheld, from the game's profile; absent for most games.", "type": "object", "required": ["docked", "handheld"],
+                  "properties": {"docked": {"$ref": "#/$defs/size"}, "handheld": {"$ref": "#/$defs/size"}}},
+         "level": {"description": "basic: a setting a front end shows first. Without it, the front end decides.", "const": "basic"},
+-        "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^DM_[A-Z0-9_]+=[^;=]+$"}
++        "needs": {"description": "<VAR>=<value>: a sub-setting, drawn only while the row that sets <VAR> has that value. A row naming a variable this list does not have stays drawn.", "type": "string", "pattern": "^(DM|SWX)_[A-Z0-9_]+=[^;=]+$"}
+       },
+       "allOf": [
+         {"if": {"properties": {"kind": {"const": "choice"}}}, "then": {"required": ["options"]}},

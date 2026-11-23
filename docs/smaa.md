@@ -1,6 +1,6 @@
 # SWX_AA — game AA control for BOTW (experimental, harness-only)
 
-> **Status (2026-11-23): deferred.** `patches/swx_botw_smaa.patch` is disabled and does not apply on the current core (`patch --dry-run` fails in six files; pre-existing drift, independent of `SWX_FIDELITYFX_CAS`). Rebase planned before enabling; the gates below document the 2026-11-20 runs against the then-current core.
+> **Status (2026-11-23): re-split rebased, filter confirmation pending.** The monolithic `patches/swx_botw_smaa.patch` (disabled, did not apply on the current core) was re-split as `patches/SWX_AA/` (9 patches, 1 per file, + `swx_aa.md`; TOML entry retired, file kept as provenance). Structural review APROVADO COM AJUSTES (both adjustments carried); G0 green via `apply_patches.py --check`; install `SETUP_EXIT=0` with the group temporarily enabled (build contains SWX_AA; player's `env.txt` kept); boot launch-path green `=smaa` and combo `=smaa` x CAS=1 (mode line logged, 11k+ frames, zero `[RED]`, graceful/killed exits). The `filtered … into the canvas` line needs a gameplay minute (anchor fires 1x/gameplay-frame; title screens never trigger) — stays `enabled = false`, never pinned. The gates below document the 2026-11-20 runs against the then-current core.
 
 Never pin it in the player's `env.txt`: the installer strips `SWX_AA` on
 reinstall (keep-out list in `wrapper/main.py`) and the harness sets it per

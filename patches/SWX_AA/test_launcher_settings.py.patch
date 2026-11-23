@@ -1,0 +1,27 @@
+# SWX_AA catalog asserts (test_launcher_settings.py.patch): the mac-ios row set gains SWX_AA; the row reads
+# kind choice, section Graphics (Game in the tsv, moved by mac_graphics()), default fxaa, options
+# off/fxaa/smaa, and stays absent on ios; the Mac Graphics section follows MAC_GRAPHICS_ORDER for the rows
+# this build has (the base has no SHADOW/DISABLE rows and no dedicated Graphics-order test, so the order
+# assert is written against MAC_GRAPHICS_ORDER filtered to the rows present).
+# verify: dm/tools/tests/test_launcher_settings.py:mac['SWX_AA']
+diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
+index ed6ce7f8c61f9f187507d8014c6fdcdc3bf72ed7..8640e612df69287fde4493ab7992bb0916b8e5b7 100644
+--- a/dm/tools/tests/test_launcher_settings.py
++++ b/dm/tools/tests/test_launcher_settings.py
+@@ -77,9 +77,15 @@
+         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
+         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_ROTATION'})
+         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
+-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
++        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'SWX_AA'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only); the Anti-aliasing row (platform:mac)
+         s = mac['DM_FULLSCREEN']
+         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
++        aa = mac['SWX_AA']
++        self.assertEqual((aa['kind'], aa['section'], aa['default']), ('choice', 'Graphics', 'fxaa'))   # the tsv section is Game; mac_graphics() moves the picture rows to Graphics
++        self.assertEqual(aa['options'], [['off', 'Off'], ['fxaa', 'FXAA'], ['smaa', 'SMAA']])
++        self.assertNotIn('SWX_AA', ios)   # mac-only row
++        self.assertEqual([e for e, s in mac.items() if s['section'] == 'Graphics'],
++                         [e for e in settings.MAC_GRAPHICS_ORDER if e in mac])   # the Mac Graphics section follows MAC_GRAPHICS_ORDER, skipping rows this build lacks
+ 
+     def test_defaults_follow_each_platform_host(self):
+         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
