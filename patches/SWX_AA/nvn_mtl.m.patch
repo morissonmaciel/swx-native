@@ -1,13 +1,151 @@
-# SWX_AA group (nvn_mtl.m.patch): tri-state BOTW 1.9.0 composite AA on macOS (SWX_AA=off/smaa; absent/fxaa = the game's FXAA, harness-only, read once at launch) — the anchored fullscreen composite draw (scene -> canvas, fs key bd7ffdd435c6c3bc with vs 5e9f57168d89a543, prim 4, 3 verts, indexed, 1x/frame) is either left to the game or replaced by an inline copy pass into the canvas: off skips the FXAA draw and copies the scene texel-for-texel (bilinear when sizes differ, RGB-only mask 0x7, honouring the pending clear); smaa runs the 3-pass SMAA filter (edge/weights/blend in dm/gfx/msl/smaa.metal, MIT) on the scene first, then the copy pass draws the filtered result and the game draw is skipped. Order with SWX_FXCAS: CAS sharpens first (fxcas_try at the draw entry); the hook consumes fxcas_tex and disarms the skipped draw's one-shot swap. Validation is MNG-style (2D source, source serial != canvas serial, no blend, RGB-only mask, full viewport/scissor; anything else keeps the game draw, logged once); no MetalFX path exists for this graphics draw. LUT bytes (k_swx_smaa_area 160x560x2, k_swx_smaa_search 64x16) are the SMAA reference bytes verbatim, uploaded once into immutable textures. Block lives before skip_fs_draw/draw_; the hook runs after fb_prepare.
+# SWX_AA renderer: off preserves the native composite and copies effective fragment NVN slot 0 c[3].xy (0x30/0x34) into a submission-lifetime UBO with 1e30 thresholds, neutralizing FXAA only for four verified BOTW gameplay/pause variants; smaa runs SMAA on the scene before HUD and copies the filtered result while skipping the game composite, with the same UBO neutralization on any preserved/fallback draw; fxaa leaves all native draws untouched. PASSDUMP records AA N effective UBO overrides, F fallback reasons, Z skipped composites, and same-frame TEX snapshots of source, weights and filtered output.
+
 # verify: dm/gfx/nvn/nvn_mtl.m:swx_aa_hook
+# verify: dm/gfx/nvn/nvn_mtl.m:swx_aa_fxaa_cbuf_copy
+# verify: dm/gfx/nvn/nvn_mtl.m:effective_c3xy=1e30,1e30
+# verify: dm/gfx/nvn/nvn_mtl.m:mode off (env=off;
+# verify: dm/gfx/nvn/nvn_mtl.m:AA TEX pass=
+# verify: dm/gfx/nvn/nvn_mtl.m:effective-ubo-has-pending-writer
+# verify: dm/gfx/nvn/nvn_mtl.m:bd7ffdd435c6c3bc
+# verify: dm/gfx/nvn/nvn_mtl.m:a2406ffb6621954d
+# verify: dm/gfx/nvn/nvn_mtl.m:754271a4c8677a08
+# verify: dm/gfx/nvn/nvn_mtl.m:fcc8d0ea42d4d941
 # verify: dm/gfx/nvn/nvn_mtl.m:swx_smaa_filter
 # verify: dm/gfx/nvn/nvn_mtl.m:SWX_AA=smaa
 # verify: dm/gfx/nvn/nvn_mtl.m:k_swx_smaa_area
-# verify: dm/gfx/nvn/nvn_mtl.m:k_swx_smaa_search
-# verify: dm/gfx/nvn/nvn_mtl.m:static int swx_aa_mode
---- a/dm/gfx/nvn/nvn_mtl.m	2026-11-23 19:20:13
-+++ b/dm/gfx/nvn/nvn_mtl.m	2026-11-23 19:22:32
-@@ -17319,6 +17319,15341 @@ static void draw_multi(const p_multi_draw *m) {
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -2656,6 +2656,8 @@ static int ubp_get(uint64_t lo, uint64_t hi, uint64_t *gpu, const uint8_t **cpu)
+ }
+ void mtl_ubp_stats(uint64_t *made, uint64_t *reused, uint64_t *refused) { *made = g_ubp_made; *reused = g_ubp_reused; *refused = g_ubp_refused; }
+ void mtl_ubp_why(uint64_t w[6]) { memcpy(w, g_ubp_why, sizeof g_ubp_why); }
++enum { SWX_AA_FXAA = 0, SWX_AA_OFF = 1, SWX_AA_SMAA = 2 };
++static int swx_aa_mode(void);
+ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+     if (!n) return;
+     rc_write(dst,n,data,0);
+@@ -2680,6 +2682,11 @@ void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+         int k = 0; for (int i = 0; i < g_nubd; i++) if (!(dst <= g_ubd[i].lo && g_ubd[i].hi <= dst + n)) g_ubd[k++] = g_ubd[i];
+         g_nubd = k;
+         g_ubd[g_nubd++] = (ubd_ent){dst, dst + n, g_ubs_buf.gpuAddress + g_ubs_off, g_ubs_off, g_ubs_buf}; ubd_pf_add(dst, dst + n); g_ubd_ver++; g_ubd_deferred++; ubd_dirty(dst, dst + n); }   // see ubd_shadow
+-    else enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
++    else {
++        enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
++        // Our CBUF shadow is per effective binding, unlike the game's live pointer. Invalidate
++        // argument blocks after direct upload copies too, so the next draw never reuses stale bytes.
++        if (swx_aa_mode() != SWX_AA_FXAA) ubd_dirty(dst, dst + n);
++    }
+     g_ubs_off += need;
+ }
+@@ -14462,20 +14469,99 @@ static uint64_t ub_padded(NvShader *sh, int st, int reg, const p_bind_buf *u, ui
+ }
+ // A CBUF slot's GPU address, and in *use the buffer it points into: the bound uniform buffer; the shadow of inline updates deferred in this pass; an arena copy padded with zeros
+ // when the binding is shorter than the shader reads it at fixed offsets (ub_padded); or the all-zero bank when nothing usable is bound. The full encode and the patch take it from here
++static void swx_aa_texdump_capture(id<MTLTexture>, const char *, uint64_t, uint64_t, uint64_t);
++static int swx_aa_fxaa_uniform(NvShader *sh, int stage, int reg) {
++    static const char *const keys[] = {
++        "bd7ffdd435c6c3bc",  // BOTW gameplay composite (PASSDUMP; raw FXAA shader 058188a1db3e22e9)
++        "a2406ffb6621954d",  // pause Quality variant
++        "754271a4c8677a08",  // pause Quality variant
++        "fcc8d0ea42d4d941",  // pause Quality variant
++    };
++    if (stage != 1 || reg != 0 || swx_aa_mode() == SWX_AA_FXAA || !sh || !sh->key) return 0;
++    for (unsigned i = 0; i < sizeof keys / sizeof keys[0]; i++)
++        if (!strncmp(sh->key, keys[i], 16)) return 1;
++    return 0;
++}
++// Make a submission-lifetime copy of the effective CBUF bytes, including the
++// rounded read tail, overlaid with current inline updates. Pending GPU writers
++// retain the stock binding; this encoder path never waits for the upload queue. Then replace
++// Maxwell c[3].x/.y thresholds. This is slot 0, bytes 0x30/0x34. 1e30 disables
++// the game's FXAA edge thresholds while preserving every other constant. The modified
++// copy is submission-arena owned, never cached. encode_args_ reuses an argument block
++// only while both binding generation (ab_gen) and UBO-content generation (ab_ugen)
++// match; OP_BIND_UBO and ubd_dirty bump those generations, so a changed effective UBO
++// re-enters cbuf_slot. PASSDUMP disables reuse outright.
++static int swx_aa_fxaa_cbuf_copy(const p_bind_buf *u, uint64_t live, uint32_t need,
++                                  const uint8_t *mem, uint64_t *gpu, __strong id<MTLBuffer> *buf,
++                                  const char **why) {
++    uint64_t lo = u->addr;
++    if (!mem || live < u->size || need < live || live > UINT64_MAX - lo) { *why = "effective-ubo-range-invalid"; return 0; }
++    uint64_t hi = lo + live;
++    int hit = g_nubd && ubd_hits(lo, hi), full_current = hit && ubd_covers(lo, hi);
++    // If current writes cover every readable byte they supersede earlier GPU writes.
++    // Otherwise preserve the binding whenever its effective bytes may still be pending;
++    // this encoder path must never wait on the upload-completion queue.
++    if (!full_current && (pend_hits(lo, live) || hw_live(lo, hi))) { *why = "effective-ubo-has-pending-writer"; return 0; }
++    arena_at at = arena_take(need, buf); uint8_t *d = at.cpu;
++    if (!full_current) memcpy(d, mem, (size_t)live);
++    if (hit) for (int i = 0; i < g_nubd; i++) { const ubd_ent *e = &g_ubd[i];
++        uint64_t x = e->lo > lo ? e->lo : lo, y = e->hi < hi ? e->hi : hi;
++        if (x < y) memcpy(d + (x - lo), (const uint8_t *)e->buf.contents + e->off + (x - e->lo), (size_t)(y - x));
++    }
++    memset(d + live, 0, need - (size_t)live);
++    const float neutral = 1.0e30f;
++    memcpy(d + 0x30, &neutral, sizeof neutral); memcpy(d + 0x34, &neutral, sizeof neutral);
++    *gpu = at.gpu; return 1;
++}
++static uint64_t swx_aa_fxaa_zero_cbuf(uint32_t need, __strong id<MTLBuffer> *buf) {
++    arena_at at = arena_take(need, buf); memset(at.cpu, 0, need);
++    const float neutral = 1.0e30f;
++    memcpy(at.cpu + 0x30, &neutral, sizeof neutral); memcpy(at.cpu + 0x34, &neutral, sizeof neutral);
++    return at.gpu;
++}
+ static uint64_t cbuf_slot(NvShader *sh, int nvn_stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *use) {   // *use is not retained (a pool's buffer, the zero bank or an arena block, each held by its table): a retain and a release a uniform slot otherwise
+     int reg = b->reg; const p_bind_buf *u = reg < 16 ? &S.ubo[nvn_stage][reg] : NULL;
+     void *mb; uint64_t mo, gpu;
+-    if (!u || !u->addr || !mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu)) {   // reads 0 (the all-zero bank), as an unbound texture slot does, instead of through a null pointer
+-        // A slot the game bound empty itself (address 0, size 0): every read is past the binding's size, which reads 0 on Maxwell as for a short binding (ub_padded), so the zero bank
+-        // is what it reads. Resident Evil 4 binds compute slot 1 so before every dispatch of 4e06df4bbdf9b7c9, whose cb1 reads it does not use. Noted once; a slot never bound and
+-        // an address in no pool stay red
+-        if (u && !u->addr && !u->size && (S.ubo_set[nvn_stage] >> reg & 1)) {
+-            static int noted; if (!noted++) MLOG("stage %d cb%d is bound empty by the game (address 0, size 0): shader %s reads it as 0, as a read past a binding's size is (frame %llu)", nvn_stage, reg, sh->key, (unsigned long long)atomic_load(&g_cur_frame));
+-            *use = zero_bank(); return zero_bank_gpu(); }
+-        if (!g_red_once[16]) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);   // which shader, and what the address is (unbound, or in no pool)
++    int mapped = u && u->addr && mtl_gpu_addr(u->addr, u->size ? u->size : 1, &mb, &mo, &gpu);
++    if (u && !u->addr && !u->size && (S.ubo_set[nvn_stage] >> reg & 1)) {
++        static int noted; if (!noted++) MLOG("stage %d cb%d is bound empty by the game (address 0, size 0): shader %s reads it as 0, as a read past a binding's size is (frame %llu)", nvn_stage, reg, sh->key, (unsigned long long)atomic_load(&g_cur_frame));
++        if (swx_aa_fxaa_uniform(sh, nvn_stage, reg)) {
++            uint64_t n64 = MAX((uint64_t)4u * b->fixw, (uint64_t)0x38);
++            if (n64 <= 65536) { id<MTLBuffer> patched; uint64_t pg = swx_aa_fxaa_zero_cbuf((uint32_t)n64, &patched); *use = patched;
++                PD("AA N %llu pass=%llu mode=%s st%d cb%d fs=%.16s source=empty effective_c3xy=1e30,1e30 bytes=0x30/0x34 canvas_ser=%llu", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key,
++                   (unsigned long long)(R.has_rt && R.rt.color[0] ? R.rt.color[0]->serial : 0)); return pg; }
++            PD("AA F %llu pass=%llu mode=%s st%d cb%d fs=%.16s reason=empty-read-extent-too-large fallback=stock-slot", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key);
++        }
++        *use = zero_bank(); return zero_bank_gpu();
++    }
++    if (!mapped) {
++        if (swx_aa_fxaa_uniform(sh, nvn_stage, reg))
++            PD("AA F %llu pass=%llu mode=%s st%d cb%d fs=%.16s reason=effective-cbuf-unavailable fallback=stock-slot", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key);
++        if (!g_red_once[16]) { char note[400] = ""; if (u && u->addr) dm_gfx_addr_note(u->addr, note, sizeof note);
+             RED_ONCE(16, "stage %d cb%d has no uniform buffer bound: shader %s, address %#llx size %#llx (frame %llu)%s", nvn_stage, reg, sh->key, u ? (unsigned long long)u->addr : 0ull, u ? (unsigned long long)u->size : 0ull,
+                      (unsigned long long)atomic_load(&g_cur_frame), note); }
+         *use = zero_bank(); return zero_bank_gpu(); }
++    if (swx_aa_fxaa_uniform(sh, nvn_stage, reg)) {
++        void *rb; uint64_t ro, rg;
++        uint64_t live = u->size && mtl_gpu_addr(u->addr, ub_bound(u->size), &rb, &ro, &rg) && rb == mb ? ub_bound(u->size) : u->size;
++        uint64_t need64 = MAX(MAX((uint64_t)4u * b->fixw, (uint64_t)0x38), MAX((uint64_t)u->size, live));
++        if (u->size >= 0x38 && live >= 0x38 && need64 <= 65536) {
++            uint32_t need = (uint32_t)need64; id<MTLBuffer> patched; uint64_t pg = 0; const char *why = NULL;
++            if (swx_aa_fxaa_cbuf_copy(u, live, need, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, &pg, &patched, &why)) {
++                *use = patched;
++                PD("AA N %llu pass=%llu mode=%s st%d cb%d fs=%.16s source=effective effective_c3xy=1e30,1e30 bytes=0x30/0x34 canvas_ser=%llu", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key,
++                   (unsigned long long)(R.has_rt && R.rt.color[0] ? R.rt.color[0]->serial : 0));
++                return pg;
++            }
++            static int once; if (!once++) MLOG("[RED] SWX_AA: cannot neutralize FXAA cbuf for fs %.16s: %s; preserving original binding", sh->key, why ?: "effective-copy-unavailable");
++            PD("AA F %llu pass=%llu mode=%s st%d cb%d fs=%.16s reason=%s fallback=stock-binding", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key, why ?: "effective-copy-unavailable");
++        } else {
++            static int once; if (!once++) MLOG("[RED] SWX_AA: cannot neutralize FXAA cbuf for fs %.16s (size=%llu live=%llu extent=%llu); preserving original binding", sh->key,
++                                                  (unsigned long long)u->size, (unsigned long long)live, (unsigned long long)need64);
++            PD("AA F %llu pass=%llu mode=%s st%d cb%d fs=%.16s reason=threshold-or-fixed-read-out-of-bound size=%llu live=%llu extent=%llu fallback=stock-binding", g_stat_pass + !g_enc, g_stat_pass + !g_enc, swx_aa_mode() == SWX_AA_OFF ? "off" : "smaa", nvn_stage, reg, sh->key,
++               (unsigned long long)u->size, (unsigned long long)live, (unsigned long long)need64);
++        }
++    }
+     if (__builtin_expect(ub_bound(u->size) < 4u * b->fixw, 0)) {   // bound shorter than the shader reads it at fixed offsets: those reads give 0, as on Maxwell
+         void *rb; uint64_t ro, rg, live = u->size && mtl_gpu_addr(u->addr, ub_bound(u->size), &rb, &ro, &rg) && rb == mb ? ub_bound(u->size) : u->size;   // the pool may end before the rounded size
+         id<MTLBuffer> pb; uint64_t pg = ub_padded(sh, nvn_stage, reg, u, live, 4u * b->fixw, (const uint8_t *)[(__bridge id<MTLBuffer>)mb contents] + mo, &pb); *use = pb; return pg; }
+@@ -17319,6 +17405,15341 @@ static void draw_multi(const p_multi_draw *m) {
      g_mdx_range = NULL;
      g_mdxc.next = NULL;
  }
@@ -18,15 +156,14 @@
 +// at launch, absent or empty means fxaa. The installer leaves it absent
 +// (wrapper/main.py): the harness sets it per run.
 +// - fxaa: the game default. The hook does nothing; the draw encodes shipped.
-+// - off (AA off): the game draw is not encoded. An inline copy pass draws the
-+//   scene (FXCAS-sharpened when armed) into the canvas instead, texel for
-+//   texel when the sizes match, bilinear otherwise, RGB-only like the game
-+//   draw (mask 0x7; the alpha stays), honouring the canvas's pending clear.
++// - off: the original composite draw remains, but its effective fragment
++//   CBUF slot 0 has c[3].xy (bytes 0x30/0x34) set to 1e30, disabling FXAA
++//   while preserving the game's own composition, upscale, mask and clear.
 +// - smaa: SMAA only. The 3-pass filter below (edge into RG8Unorm, blend
 +//   weights into RGBA8Unorm, neighbourhood blend) runs on the scene first,
 +//   then the copy pass draws the FILTERED temporary into the canvas, and
 +//   the game draw is skipped. Zero passes (no slot free, no room) leave the
-+//   original draw.
++//   original draw with native FXAA thresholds neutralized by its effective fragment UBO.
 +// Order with SWX_FXCAS: CAS sharpens first (fxcas_try at the draw entry);
 +// SMAA and the copy consume its output (fxcas_tex) and disarm the one-shot
 +// swap the skipped draw would have taken. The sampler, coordinates, format
@@ -34,19 +171,19 @@
 +// Validation inside the hook (MNG-style, refs/mac-nativegames/games/totk/
 +// third_party/d2r_gfx/gfx/nvn/botw_finish.h:50-99): 2D source, source
 +// serial != canvas serial, no blend, RGB-only mask, full viewport and
-+// scissor; anything else keeps the game draw, logged once per cause. No
++// scissor; anything else keeps the game draw and attempts c[3].xy neutralization
++// for verified variants, with an AA F marker if that effective UBO cannot be copied. No
 +// MetalFX replacement path exists for this graphics draw (up_mfx_* handles
 +// compute dispatches only; the present scaler runs after the canvas), so
 +// unlike MNG's botw_fin_upscale there is no replaced case to honour.
 +// SMAA reference: https://github.com/iryoku/smaa (MIT License; see
 +// dm/gfx/msl/smaa.metal).
-+enum { SWX_AA_FXAA = 0, SWX_AA_OFF = 1, SWX_AA_SMAA = 2 };
 +static int swx_aa_mode(void) {
 +    static int v = -2;
 +    if (v == -2) {
 +        const char *e = getenv("SWX_AA");
 +        if (!e || !*e || !strcmp(e, "fxaa")) { v = SWX_AA_FXAA; MLOG("SWX_AA: mode fxaa (the game's FXAA draws; anchor fs=bd7ffdd435c6c3bc)"); }
-+        else if (!strcmp(e, "off")) { v = SWX_AA_OFF; MLOG("SWX_AA=off: mode off (the scene is copied into the canvas, the game draw skipped; anchor fs=bd7ffdd435c6c3bc)"); }
++        else if (!strcmp(e, "off")) { v = SWX_AA_OFF; MLOG("SWX_AA: mode off (env=off; attempts verified FXAA c[3].xy neutralization when effective CBUF is safe; original composite draw preserved)"); }
 +        else if (!strcmp(e, "smaa")) { v = SWX_AA_SMAA; MLOG("SWX_AA=smaa: mode smaa (the SMAA-filtered scene is copied into the canvas, the game draw skipped; anchor fs=bd7ffdd435c6c3bc)"); }
 +        else { v = SWX_AA_FXAA; MLOG("[RED] SWX_AA=%s unknown (want off, fxaa or smaa): keeping the game's FXAA", e);
 +            MLOG("SWX_AA: mode fxaa (the game's FXAA draws; anchor fs=bd7ffdd435c6c3bc)"); }
@@ -15101,34 +15238,35 @@
 +};
 +static int fmt_int_or_ds(MTLPixelFormat f);
 +typedef struct { __strong id<MTLTexture> filt, edges, weights; NSUInteger w, h; MTLPixelFormat fmt; uint64_t fence; } swx_smaa_slot;
-+static void swx_smaa_filter(NvProg *pr) {
-+    if (!swx_smaa_wanted(pr)) return;
-+    if (g_rc_skip || !R.has_rt || R.rt.n != 1 || !R.rt.color[0]) return;   // failure: the original draw runs with the original source
-+    if (S.rast_discard) return;   // no fragments: nothing to filter
++static int swx_smaa_filter(NvProg *pr, const char **why, uint64_t pass, uint64_t src_ser, uint64_t canvas_ser) {
++    *why = "filter-not-run";
++    if (!swx_smaa_wanted(pr)) { *why = "anchor-variant-mismatch"; return 0; }
++    if (g_rc_skip || !R.has_rt || R.rt.n != 1 || !R.rt.color[0]) { *why = "unsupported-render-target"; return 0; }   // failure: the original draw runs with the original source
++    if (S.rast_discard) { *why = "raster-discard"; return 0; }   // no fragments: nothing to filter
 +    // The draw's source: fragment-stage texture slot 0 (bound_tex(1,0)),
 +    // resolved as tex_by_id does. Never a snapshot of the destination.
 +    int istex = 0;
 +    for (int i = 0; i < pr->sh[1]->rf.nb; i++) { const nvn_rbind *b = &pr->sh[1]->rf.b[i];
 +        if (b->kind == NVN_RB_TEX && b->reg == 0) { istex = 1; break; } }
-+    if (!istex) return;   // slot 0 is no plain texture binding here
++    if (!istex) { *why = "scene-texture-binding-absent"; return 0; }   // slot 0 is no plain texture binding here
 +    uint64_t h = bound_tex(1, 0);
 +    int tid = (int)(h & 0xfffff);
 +    uint64_t ser = tid_ser(tid);
-+    if (tid <= 0 || !ser) return;
++    if (tid <= 0 || !ser) { *why = "scene-texture-unbound"; return 0; }
 +    for (int k = 0; k < R.rt.n && k < 8; k++)   // feedback or the pass target itself: leave it alone
-+        if (R.rt.color[k] && R.rt.color[k]->serial == ser) return;
-+    if (R.rt.depth && R.rt.depth->serial == ser) return;
++        if (R.rt.color[k] && R.rt.color[k]->serial == ser) { *why = "scene-canvas-feedback"; return 0; }
++    if (R.rt.depth && R.rt.depth->serial == ser) { *why = "scene-depth-feedback"; return 0; }
 +    os_unfair_lock_lock(&g_rmu);
 +    void *tv = NULL; tex_fast_rid(tid, &tv);
 +    __unsafe_unretained id<MTLTexture> src = (__bridge id<MTLTexture>)tv;
 +    os_unfair_lock_unlock(&g_rmu);
 +    if (fxcas_armed && fxcas_tex && fxcas_scene_ser && fxcas_scene_ser == ser) src = fxcas_tex;   // SWX_FXCAS sharpened first: the filter consumes its output
-+    if (!src || src.textureType != MTLTextureType2D || src.sampleCount != 1) return;
-+    if (src.mipmapLevelCount != 1 || src.arrayLength != 1) return;   // plain 2D only: the temporary matches the source 1:1
-+    if (!src.width || !src.height) return;
-+    if (fmt_int_or_ds(src.pixelFormat) || mtl_fmt_block(src.pixelFormat)) return;   // colour only
++    if (!src || src.textureType != MTLTextureType2D || src.sampleCount != 1) { *why = "scene-not-single-sample-2d"; return 0; }
++    if (src.mipmapLevelCount != 1 || src.arrayLength != 1) { *why = "scene-has-mips-or-array"; return 0; }   // plain 2D only: the temporary matches the source 1:1
++    if (!src.width || !src.height) { *why = "scene-zero-dimensions"; return 0; }
++    if (fmt_int_or_ds(src.pixelFormat) || mtl_fmt_block(src.pixelFormat)) { *why = "scene-format-not-filterable"; return 0; }   // colour only
 +    { MTLTextureSwizzleChannels sw = src.swizzle;
-+      if (sw.red != MTLTextureSwizzleRed || sw.green != MTLTextureSwizzleGreen || sw.blue != MTLTextureSwizzleBlue || sw.alpha != MTLTextureSwizzleAlpha) return; }
++      if (sw.red != MTLTextureSwizzleRed || sw.green != MTLTextureSwizzleGreen || sw.blue != MTLTextureSwizzleBlue || sw.alpha != MTLTextureSwizzleAlpha) { *why = "scene-swizzled"; return 0; } }
 +    // Prepare everything before filtering: library once, pipelines per
 +    // source format, immutable LUTs once, intermediates sized to the source.
 +    // Any failure leaves the original draw with the original source.
@@ -15146,7 +15284,7 @@
 +        if (!lib || !vf || !fe || !fw || !fb || !at || !samp[0] || !samp[1]) { failed = 1; MLOG("[RED] SWX_AA=smaa: cannot load the SMAA library; keeping the original draws"); }
 +        else pso = [NSMutableDictionary dictionary];
 +    }
-+    if (failed) return;
++    if (failed) { *why = "smaa-library-unavailable"; return 0; }
 +    if (!area) {   // immutable LUTs, created once and reused across frames and scales
 +        MTLTextureDescriptor *ad_ = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG8Unorm width:160 height:560 mipmapped:NO];
 +        ad_.usage = MTLTextureUsageShaderRead; ad_.storageMode = MTLStorageModeShared;
@@ -15157,7 +15295,7 @@
 +        search = [g_dev newTextureWithDescriptor:sd_];
 +        if (search) { [search replaceRegion:MTLRegionMake2D(0, 0, 64, 16) mipmapLevel:0 withBytes:k_swx_smaa_search bytesPerRow:64]; res_add(search); }
 +        res_commit();
-+        if (!area || !search) { area = nil; search = nil; MLOG("[RED] SWX_AA=smaa: cannot create the SMAA LUTs; keeping the original draw"); return; }
++        if (!area || !search) { area = nil; search = nil; *why = "smaa-lut-allocation-failed"; MLOG("[RED] SWX_AA=smaa: cannot create the SMAA LUTs; keeping the original draw"); return 0; }
 +    }
 +    static swx_smaa_slot slot[3]; static int next;
 +    uint64_t done = atomic_load(&g_done);
@@ -15167,7 +15305,7 @@
 +            if (!c->filt || c->fence <= done) { sl = c; next = (next + i + 1) % 3; break; } } }
 +    if (!sl) for (int i = 0; i < 3; i++) { swx_smaa_slot *c = &slot[(next + i) % 3];   // else an idle slot of another size, re-created below
 +        if (c->filt && c->fence <= done) { sl = c; next = (next + i + 1) % 3; break; } }
-+    if (!sl) return;   // every slot still in flight: the original draw runs
++    if (!sl) { *why = "all-scratch-slots-in-flight"; return 0; }   // every slot still in flight: the original draw runs
 +    sl->fence = g_fence + 1;   // hold the slot while this submission encodes (even a partial one below)
 +    if (!sl->filt || sl->w != src.width || sl->h != src.height || sl->fmt != src.pixelFormat) {
 +        if (sl->filt) { res_remove(sl->filt); defer_obj_release(sl->filt); }
@@ -15183,7 +15321,7 @@
 +        MTLTextureDescriptor *wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:src.width height:src.height mipmapped:NO];
 +        wd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; wd.storageMode = MTLStorageModePrivate;
 +        sl->weights = [g_dev newTextureWithDescriptor:wd];
-+        if (!sl->filt || !sl->edges || !sl->weights) { sl->filt = nil; sl->edges = nil; sl->weights = nil; return; }
++        if (!sl->filt || !sl->edges || !sl->weights) { sl->filt = nil; sl->edges = nil; sl->weights = nil; *why = "scratch-texture-allocation-failed"; return 0; }
 +        sl->w = src.width; sl->h = src.height; sl->fmt = src.pixelFormat;
 +        res_add(sl->filt); res_add(sl->edges); res_add(sl->weights); res_commit();
 +    }
@@ -15195,7 +15333,7 @@
 +            MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = vf; pd.fragmentFunction = f[i];
 +            pd.colorAttachments[0].pixelFormat = pfmt[i];
 +            NSError *e = nil; id<MTLRenderPipelineState> pst = [g_dev newRenderPipelineStateWithDescriptor:pd error:&e];
-+            if (!pst) { MLOG("[RED] SWX_AA=smaa: cannot create the SMAA pipeline for source format %lu; keeping the original draw", (unsigned long)src.pixelFormat); return; }
++            if (!pst) { *why = "smaa-render-pipeline-failed"; MLOG("[RED] SWX_AA=smaa: cannot create the SMAA pipeline for source format %lu; keeping the original draw", (unsigned long)src.pixelFormat); return 0; }
 +            [a addObject:pst];
 +        }
 +        pso[@(src.pixelFormat)] = pp = a;
@@ -15203,13 +15341,14 @@
 +    // Edge, weights, blend over the source into the temporary. A failure
 +    // before the registration below leaves the original draw untouched.
 +    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // no second active encoder: close the game's pass first (fxcas_run, swx_aa_copy)
++    swx_aa_texdump_capture(src, "source", src_ser, pass, canvas_ser);
 +    id<MTLTexture> tsrc[3] = {src, sl->edges, src};
 +    id<MTLTexture> textra[3] = {nil, area, sl->weights};
 +    id<MTLTexture> tthird[3] = {nil, search, nil};
 +    id<MTLTexture> tout[3] = {sl->edges, sl->weights, sl->filt};
 +    for (int i = 0; i < 3; i++) {
 +        id<MTLBuffer> pb; size_t po = arena_alloc(32, &pb);
-+        if (!pb) return;   // no registration yet: the original draw runs
++        if (!pb) { *why = "uniform-arena-allocation-failed"; return 0; }   // no registration yet: the original draw runs
 +        float *p = (float *)((uint8_t *)pb.contents + po);
 +        p[0] = 1.0f / src.width; p[1] = 1.0f / src.height; p[2] = src.width; p[3] = src.height; p[4] = p[5] = p[6] = p[7] = 0;
 +        MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
@@ -15225,20 +15364,24 @@
 +        [en setViewport:(MTLViewport){0, 0, src.width, src.height}];
 +        [en setScissorRect:(MTLScissorRect){0, 0, src.width, src.height}];
 +        [en setRenderPipelineState:pp[i]]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
++        if (i == 1) swx_aa_texdump_capture(sl->weights, "weights", src_ser, pass, canvas_ser);
++        if (i == 2) swx_aa_texdump_capture(sl->filt, "filtered", src_ser, pass, canvas_ser);
 +    }
 +    args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;   // the next consumer rebinds (barriers in enc_r_begin order the passes)
 +    // Register the filtered texture for this draw's binding only: the same
 +    // one-draw g_fb_src/g_fb_use substitution fb_prepare uses, honoured by
 +    // encode_args on the direct path and on the recorder's replay. The draw
 +    // itself still runs, with its own sampler, coordinates and mask.
-+    if (g_fb_n >= 4) return;   // no room: the original draw runs with the original source
-+    for (int q = 0; q < g_fb_n; q++) if (g_fb_src[q] == src) return;   // feedback already substituted it
++    if (g_fb_n >= 4) { *why = "feedback-substitution-table-full"; return 0; }   // no room: the original draw runs with the original source
++    for (int q = 0; q < g_fb_n; q++) if (g_fb_src[q] == src) { *why = "scene-already-substituted"; return 0; }   // feedback already substituted it
 +    if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != sl->filt) defer_obj_unref(g_fb_use[g_fb_n]);
 +    g_fb_src[g_fb_n] = src; g_fb_use[g_fb_n] = sl->filt; g_fb_rid[g_fb_n] = sl->filt.gpuResourceID._impl; g_fb_n++;
 +    g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1;
++    *why = NULL;
 +    { static int once; if (!once++) MLOG("SWX_AA=smaa: filtered %lux%lu (format %lu) for one draw", (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat); }
++    return 1;
 +}
-+// SWX_AA=off/smaa: the copy pass into the canvas (MNG botw_finish.h bfin_ps /
++// SWX_AA=smaa copy pass into the canvas (MNG botw_finish.h bfin_ps /
 +// bfin_pass). Texel for texel when the sizes match, bilinear otherwise,
 +// RGB only (writeMask, like the game draw's mask 0x7; the alpha stays),
 +// honouring the canvas's pending clear (done by the pass, as MNG does).
@@ -15287,76 +15430,105 @@
 +    if (clear) R.clear_c[0] = 0;   // done by the pass
 +    return 1;
 +}
-+// SWX_AA=off/smaa at the anchored draw: validate it MNG-style and run the copy
++// SWX_AA=smaa at the anchored draw: validate it MNG-style and run the copy
 +// pass instead of the game draw. Returns 1 when the draw is not to be
 +// encoded (like MNG's botw_fin_upscale). fxaa returns 0 before any check:
-+// the draw encodes as shipped.
++// the draw encodes as shipped. In off/smaa, recognized native-FXAA fragment
++// variants use a submission-local c[3].xy override so a validation/filter
++// failure cannot re-enable the native pass accidentally.
 +static int swx_aa_hook(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
 +    int mode = swx_aa_mode();
-+    if (mode == SWX_AA_FXAA) return 0;
-+    if (g_rc_skip || !R.has_rt || R.rt.n != 1 || !R.rt.color[0] || S.rast_discard) return 0;   // one plain 2D canvas: the game draw runs otherwise
-+    if (!swx_aa_anchor(pr)) return 0;   // not the anchor draw: silent, most draws land here
++    if (mode == SWX_AA_FXAA || mode == SWX_AA_OFF) return 0;  // fxaa/off preserve the game's composite (off only changes verified c[3].xy)
++    if (!swx_aa_anchor(pr)) return 0;
++    uint64_t pass = g_stat_pass + !g_enc;
++    uint64_t canvas_ser = R.has_rt && R.rt.n > 0 && R.rt.color[0] ? R.rt.color[0]->serial : 0;
++    const char *why = NULL;
++#define SWX_AA_FALLBACK(tag) do { PD("F %llu mode=smaa reason=%s action=preserve-native-draw canvas_ser=%llu", pass, tag, (unsigned long long)canvas_ser); return 0; } while (0)
++    if (g_rc_skip || !R.has_rt || R.rt.n != 1 || !R.rt.color[0] || S.rast_discard) SWX_AA_FALLBACK("unsupported-render-target-or-raster-discard");
 +    int prim = dw ? dw->prim : di ? di->prim : -1, count = dw ? (int)dw->count : di ? (int)di->count : -1;
-+    if (prim != 4 || count != 3 || !di) return 0;   // not the fullscreen triangle: silent
-+    const char *want = mode == SWX_AA_OFF ? "off" : "smaa";
++    if (prim != 4 || count != 3 || !di) SWX_AA_FALLBACK("not-fullscreen-triangle");
 +    id<MTLTexture> dst = tex_mtl(R.rt.color[0]);
-+    if (!dst || dst.textureType != MTLTextureType2D || dst.sampleCount != 1) { static int d; if (!d++) MLOG("SWX_AA=%s: the canvas is not a plain 2D target: keeping the game's draw", want); return 0; }
-+    if (R.rt.has_cview[0] && ((R.rt.cview[0].set_levels && R.rt.cview[0].base_level) || (R.rt.cview[0].set_layers && R.rt.cview[0].min_layer))) {
-+        static int d; if (!d++) MLOG("SWX_AA=%s: the canvas is a view of another level or layer: keeping the game's draw", want); return 0; }
-+    if (S.color.blend_en & 1) { static int d; if (!d++) MLOG("SWX_AA=%s: the anchor draw blends (%#x): keeping the game's draw", want, S.color.blend_en); return 0; }
-+    if ((S.chmask.mask & 0xf) != 0x7) { static int d; if (!d++) MLOG("SWX_AA=%s: the anchor draw writes channels %#x, not RGB-only: keeping the game's draw", want, S.chmask.mask & 0xf); return 0; }
-+    if (S.has_vp && (S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != (float)dst.width || S.vp[0][3] != (float)dst.height)) {
-+        static int d; if (!d++) MLOG("SWX_AA=%s: the viewport is not the full canvas: keeping the game's draw", want); return 0; }
-+    if (!scissor_full(R.rt.color[0], &R.rt.cview[0], R.rt.has_cview[0])) { static int d; if (!d++) MLOG("SWX_AA=%s: the scissor is not the full canvas: keeping the game's draw", want); return 0; }
-+    id<MTLTexture> src = nil;
-+    if (fxcas_armed && fxcas_tex && fxcas_scene_ser) src = fxcas_tex;   // SWX_FXCAS sharpened first: the copy consumes its output
++    if (!dst || dst.textureType != MTLTextureType2D || dst.sampleCount != 1) SWX_AA_FALLBACK("canvas-not-single-sample-2d");
++    if (R.rt.has_cview[0] && ((R.rt.cview[0].set_levels && R.rt.cview[0].base_level) || (R.rt.cview[0].set_layers && R.rt.cview[0].min_layer))) SWX_AA_FALLBACK("canvas-subresource-view");
++    if (S.color.blend_en & 1) SWX_AA_FALLBACK("anchor-blending-enabled");
++    if ((S.chmask.mask & 0xf) != 0x7) SWX_AA_FALLBACK("anchor-write-mask-not-rgb");
++    if (S.has_vp && (S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != (float)dst.width || S.vp[0][3] != (float)dst.height)) SWX_AA_FALLBACK("viewport-not-full-canvas");
++    if (!scissor_full(R.rt.color[0], &R.rt.cview[0], R.rt.has_cview[0])) SWX_AA_FALLBACK("scissor-not-full-canvas");
++    id<MTLTexture> src = nil; uint64_t src_ser = 0;
++    if (fxcas_armed && fxcas_tex && fxcas_scene_ser) { src = fxcas_tex; src_ser = fxcas_scene_ser; }  // SWX_FXCAS sharpens first
 +    else {
-+        int tid = (int)(bound_tex(1, 0) & 0xfffff);
-+        uint64_t ser = tid_ser(tid);
-+        if (tid <= 0 || !ser) { static int d; if (!d++) MLOG("SWX_AA=%s: the anchor draw has no scene texture: keeping the game's draw", want); return 0; }
-+        if (R.rt.color[0]->serial == ser || (R.rt.depth && R.rt.depth->serial == ser)) {
-+            static int d; if (!d++) MLOG("SWX_AA=%s: the scene is the canvas itself: keeping the game's draw", want); return 0; }
-+        os_unfair_lock_lock(&g_rmu);   // the registration tables may be grown or rewritten by the game thread; released before the copy pass encodes
-+        void *tv = NULL; tex_fast_rid(tid, &tv);
-+        __unsafe_unretained id<MTLTexture> st = (__bridge id<MTLTexture>)tv;
-+        os_unfair_lock_unlock(&g_rmu);
++        int tid = (int)(bound_tex(1, 0) & 0xfffff); src_ser = tid_ser(tid);
++        if (tid <= 0 || !src_ser) SWX_AA_FALLBACK("scene-texture-unbound");
++        if (R.rt.color[0]->serial == src_ser || (R.rt.depth && R.rt.depth->serial == src_ser)) SWX_AA_FALLBACK("scene-canvas-feedback");
++        os_unfair_lock_lock(&g_rmu); void *tv = NULL; tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> st = (__bridge id<MTLTexture>)tv; os_unfair_lock_unlock(&g_rmu);
 +        src = st;
-+        if (!src || src.textureType != MTLTextureType2D || src.sampleCount != 1 || src.mipmapLevelCount != 1 || src.arrayLength != 1 || !src.width || !src.height) {
-+            static int d; if (!d++) MLOG("SWX_AA=%s: the scene is not a plain 2D texture: keeping the game's draw", want); return 0; }
-+        if (fmt_int_or_ds(src.pixelFormat) || mtl_fmt_block(src.pixelFormat)) {
-+            static int d; if (!d++) MLOG("SWX_AA=%s: the scene format %lu is not filterable colour: keeping the game's draw", want, (unsigned long)src.pixelFormat); return 0; }
++        if (!src || src.textureType != MTLTextureType2D || src.sampleCount != 1 || src.mipmapLevelCount != 1 || src.arrayLength != 1 || !src.width || !src.height) SWX_AA_FALLBACK("scene-not-plain-2d");
++        if (fmt_int_or_ds(src.pixelFormat) || mtl_fmt_block(src.pixelFormat)) SWX_AA_FALLBACK("scene-format-not-filterable");
 +        MTLTextureSwizzleChannels sw = src.swizzle;
-+        if (sw.red != MTLTextureSwizzleRed || sw.green != MTLTextureSwizzleGreen || sw.blue != MTLTextureSwizzleBlue || sw.alpha != MTLTextureSwizzleAlpha) {
-+            static int d; if (!d++) MLOG("SWX_AA=%s: the scene is swizzled: keeping the game's draw", want); return 0; }
++        if (sw.red != MTLTextureSwizzleRed || sw.green != MTLTextureSwizzleGreen || sw.blue != MTLTextureSwizzleBlue || sw.alpha != MTLTextureSwizzleAlpha) SWX_AA_FALLBACK("scene-swizzled");
 +    }
 +    id<MTLTexture> out = src;
 +    if (mode == SWX_AA_SMAA) {
-+        int before = g_fb_n; swx_smaa_filter(pr);   // the 3-pass filter registers the temporary as this draw's binding only
++        int before = g_fb_n;
++        if (!swx_smaa_filter(pr, &why, pass, src_ser, canvas_ser)) SWX_AA_FALLBACK(why ?: "smaa-filter-failed");
 +        id<MTLTexture> filt = nil;
 +        if (g_fb_n > before && g_fb_src[g_fb_n - 1] == src) filt = g_fb_use[g_fb_n - 1];
-+        if (!filt) return 0;   // zero passes (slots in flight, no room): the original draw runs
-+        g_fb_src[g_fb_n - 1] = nil; g_fb_use[g_fb_n - 1] = nil; g_fb_rid[g_fb_n - 1] = 0; g_fb_n = before;   // consumed by the copy below, not by the skipped draw
++        if (!filt) SWX_AA_FALLBACK("filtered-output-not-registered");
++        g_fb_src[g_fb_n - 1] = nil; g_fb_use[g_fb_n - 1] = nil; g_fb_rid[g_fb_n - 1] = 0; g_fb_n = before;
 +        out = filt;
 +    }
-+    if (!swx_aa_copy(out, dst)) return 0;   // logged where it failed, the arm intact: the game draw runs (sharpened when armed)
-+    if (fxcas_armed) { fxcas_armed = 0; fxcas_tex = nil; fxcas_scene_ser = 0; fxcas_dw = NULL; fxcas_di = NULL; args_dirty(1); }   // one-shot consumed here, not by the skipped draw
-+    { static int once; if (!once++) MLOG("SWX_AA=%s: %s %lux%lu drawn into the canvas %lux%lu %s; the game draw skipped", want, mode == SWX_AA_SMAA ? "filtered scene" : "scene",
-+        (unsigned long)out.width, (unsigned long)out.height, (unsigned long)dst.width, (unsigned long)dst.height,
-+        out.width == dst.width && out.height == dst.height ? "texel for texel" : "bilinear"); }
-+    PD("Z %llu draw skipped: SWX_AA=%s copy pass ran", g_stat_pass + !g_enc, want);
++    if (!swx_aa_copy(out, dst)) SWX_AA_FALLBACK("canvas-copy-pipeline-or-encoder-failed");
++    if (fxcas_armed) { fxcas_armed = 0; fxcas_tex = nil; fxcas_scene_ser = 0; fxcas_dw = NULL; fxcas_di = NULL; args_dirty(1); }
++    PD("Z %llu mode=smaa source_ser=%llu canvas_ser=%llu source=%lux%lu canvas=%lux%lu draw-skipped=1", pass, (unsigned long long)src_ser, (unsigned long long)canvas_ser,
++       (unsigned long)src.width, (unsigned long)src.height, (unsigned long)dst.width, (unsigned long)dst.height);
 +    return 1;
++#undef SWX_AA_FALLBACK
 +}
  static void draw_(const p_draw *dw, const p_draw_idx *di);
  // Diagnostic switch for measuring an upper bound DM_NVN_SKIP_FS=<fragment key>[,<fragment key>...] (none by default): drops all draws of these fragment shaders (the picture will be wrong;
  // only used in real-device ABA to measure "how much GPU time this class of draws is worth in total"), and the same-process alternating measurement's phase (DM_NVN_UB). Task / mesh
-@@ -17429,6 +32764,10 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
+@@ -17429,6 +32850,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
      if (g_enc && g_vis_counting && g_vis_need && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
      if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
      fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-+    // SWX_AA=off/smaa: the copy pass drew the (filtered) scene into the
-+    // canvas already; the game draw is skipped. fxaa (and any failure
-+    // above) encodes the draw as shipped.
++    // SWX_AA=off/smaa: SMAA replaces the anchored composite; off preserves it with FXAA thresholds neutralized.
 +    if (swx_aa_hook(pr, dw, di)) return;
      if (R.has_sc && !g_enc && !S.rast_discard) {
          NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
          long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+@@ -19713,6 +35136,23 @@ void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
+         if (!seen) [g_td_list addObject:@[t, @(ser), @(lv), @(sl)]];
+     }
+ }
++static void swx_aa_texdump_capture(id<MTLTexture> t, const char *role, uint64_t source_ser, uint64_t pass, uint64_t canvas_ser) {
++    if (!passdump() || !t || !g_td_list || g_td_done || g_td_frame < 0 || g_td_frame == LONG_MAX || (long)atomic_load(&g_cur_frame) != g_td_frame) return;
++    int rid = !strcmp(role, "source") ? 1 : !strcmp(role, "weights") ? 2 : 3;
++    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:t.pixelFormat width:t.width height:t.height mipmapped:NO];
++    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget; d.storageMode = MTLStorageModePrivate;
++    id<MTLTexture> snap = [g_dev newTextureWithDescriptor:d];
++    if (!snap) { MLOG("[pass] F%llu AA TEX pass=%llu role=%s reason=snapshot-allocation-failed", (unsigned long long)g_td_frame, (unsigned long long)pass, role); return; }
++    res_add(snap);
++    id<MTL4ComputeCommandEncoder> e = blit();
++    enc_b_copy_texture(e, t, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(t.width,t.height,1), snap, 0, 0, MTLOriginMake(0,0,0));
++    enc_b_end(e); g_blit = nil;
++    uint64_t id = UINT64_C(0x5357414100000000) | ((atomic_load(&g_cur_frame) & UINT64_C(0x0fffffff)) << 2) | (uint64_t)rid;
++    [g_td_list addObject:@[snap, @(id), @0, @0, @(pass), @(rid)]];
++    MLOG("[pass] F%llu AA TEX pass=%llu role=%s serial=%llu source_ser=%llu canvas_ser=%llu %lux%lu fmt=%lu", (unsigned long long)g_td_frame,
++         (unsigned long long)pass, role, (unsigned long long)id, (unsigned long long)source_ser, (unsigned long long)canvas_ser,
++         (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
++}
+ void td_note_layer(id<MTLTexture> t, uint64_t ser, NSUInteger lv, NSUInteger sl) {   // a slice-merged pass's other layers (see g_sm_plan)
+     if (g_td_frame < 0 || g_td_done || g_td_frame == LONG_MAX || (long)atomic_load(&g_cur_frame) != g_td_frame || !t) return;
+     if (g_td_layers) td_layer_count(t, lv);
+@@ -19848,7 +35288,10 @@ static void td_dump(void) {
+         [en setRenderPipelineState:ps]; [en setFragmentTexture:v atIndex:0]; [en setFragmentSamplerState:sp atIndex:0];
+         [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [en endEncoding]; [cb commit]; [cb waitUntilCompleted];
+         char path[1024]; snprintf(path, sizeof path, g_td_path, (int)(ser * 100 + sl * 10 + lv));
+-        if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
++        if (e.count > 5) { static const char *roles[] = {"?", "source", "weights", "filtered"};
++            snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
++            int rid = [e[5] intValue]; char tail[96]; snprintf(tail, sizeof tail, "_SWX_AA_%s_%llu%s", rid > 0 && rid < 4 ? roles[rid] : "unknown", (unsigned long long)ser, ext); strlcat(path, tail, sizeof path); }
++        else if (e.count > 4) { snprintf(path, sizeof path, g_td_path, 0); char *dot = strrchr(path, '.'); char ext[16] = ""; if (dot) { strlcpy(ext, dot, sizeof ext); *dot = 0; }
+             char tail[64]; snprintf(tail, sizeof tail, "_s%03d_%llu_%lu%s", [e[4] intValue], (unsigned long long)ser, (unsigned long)lv, ext); strlcat(path, tail, sizeof path); }   // TEXSNAP copy
+         MLOG("[texdump] ser=%llu lv=%lu layer %lu format %lu %lux%lu", ser, (unsigned long)lv, (unsigned long)sl, (unsigned long)t.pixelFormat, (unsigned long)w, (unsigned long)h);
+         shot(o, path, 0, NULL);

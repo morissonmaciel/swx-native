@@ -182,7 +182,7 @@ enabled = false
 flag = "SWX_AA"
 games = ["01007EF00011E000"]
 platforms = ["mac", "ios"]
-note = "BOTW anchor draw hook + copy pass + 3-pass SMAA (LUTs)"
+note = "BOTW anchor; off preserves composite and neutralizes verified effective CBUF; SMAA copy + 3-pass filter"
 
 [[patch]]
 path = "SWX_AA/smaa.metal.patch"
